@@ -22,8 +22,8 @@
 # reads them straight back out of the freshly linked ELF -- trustworthy
 # once the compiled bytes are proven byte-identical).
 #
-# Usage:
-#   python tools/split_confidence_loop.py --source GM8E01_00 --target GM8P01_00
+# Usage (run from the project's root directory):
+#   python /path/to/split_confidence_loop.py --source GM8E01_00 --target GM8P01_00
 ###
 
 from __future__ import annotations
@@ -38,8 +38,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = SCRIPT_DIR.parent
+ROOT_DIR = Path.cwd()
 EXE = ".exe" if platform.system() == "Windows" else ""
 
 ENTRY_RE = re.compile(r"^(?P<section>\S+)\s+start:0x(?P<start>[0-9A-Fa-f]+)\s+end:0x(?P<end>[0-9A-Fa-f]+)")
@@ -1148,6 +1147,118 @@ def resolve_batch_link_order(
 MAX_CONFLICT_RETRIES = 450
 
 
+def trim_to_confirmed_functions(unit: dict, lines: list[str], bad_section_names: set[str]) -> list[str] | None:
+    """A rejected candidate's *section*-level fuzzy score can hide that most
+    of its individual functions actually compiled byte-identical -- dtk's
+    report carries a separate fuzzy_match_percent per function, not just the
+    section aggregate main() otherwise checks. Anchor on the largest
+    confirmed (100%) function and grow outward through however many
+    neighboring functions are *also* confirmed, stopping at the first one
+    that isn't (or has no score at all -- e.g. one the matcher never placed
+    a target for). The result is a smaller .text boundary this session has
+    direct build evidence for, not a static heuristic's guess -- it still
+    gets verified the same way as everything else, via a follow-up build.
+
+    Sections other than .text are dropped unless they were already
+    confirmed (i.e. not in `bad_section_names`): there's no per-symbol
+    equivalent of this signal for data, so a boundary this method can't
+    back up isn't carried along for the ride.
+
+    Returns None if there's no .text range, no confirmed function to anchor
+    on, or the trim wouldn't actually shrink anything."""
+    text_range = None
+    for line in lines:
+        r = parse_range(line)
+        if r and r[0] == ".text":
+            text_range = (r[1], r[2])
+            break
+    if text_range is None:
+        return None
+    start, end = text_range
+    funcs = []
+    for f in unit.get("functions", []):
+        va = int(f["metadata"]["virtual_address"])
+        size = int(f["size"])
+        if start <= va < end and size > 0:
+            funcs.append((va, size, f.get("fuzzy_match_percent")))
+    funcs.sort()
+    if not funcs:
+        return None
+    confirmed_indices = [i for i, (_, _, pct) in enumerate(funcs) if pct == 100.0]
+    if not confirmed_indices:
+        return None
+    anchor = max(confirmed_indices, key=lambda i: funcs[i][1])
+    lo = anchor
+    while lo > 0 and funcs[lo - 1][2] == 100.0:
+        lo -= 1
+    hi = anchor
+    while hi + 1 < len(funcs) and funcs[hi + 1][2] == 100.0:
+        hi += 1
+    new_start, new_end = funcs[lo][0], funcs[hi][0] + funcs[hi][1]
+    if (new_start, new_end) == (start, end) or new_start >= new_end:
+        return None
+    trimmed = [f"\t.text       start:{new_start:#010x} end:{new_end:#010x}"]
+    for line in lines:
+        r = parse_range(line)
+        if r and r[0] != ".text" and r[0] not in bad_section_names:
+            trimmed.append(line)
+    return trimmed
+
+
+def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf):
+    """Classifies one staged-and-built candidate against `by_path` (a
+    report's units, keyed by source path -- see main()). Returns (bucket,
+    reason, byte_confirmed, trim): bucket is 'promoted', 'rejected', or
+    'blocked'; reason is None for 'promoted'; byte_confirmed is True only
+    for a 'promoted' unit confirmed via direct byte comparison rather than
+    dtk's fuzzy score; trim is a smaller, build-evidenced boundary worth a
+    retry (see trim_to_confirmed_functions) when bucket is 'rejected' over a
+    .text/.init mismatch specifically, else None. This is the same logic
+    main() always ran inline, pulled out so a trimmed retry candidate can be
+    classified through it too instead of duplicating the rules."""
+    unit = by_path.get(name)
+    if unit is None:
+        return "rejected", "not found in the rebuilt report", False, None
+    bad = [s for s in unit.get("sections") or [] if s.get("fuzzy_match_percent", 0.0) < 100.0]
+    if not bad:
+        return "promoted", None, False, None
+    worst = min(bad, key=lambda s: s.get("fuzzy_match_percent", 0.0))
+    pct = worst.get("fuzzy_match_percent", 0.0)
+    reason = f"{worst['name']} only {pct:.2f}% fuzzy"
+
+    def section_range(s):
+        start = int(s["metadata"]["virtual_address"])
+        return start, start + int(s["size"])
+
+    # See docs/match_learnings.md, "vtable near-miss": bordering unclaimed
+    # content is only a boundary artifact (not a real mismatch) in a data
+    # section, which holds not-yet-relocated pointer bytes pre-link -- .text
+    # holds real instructions, so a mismatch there is never that, and it's
+    # excluded outright regardless of what borders it. That's also exactly
+    # the shape trim_to_confirmed_functions can do something about.
+    if any(s["name"] in (".text", ".init") for s in bad):
+        bad_names = {s["name"] for s in bad}
+        trim = trim_to_confirmed_functions(unit, lines, bad_names)
+        return "rejected", reason, False, trim
+    elif all(neighbors.borders_unclaimed(*section_range(s)) for s in bad):
+        own_ranges = {r[0]: (r[1], r[2] - r[1]) for r in (parse_range(l) for l in lines) if r}
+        confirmed = (
+            orig_dol is not None
+            and linked_elf is not None
+            and all(
+                (rng := own_ranges.get(s["name"])) is not None
+                and (target_bytes := orig_dol.read_bytes(*rng)) is not None
+                and target_bytes == linked_elf.read_bytes(*rng)
+                for s in bad
+            )
+        )
+        if confirmed:
+            return "promoted", None, True, None
+        return "blocked", f"{reason} -- borders unclaimed content, not a real mismatch", False, None
+    else:
+        return "rejected", reason, False, None
+
+
 def stage_and_build(splits_path, header, existing_blocks, existing_order, candidates, original_text, version):
     """Stages `candidates` on top of `existing_blocks` and builds. The DOL
     split step catches things the address-overlap filter can't -- e.g. a
@@ -1489,71 +1600,73 @@ def main():
         rejected: list[tuple[str, str]] = []
         blocked: list[tuple[str, str]] = []
         byte_confirmed: list[str] = []
+        trim_candidates: list[tuple[str, list[str]]] = []
+        trim_origin: dict[str, str] = {}
+        candidates_by_name = dict(candidates)
         for name, lines in built:
-            unit = by_path.get(name)
-            if unit is None:
-                rejected.append((name, "not found in the rebuilt report"))
-                continue
-            bad = [s for s in unit.get("sections") or [] if s.get("fuzzy_match_percent", 0.0) < 100.0]
-            if not bad:
+            bucket, reason, was_byte_confirmed, trim = classify_built_unit(
+                name, lines, by_path, neighbors, orig_dol, linked_elf
+            )
+            if bucket == "promoted":
                 promoted.append(name)
-                continue
-            worst = min(bad, key=lambda s: s.get("fuzzy_match_percent", 0.0))
-            pct = worst.get("fuzzy_match_percent", 0.0)
-            reason = f"{worst['name']} only {pct:.2f}% fuzzy"
-            # If every mismatched section borders a symbol dtk invented
-            # because nothing claims that address yet, this isn't a real
-            # content difference -- it's the comparison bleeding across a
-            # seam with unclaimed content (see docs/match_learnings.md,
-            # "vtable near-miss"). Re-try later once the neighbor is named,
-            # rather than permanently blacklisting a candidate that may
-            # already be correct.
-            def section_range(s):
-                start = int(s["metadata"]["virtual_address"])
-                return start, start + int(s["size"])
-
-            # Bordering unclaimed content turns out to be true almost
-            # everywhere at this stage of the project -- most of the binary
-            # still is unclaimed -- so it's nowhere near specific enough on
-            # its own; CSortedLists.cpp's genuine 41.95% .text mismatch
-            # borders one too. What actually distinguishes the vtable cases
-            # is that the bleed is only physically possible in a data
-            # section: those hold zeroed, not-yet-relocated pointer bytes
-            # pre-link, so a size mismatch at the boundary reads as a
-            # trailing content diff. .text holds real instructions -- a
-            # mismatch there is never a boundary artifact, so it's excluded
-            # outright regardless of what borders it.
-            if any(s["name"] in (".text", ".init") for s in bad):
-                rejected.append((name, reason))
-            elif all(neighbors.borders_unclaimed(*section_range(s)) for s in bad):
-                # Strong heuristic, not proof -- confirm directly against
-                # our own declared range (not the report's, which may
-                # already reflect the target's bled-into size): the real
-                # retail DOL bytes and the just-linked ELF's bytes for
-                # that exact range, byte for byte. A BSS section (or any
-                # range Elf/Dol can't resolve) makes this None, and the
-                # candidate falls back to the existing wait-for-a-neighbor
-                # treatment unchanged.
-                # (start, length) -- read_bytes takes a length, not an end
-                # address; passing (start, end) straight through would ask
-                # for gigabytes of "length" and silently read nothing real.
-                own_ranges = {r[0]: (r[1], r[2] - r[1]) for r in (parse_range(l) for l in lines) if r}
-                confirmed = orig_dol is not None and all(
-                    (rng := own_ranges.get(s["name"])) is not None
-                    and (target_bytes := orig_dol.read_bytes(*rng)) is not None
-                    and target_bytes == linked_elf.read_bytes(*rng)
-                    for s in bad
-                )
-                if confirmed:
+                if was_byte_confirmed:
                     byte_confirmed.append(name)
-                    promoted.append(name)
-                else:
-                    blocked.append((name, f"{reason} -- borders unclaimed content, not a real mismatch"))
+            elif bucket == "blocked":
+                blocked.append((name, reason))
+            elif trim is not None:
+                trim_candidates.append((name, trim))
+                trim_origin[name] = reason
             else:
                 rejected.append((name, reason))
 
         final_blocks = dict(existing_blocks)
-        candidates_by_name = dict(candidates)
+        for name in promoted:
+            final_blocks[name] = candidates_by_name[name]
+        write_splits(splits_path, header, final_blocks, existing_order + promoted)
+
+        # A section-level fuzzy score can hide that most of a rejected
+        # candidate's own functions actually compiled byte-identical (see
+        # trim_to_confirmed_functions) -- retry each one with its boundary
+        # shrunk to just the confirmed-matching run. Verified the same way
+        # as everything else, via a real build, not assumed correct because
+        # the per-function data looked good.
+        if trim_candidates:
+            print(
+                f"\n{len(trim_candidates)} rejected unit(s) had at least one function confirmed "
+                "byte-identical -- retrying with the boundary shrunk to just that confirmed run:"
+            )
+            for name, lines in trim_candidates:
+                print(f"  ? {name} (was: {trim_origin[name]})")
+            retry_existing_blocks = dict(final_blocks)
+            retry_report, retry_built, retry_excluded = stage_and_build(
+                splits_path, header, retry_existing_blocks, existing_order + promoted,
+                trim_candidates, original_text, args.target,
+            )
+            excluded += retry_excluded
+            retry_by_path = {
+                strip_source_root(u["metadata"]["source_path"]): u
+                for u in retry_report["units"]
+                if u.get("metadata", {}).get("source_path")
+            }
+            for name, lines in retry_built:
+                candidates_by_name[name] = lines
+                # orig_dol/linked_elf reflect the *first* build, now stale
+                # for a byte comparison against this retry's own link --
+                # pass None rather than risk confirming against the wrong
+                # bytes. Worst case a genuinely-confirmable retry candidate
+                # is undercounted as rejected instead, not wrongly promoted.
+                bucket, reason, was_byte_confirmed, _ = classify_built_unit(
+                    name, lines, retry_by_path, neighbors, None, None
+                )
+                if bucket == "promoted":
+                    promoted.append(name)
+                    if was_byte_confirmed:
+                        byte_confirmed.append(name)
+                elif bucket == "blocked":
+                    blocked.append((name, reason))
+                else:
+                    rejected.append((name, f"auto-trimmed boundary still {reason} (was: {trim_origin[name]})"))
+            final_blocks = dict(existing_blocks)
         for name in promoted:
             final_blocks[name] = candidates_by_name[name]
         write_splits(splits_path, header, final_blocks, existing_order + promoted)
