@@ -1,5 +1,13 @@
 # Investigation: precise link-order cycle resolution
 
+> **2026-09-09 audit:** this is a historical investigation of the old loop, not
+> a verified explanation of every current cycle. The new `discover_splits.py`
+> uses build-driven batch bisection and does not use this mass-drop heuristic.
+> Its code-only proposals avoid speculative data-order constraints. A retail hash
+> validates compiled candidates only when they are actual source link inputs;
+> see [validation_audit.md](validation_audit.md). Prior claims that all retained
+> candidates were byte-verified have been withdrawn.
+
 ## Context
 
 `split_confidence_loop.py` stages a batch of candidate unit splits, then pre-filters
@@ -18,13 +26,13 @@ is acyclic. Against a component this size, that means dropping dozens to hundred
 of candidates — most of which are very likely *not* actually responsible for the
 cycle.
 
-## Why the cycle is this large (already root-caused, don't re-derive)
+## Prior explanation of the large cycle (recheck against current inputs)
 
-This is a genuine correctness signal, not a graph-modeling bug. Two things worth
-knowing before starting:
+An SCC shows contradictory graph constraints; it does not identify which
+constraint or candidate is wrong, or prove the graph model correct:
 
-- mwld places every TU's sections in the same relative order across *all*
-  sections (it links whole object files in sequence). So if a candidate's
+- Ordinary object sections generally follow link order; linker-packed common
+  BSS must be handled separately. If a candidate's
   boundary is even slightly mis-attributed in one section, you get a direct
   contradiction with its true position in another section — a cycle.
 - One considered-and-rejected theory: that edges between candidates separated by
@@ -34,7 +42,7 @@ knowing before starting:
   to link somewhere between the two candidates, so "A before B" remains a real
   constraint regardless of gap size. Confirmed by sampling actual edges: 452 of
   1748 edges in the batch had gaps >100 bytes (worst: 22,112 bytes), and none of
-  that changes the constraint's validity. Don't spend time re-checking this.
+  that changes the constraint's validity, provided those edges model real ordering.
 - The real explanation: most of the candidate pool forms one long, nearly-total
   chain (address order roughly tracks NTSC declaration order across every
   section). A single backward edge dropped into that chain doesn't just conflict
@@ -76,13 +84,15 @@ only the drop-order heuristic.
 
 ### How to validate
 
-1. Reproduce the 674-node component: from `decomp/prime`, with
+1. Try to reproduce the historical component using the read-only snippet below.
+   Its size depends on the exact proposals, existing splits and tool revision.
+   For an actual old-loop build trial, from `decomp/prime`, with
    `build/GM8P01_00/split_confidence_skip.txt` empty (or close to it) and
    `config/GM8P01_00/splits.txt` at its current state, run:
    ```
-   python /path/to/split_confidence_loop.py --target GM8P01_00 --limit 30
+   python /path/to/split_confidence_loop.py --target GM8P01_00 --dtk /path/to/development/dtk
    ```
-   and confirm a large cyclic component again (or adapt the standalone repro
+   inspect the cyclic component (or adapt the standalone repro
    snippet below, which doesn't require a real build — it only needs
    `match_candidates.txt` from a `dtk match` run and the current
    `splits.txt`/`symbols.txt`).

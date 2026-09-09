@@ -1,64 +1,98 @@
 # dtk-version-matching
 
-Migrates unit splits and symbol names from a fully-matched version of a
-[decomp-toolkit](https://github.com/encounter/decomp-toolkit)/`dtk-template`
-project to another version of the same game (e.g. NTSC → PAL) by using a real,
-hash-checked build as the oracle: it stages `dtk match`'s proposed split
-boundaries, rebuilds, and keeps only the ones that come out byte-identical —
-reverting the rest. See `docs/match_learnings.md` in decomp-toolkit ("The hash
-check is the only real oracle") for why this is the only trustworthy gate.
+Automatically transfers symbols and split proposals between versions of a
+decomp-toolkit / dtk-template game project, then tests the proposals by compiling.
+The source version can be partially matched. Development currently targets
+Metroid Prime `GM8E01_00` (NTSC 0-00) → `GM8P01_00` (PAL).
 
-Requires a `dtk-template`-shaped project: `config/<version>/{config.yml,splits.txt,symbols.txt}`,
-`orig/<version>/sys/main.dol`, `configure.py`, and a `build/tools/dtk` binary
-(run `configure.py` once to fetch it, or build decomp-toolkit yourself and
-point `--dtk` at it). Both scripts read `Path.cwd()` as the project root, so
-run them **from the project's root directory**, not from wherever this repo
-is checked out.
+## What the measurements mean
 
-## `split_confidence_loop.py`
+- **Split coverage:** a target address range is assigned to a source file. This
+  alone says nothing about whether that file compiles or matches.
+- **Objdiff matched code:** bytes in functions classified as matching by the
+  project's objdiff configuration. A partly finished file can contribute useful
+  matches. Relocation comparison policy matters; this is not raw byte equality.
+- **Source-linked code:** source objects enabled in the build configuration.
+  `metadata.complete` reflects this setting, not a byte comparison.
+- **Verified source linkage:** the candidate compiled objects are actual inputs
+  to the linker, and the resulting DOL equals retail. This is the whole-file gate.
 
-Run one promotion round against a target version:
+A retail hash with a candidate still linked from extracted original objects does
+**not** prove that candidate's source matches. The former workflow and docs made
+this mistake, including a circular "direct byte comparison" fallback. See
+[the audit](docs/validation_audit.md).
 
+## Requirements
+
+Run the scripts **from the game project's root**, not this repository. They use
+`Path.cwd()` and expect `configure.py`, `tools/project.py`, Ninja,
+`config/<version>/{config.yml,splits.txt,symbols.txt}`, extracted retail inputs,
+and the project's compiler tools. Python 3.9 or later is supported.
+
+Use a DTK build containing `match --splits` and `symbols rename`. A downloaded
+release is not guaranteed to have these development features. Pass an absolute
+`--dtk` path: both matching and configure/Ninja then use that binary. Do not copy a
+development executable over a Ninja-managed downloaded tool.
+
+Run only one migration/build process per game checkout; they share configuration,
+build files, and reports.
+
+## Discover useful code splits
+
+```sh
+python /path/to/discover_splits.py --target GM8P01_00 --dtk /path/to/dtk
 ```
-python /path/to/split_confidence_loop.py --target GM8P01_00
+
+`--source` defaults to `GM8E01_00`. `--batch-size` defaults to 40; `--limit N`
+bounds the number of proposals examined. This script:
+
+1. Checks the baseline build and generates fresh DTK proposals and confident renames.
+2. Stages code ranges, including proposed fragments and extensions to existing
+   partial code splits. Existing data ranges are preserved.
+3. Compiles and measures each candidate, retaining it only if it adds matched
+   code without reducing another existing unit's matched code.
+4. Requires a retail build check for every accepted batch. This checks split
+   integrity; candidates remain disabled as whole source files.
+5. Bisects failing batches, rebuilds the final state, and records commands and
+   results under `build/<target>/discovery/`.
+
+One rejected proposal does not permanently blacklist a source file. A different
+boundary, neighboring split, symbol map, or tool revision can change its result.
+An exception or interrupt restores the input splits and symbols and attempts to
+rebuild them. Process termination or power loss cannot run Python cleanup.
+
+## Verify whole source files
+
+```sh
+python /path/to/verify_source_units.py --target GM8P01_00 --dtk /path/to/dtk
 ```
 
-- `--source` — the version with known names (default `GM8E01_00`)
-- `--target` — the version to propose and verify new splits for (required)
-- `--limit N` — try at most N candidates this round, highest-confidence first;
-  omit to try everything. Keep this modest (20-30) — a very large batch tends
-  to produce one huge link-order-cyclic component that gets pre-filtered down
-  to almost nothing (see `docs/link_order_cycle_investigation.md`)
-- `-c/--min-confidence` — passed through to `dtk match`
-- `--dtk PATH` — dtk binary to use (default `build/tools/dtk`)
-- `--skip-file PATH` — units to never retry (default
-  `build/<target>/split_confidence_skip.txt`); rejected units are appended
-  here automatically. Delete or truncate it to let everything be retried,
-  e.g. after a decomp-toolkit or script fix that might rescue previously-lost
-  candidates.
+This tests currently comparison-matched files as **compiled link inputs**. It
+bisects failing groups, checks the linker dependency graph, checks the retail
+hash, and also compares the final DOL directly with retail. Accepted files are
+recorded in a generated, version-specific block in `configure.py`; other versions
+keep their existing settings. Commands and results go under
+`build/<target>/source-verification/`.
 
-Each round prints what it staged, what got promoted/rejected/blocked, and
-syncs symbol names for newly-complete units via `ninja apply`. Nothing here
-sets `MatchingFor` — that's this project's own separate "done" marker, not a
-correctness check.
+The current configure adapter requires the dtk-template `config.libs` structure
+and `if args.mode == "configure":` dispatch. The all-sections objdiff filter is
+conservative: files with misleading data comparisons may remain untested. Failure
+of an individual trial also does not rule out a mutually dependent group.
 
-## `split_status_report.py`
+## Status and the historical loop
 
-Writes a per-unit status table comparing the source and target versions'
-splits, without touching anything:
-
-```
+```sh
 python /path/to/split_status_report.py --target GM8P01_00
+python -m unittest -v test_migration
 ```
 
-Writes to `docs/<target>_split_status.md` by default (`--output` to change
-it). Needs `build/<target>/match_candidates.txt` and `report.json` to already
-exist — run `split_confidence_loop.py` (or at least `dtk match --splits` and
-`ninja build/<target>/report.json`) first.
+The report distinguishes comparison matches from source-link configuration. It
+requires a report and DTK proposals from a previous run. Tests run from this repo.
 
-## See also
+`split_confidence_loop.py` remains available for the older all-sections approach,
+but does not verify candidate source linkage. Its unsafe ELF fallback is disabled
+by default. Its persistent skip list refers to failed proposals, not definitive
+proof that a unit cannot be migrated. Prefer the two commands above for new work.
 
-- `docs/prime.md` — exact commands and paths for running this against
-  Metroid Prime's NTSC→PAL migration, the project this was built for.
-- `docs/link_order_cycle_investigation.md` — open investigation into a
-  specific large-batch failure mode.
+See [Prime commands](docs/prime.md), [validation audit](docs/validation_audit.md),
+and [link-order investigation](docs/link_order_cycle_investigation.md).
