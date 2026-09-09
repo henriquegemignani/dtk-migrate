@@ -84,6 +84,45 @@ def candidate(name="A.cpp"):
     }
 
 
+def boundary_sequence(start=0x200, end=0x800, *, eligible=True):
+    functions = [
+        {
+            "source_name": f"function_{index}",
+            "source_address": f"0x{0x1000 + index * 0x100:08X}",
+            "target_address": f"0x{start + index * 0x100:08X}",
+            "target_end": f"0x{start + index * 0x100 + 0x80:08X}",
+            "size": 0x80,
+            "tier": "confident",
+            "method": "name",
+            "confidence": 1.0,
+            "primary": True,
+        }
+        for index in range(4)
+    ]
+    return {
+        "section": ".text",
+        "target_start": f"0x{start:08X}",
+        "target_end": f"0x{end:08X}",
+        "target_bytes": end - start,
+        "previous_unit": "Previous.cpp",
+        "next_unit": "Next.cpp",
+        "source_functions": 4,
+        "aligned_functions": 4,
+        "aligned_bytes": 0x200,
+        "strong_functions": 4,
+        "direct_anchors": 4,
+        "match_ratio": 1.0,
+        "order_ratio": 1.0,
+        "target_coverage": 0.5,
+        "best_alignment_score": 512.0,
+        "second_alignment_score": 0.0,
+        "alignment_margin": 1.0,
+        "functions": functions,
+        "eligible": eligible,
+        "reasons": [] if eligible else ["test rejection"],
+    }
+
+
 class FakeContext:
     def __init__(self, root, reject_first=False, regress=False, source_enabled=False):
         self.root, self.source, self.target = root, "S", "T"
@@ -161,6 +200,30 @@ class FakeContext:
 
 
 class CoverageTests(unittest.TestCase):
+    def test_boundary_sequence_is_preferred_as_one_bounded_range(self):
+        unit = {
+            "code_bytes": 0x800,
+            "anchors": [anchor(0x300, 0x380)],
+            "boundary_sequences": [boundary_sequence()],
+        }
+        alternatives = adapter.build_alternatives(unit, {})
+        self.assertEqual(alternatives[0]["evidence"], "boundary-sequence")
+        self.assertEqual(
+            (alternatives[0]["start"], alternatives[0]["end"]),
+            ("0x00000200", "0x00000800"),
+        )
+        self.assertEqual(len(alternatives[0]["anchors"]), 4)
+
+    def test_boundary_sequence_revalidates_order_and_existing_ownership(self):
+        value = boundary_sequence()
+        value["functions"][2]["source_address"] = "0x00001010"
+        unit = {"code_bytes": 0x800, "anchors": [], "boundary_sequences": [value]}
+        self.assertEqual(adapter.build_alternatives(unit, {}), [])
+        value = boundary_sequence()
+        unit["boundary_sequences"] = [value]
+        occupied = {"Other.cpp": ["\t.text start:0x00000400 end:0x00000500"]}
+        self.assertEqual(adapter.build_alternatives(unit, occupied), [])
+
     def test_distant_anchors_stay_separate_and_contiguous_anchors_add_a_run(self):
         unit = {
             "anchors": [

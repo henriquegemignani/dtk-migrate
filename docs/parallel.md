@@ -18,8 +18,9 @@ The generated Ninja split rule uses DTK's `--no-update` and bounded `-j` flags.
 `migration_configure.py` preserves those flags when Ninja regenerates its rules;
 it does not edit the project's configure script or build helper sources.
 
-Coverage preparation generates independent exact-body and corroborated `this`-layout
-ownership evidence without applying symbol renames. Discovery preparation then runs matching and confident
+Coverage preparation generates independent exact-body, corroborated `this`-layout,
+and boundary-constrained sequence ownership evidence without applying symbol
+renames. Discovery preparation then runs matching and confident
 renames once. Every batch starts from the same prepared baseline. With `--stage
 all`, source verification starts only after coverage and discovery integration
 have produced the next baselines. A single project lock
@@ -120,6 +121,31 @@ run retained retail DOL SHA-1
 `4d3780c77842ae7fddbdd5732b70bed100df5c65`; configured source linkage remained
 176,844 bytes because coverage keeps source objects disabled. Evidence is under
 `build/parallel-migration/runs/20260909T204906.906167Z/` in the F: checkout.
+
+### Boundary-sequence coverage validation
+
+Policy version 3 can fill a single target `.text` gap between the same two explicit
+neighboring TUs found around a source TU. DTK solves a maximum-cardinality monotone
+alignment inside that gap using its selected function matches and their reported
+runner-ups. Automatic eligibility requires at least four aligned functions, 75%
+source-function coverage, 90% order preservation, 512 aligned bytes, 40% target-gap
+coverage, two strong matches, two unique exact-body anchors, and a 10% margin
+over a same-cardinality competing alignment. A range is rejected if the best chain
+uses a runner-up, overlaps another explicit unit, is misaligned, or differs from the
+source text size by more than the bounded ratio.
+
+The `GM8E01_00` to `GM8E01_02` leave-one-out calibration produced 42 calibration
+and 38 held-out boundary ranges. All 80 stayed inside the correct target TU; their
+1,088 aligned function anchors also had no cross-unit attribution. Evidence is in
+`build/GM8E01_02/boundary-sequence-calibration/` in the F: Prime checkout.
+
+For PAL, `CGameProjectile.cpp` aligned 25 of 28 source functions monotonically:
+9 strong matches, 2 unique exact-body anchors, and 9,396 aligned function bytes covered 82.2%
+of the neighbor-bounded gap. Run `20260909T232431.370448Z` accepted the complete
+`.text 0x80038EAC..0x8003BB50` range (11,428 bytes). Representation rose from 781
+to 782 of 822 source TUs, objdiff-matched code rose from 1,306,876 to 1,307,156
+bytes (33.441055%), source-linked code remained 176,844 bytes, and the retail DOL
+SHA-1 remained `4d3780c77842ae7fddbdd5732b70bed100df5c65`.
 
 ### Measured coverage replay
 

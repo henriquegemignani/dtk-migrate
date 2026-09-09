@@ -13,9 +13,9 @@ import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError
 
-EVIDENCE_SCHEMA = 2
-POLICY_VERSION = 2
-VALIDATION = "unique-exact-or-corroborated-this-layout-ownership-and-extracted-link-inputs-and-retail-bytes"
+EVIDENCE_SCHEMA = 3
+POLICY_VERSION = 3
+VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-ownership-and-extracted-link-inputs-and-retail-bytes"
 
 
 def _replace(path, data, expected):
@@ -85,7 +85,7 @@ def _alternative(section, start, end, anchors, *, evidence="exact-body", group=N
 
 
 def build_alternatives(unit, target_blocks):
-    """Create exact ranges and corroborated layout-shift group ranges."""
+    """Create exact, layout-shift, and bounded sequence ranges."""
     eligible = [anchor for anchor in unit["anchors"] if anchor["eligible"]]
     individual = []
     for anchor in eligible:
@@ -175,8 +175,59 @@ def build_alternatives(unit, target_blocks):
             )
     shifted.sort(key=lambda alt: (-alt["covered_bytes"], int(alt["start"], 16)))
 
+    sequences = []
+    for sequence in unit.get("boundary_sequences", []):
+        functions = sequence.get("functions", [])
+        source_addresses = [int(item["source_address"], 16) for item in functions]
+        target_ranges = [
+            (int(item["target_address"], 16), int(item["target_end"], 16))
+            for item in functions
+        ]
+        start, end = (
+            int(sequence["target_start"], 16),
+            int(sequence["target_end"], 16),
+        )
+        if (
+            not sequence["eligible"]
+            or sequence["section"] != ".text"
+            or end <= start
+            or sequence["target_bytes"] != end - start
+            or sequence["aligned_functions"] != len(functions)
+            or sequence["aligned_bytes"] != sum(item["size"] for item in functions)
+            or not all(item["primary"] for item in functions)
+            or source_addresses != sorted(source_addresses)
+            or len(set(source_addresses)) != len(source_addresses)
+            or any(
+                left < previous_end
+                for (_, previous_end), (left, _) in pairwise(target_ranges)
+            )
+            or any(left < start or right > end for left, right in target_ranges)
+            or _overlaps_existing(sequence["section"], start, end, target_blocks)
+        ):
+            continue
+        anchors = [
+            {
+                **item,
+                "section": sequence["section"],
+                "target_address": item["target_address"],
+            }
+            for item in functions
+        ]
+        group = f"{sequence['previous_unit']}|{sequence['next_unit']}"
+        sequences.append(
+            _alternative(
+                sequence["section"],
+                start,
+                end,
+                anchors,
+                evidence="boundary-sequence",
+                group=group,
+            )
+        )
+    sequences.sort(key=lambda alt: (-alt["covered_bytes"], int(alt["start"], 16)))
+
     result, seen = [], set()
-    for alternative in shifted + individual + combined:
+    for alternative in sequences + shifted + individual + combined:
         key = (alternative["section"], alternative["start"], alternative["end"])
         if key not in seen:
             seen.add(key)
@@ -204,6 +255,8 @@ def _disposition(unit, alternatives):
         return "alignment"
     if unit.get("layout_shift_candidates", 0):
         return "layout-shift-insufficient-support"
+    if unit.get("boundary_sequences"):
+        return "boundary-sequence-insufficient-support"
     return "no-qualifying-anchor"
 
 

@@ -68,22 +68,29 @@ batches concurrently, then revalidates their union in deterministic order. Only
 the coordinator publishes validated changes. User input drift stops publication.
 Python's free-threaded runtime does not replace process and filesystem isolation.
 
-Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 2
-accepts strict exact-body intervals and corroborated `this`-layout groups. A layout
+Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 3
+accepts strict exact-body intervals, corroborated `this`-layout groups, and
+boundary-constrained function sequences. A layout
 group requires at least two unique functions whose normalized instruction streams
 and relocation layouts agree after masking only proven object-relative offsets;
 all functions must infer the same one-breakpoint offset transformation. The runner
 proposes the group span, never an individual layout function, then checks ownership,
 linker inputs, existing-unit regressions, and retail bytes. It deliberately allows
-zero objdiff gain and keeps the candidate source object disabled. A passing range
+zero objdiff gain and keeps the candidate source object disabled. A boundary
+sequence uses the immediate represented source neighbors to bound one unclaimed
+target gap, then requires a decisive monotone alignment with enough unique exact-body
+anchors, strong matches, functions, and bytes. The complete gap is tried as one range; DTK
+does not widen from the first or last matched function. A passing range
 therefore establishes partial split representation; it does not establish source
 equivalence.
 The run's `coverage/coverage.json` and `coverage/coverage.md` separate represented
 TUs, objdiff matching, configured source linkage, and verified source linkage.
 
-Calibrate the policy against a named target without letting target names or
-ownership influence candidate generation. Known labels are scored as correct or
-incorrect; unlabeled parts of partial splits remain unknown:
+Calibrate the policy against a named target. Exact-body and layout-shift generation
+mask target names and ownership. Boundary sequences deliberately retain only the
+two represented neighbor ranges needed to determine the gap; the candidate's own
+target split does not determine either boundary. The complete proposals are then
+scored against the ownership oracle:
 
 ```sh
 uv run src/calibrate_coverage.py --project-root F:/programming/decomp/prime --source GM8E01_00 --target GM8P01_00 --dtk /path/to/dtk

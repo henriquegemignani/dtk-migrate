@@ -316,7 +316,27 @@ source TUs. Objdiff-matched code moved from 1,256,368 to 1,256,580 bytes
 The final DOL SHA-1 remained
 `4d3780c77842ae7fddbdd5732b70bed100df5c65`.
 
-The final validation suites contain 83 passing Python tests and 69 passing DTK
+The final validation suites contain 85 passing Python tests and 70 passing DTK
 tests. Ruff, ty, the changed-file Rust formatter, and Clippy on all targets pass;
 Clippy's unrelated pre-existing `iter_kv_map` finding in `src/obj/symbols.rs` was
 excluded from the feature check.
+
+## Boundary-constrained TU sequences (2026-09-10)
+
+Coverage policy version 3 adds a unit-level monotone sequence solver. For a source
+TU between two represented neighbors, DTK uses those same neighbors to bound one
+target code gap. It then selects the longest in-order chain from normal function
+matches and their reported runner-ups and requires independent exact-body anchors,
+strong matches, aggregate byte/function coverage, order preservation, a competing
+alignment margin, plausible source/target sizes, and no conflicting ownership.
+The runner rechecks the serialized order and bounds before trying the complete gap.
+
+On `GM8E01_02`, 42 calibration and 38 held-out sequence proposals were all within
+their correct TU, with zero incorrect ranges or aligned-function attributions.
+The isolated PAL run `20260909T232431.370448Z` accepted
+`MetroidPrime/Weapons/CGameProjectile.cpp` as `.text 0x80038EAC..0x8003BB50`.
+Its 25-of-28 monotone alignment contained 9 strong matches and 2 exact-body anchors.
+The 11,428-byte split passed the no-regression, extracted-input, and retail-byte
+gates. Representation moved from 781 to 782 of 822 TUs and matched code from
+1,306,876 to 1,307,156 bytes (33.441055%); source-linked code remained 176,844
+bytes because coverage candidates stay disabled.

@@ -169,7 +169,11 @@ def summarize(records):
                         for anchor in anchors
                     ),
                 }
-                for evidence in ("exact-body", "this-layout-shift")
+                for evidence in (
+                    "exact-body",
+                    "this-layout-shift",
+                    "boundary-sequence",
+                )
             },
         }
     return result
@@ -267,7 +271,7 @@ def main(argv=None):
     ]
     measures = summarize(records)
     result = {
-        "schema": 2,
+        "schema": 3,
         "policy": masked_value["policy"],
         "source": args.source,
         "target": args.target,
