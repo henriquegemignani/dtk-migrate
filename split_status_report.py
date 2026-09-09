@@ -44,6 +44,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default="GM8E01_00", help="source version (the one with known names)")
     parser.add_argument("--target", required=True, help="target version to report on")
+    parser.add_argument("--proposals", type=Path, help="DTK proposal file (default: newest discovery/legacy proposal)")
     parser.add_argument(
         "--output", type=Path, default=None,
         help="where to write the report (default: docs/<target>_split_status.md)",
@@ -55,7 +56,10 @@ def main():
     _, ntsc_blocks, ntsc_order = scl.parse_splits(ntsc_text)
     _, pal_blocks, pal_order = scl.parse_splits(pal_text)
 
-    proposal_path = ROOT_DIR / "build" / args.target / "match_candidates.txt"
+    proposal_options = [ROOT_DIR / "build" / args.target / "match_candidates.txt",
+                        ROOT_DIR / "build" / args.target / "discovery" / "proposals.txt"]
+    proposal_path = args.proposals or max((p for p in proposal_options if p.exists()),
+                                         key=lambda p: p.stat().st_mtime, default=proposal_options[0])
     if not proposal_path.exists():
         parser.error(f"{proposal_path} not found -- run split_confidence_loop.py (or `dtk match --splits`) first")
     proposal_raw_text = proposal_path.read_text(encoding="utf-8")
@@ -81,23 +85,27 @@ def main():
         if unit is None:
             return (
                 "exists, but not matching/linked",
-                "compiles, but has no diffable entry in the report (likely BSS-only -- nothing to byte-compare)",
-                "Probably fine; spot-check with `objdiff-cli diff` directly if a real verification is needed.",
-                "no diffable report entry (likely fine)",
+                "no diffable entry in the report; compilation and linkage are unverified",
+                "Regenerate the report and check source availability and path mapping.",
+                "no diffable report entry",
             )
 
         bad = [s for s in unit.get("sections") or [] if s.get("fuzzy_match_percent", 0.0) < 100.0]
-        if not bad:
-            return "exists and linked", "", "", "linked"
+        linked = unit.get("metadata", {}).get("complete") is True
+        if linked:
+            return "configured to link from source", "Link flag is not evidence of a fresh retail hash check.", "", "source link enabled"
+        if not unit.get("sections"):
+            return "exists; comparison unavailable", "No comparable sections in the report.", "Check source availability and report generation.", "comparison unavailable"
+        if unit.get("sections") and not bad:
+            return "comparison matches; source not linked", "Whole-file output has not been hash-verified.", "Test the compiled object as a real link input before enabling MatchingFor.", "comparison matches"
         worst = min(bad, key=lambda s: s.get("fuzzy_match_percent", 0.0))
         detail = "; ".join(f"{s['name']} {s.get('fuzzy_match_percent', 0.0):.2f}%" for s in bad)
         text_mismatch = any(s["name"] in (".text", ".init") for s in bad)
         boundary_artifact = not text_mismatch and all(neighbors.borders_unclaimed(*section_range(s)) for s in bad)
         if boundary_artifact:
             improve = (
-                "Likely a boundary artifact (borders an unclaimed/auto-named neighbor) that direct byte "
-                "comparison (see split_confidence_loop.py's Elf/Dol byte-verification) should be able to "
-                "confirm and promote directly, without waiting on the neighbor -- re-run the promotion loop."
+                "An adjacent auto symbol suggests a possible boundary artifact, but does not prove it. "
+                "Compare using a link that actually includes this compiled source object."
             )
             subcat = "likely boundary artifact"
         else:
@@ -115,9 +123,9 @@ def main():
             return (
                 "not present",
                 f"rejected: {reason}",
-                "A real build attempt already ruled this out (wrong content, wrong link order, or a "
-                "confirmed bad guess) -- needs manual porting/investigation, not just re-running the promoter.",
-                "rejected (tried, real issue)",
+                "A previous proposal failed a check. Retry after tooling, symbols or boundaries change; "
+                "failure of one proposal does not rule out this unit.",
+                "previous proposal rejected",
             )
 
         lines = proposal_blocks.get(name)
@@ -125,8 +133,8 @@ def main():
             return (
                 "not present",
                 "dtk match found no functions from this source unit with a plausible correspondence in the target",
-                "Try a lower --min-confidence with `dtk match`, or identify the target manually and add a "
-                "split boundary by hand.",
+                "Investigate attribution and improve automated proposal generation; a missing proposal "
+                "does not prove the code is absent.",
                 "no candidate found",
             )
 
@@ -206,12 +214,16 @@ def main():
         f.write(
             f"Generated by comparing every unit split in `config/{args.source}/splits.txt` (source) "
             f"against `config/{args.target}/splits.txt` (target) and, for units not yet migrated, the "
-            "current `dtk match` proposal for that unit, run through the same reduction/filtering "
-            "pipeline `split_confidence_loop.py` applies before staging (fragmented-run bridging and "
-            "dominant-cluster reduction, alignment filtering, boundary-artifact detection). See that "
-            "script for the promotion tooling referenced in the improvement column.\n\n"
+            "latest available `dtk match` proposal. Missing-unit explanations use the historical "
+            "loop's reduction heuristics; discovery can retain useful partial code that these "
+            "heuristics discard. Proposal and report files can become stale after changes.\n\n"
         )
         f.write("## Summary\n\n")
+        measures = report["measures"]
+        f.write(f"- Objdiff matched code: {measures.get('matched_code_percent', 0):.3f}% "
+                f"({measures.get('matched_code', 0)} / {measures.get('total_code', 0)} bytes)\n")
+        f.write(f"- Configured source-linked code: {measures.get('complete_code_percent', 0):.3f}%\n")
+        f.write("- Split presence, objdiff matching, and retail-hash-verified source linkage are distinct.\n")
         f.write(f"- Total {args.source} units: {len(rows)}\n")
         for k, v in sorted(counts.items(), key=lambda kv: -kv[1]):
             f.write(f"- **{k}**: {v} ({v / len(rows):.1%})\n")

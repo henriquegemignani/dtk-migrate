@@ -1,30 +1,13 @@
 #!/usr/bin/env python3
 
-###
-# Uses a real build as an oracle for dtk match's uncertain split proposals.
+# Historical all-sections promotion loop. For code discovery use discover_splits.py;
+# for actual compiled-object link verification use verify_source_units.py.
 #
-# `dtk match --splits` only writes a unit as confident once every function in
-# it clears a high bar; everything else is written out commented, as a
-# candidate, and normally never gets touched (see `dtk splits merge`, which
-# deliberately drops every commented line). This script instead stages ALL of
-# a version's proposed *new* units (confident and candidate alike) into that
-# version's splits.txt, rebuilds, and keeps only the ones whose compiled
-# bytes turn out 100% fuzzy-matched in every section, link cleanly, and
-# still pass the full-DOL hash check (see docs/match_learnings.md in
-# decomp-toolkit, "The hash check is the only real oracle") -- reverting
-# the rest. This still doesn't add MatchingFor: that's a separate,
-# deliberate step, gated on this project's own completion criteria, not
-# further correctness verification -- the hash check passing here only
-# proves these specific split boundaries are byte-correct, the same as
-# every other still-unmatched address in the DOL (backed by raw orig/
-# bytes). It does sync symbol names/sizes for every unit that comes out
-# fully matching, via `ninja apply` (decomp-toolkit's `dol apply`, which
-# reads them straight back out of the freshly linked ELF -- trustworthy
-# once the compiled bytes are proven byte-identical).
-#
-# Usage (run from the project's root directory):
-#   python /path/to/split_confidence_loop.py --source GM8E01_00 --target GM8P01_00
-###
+# Objdiff scores describe comparison coverage, not whole-file correctness.
+# A retail hash is evidence for source code only when those compiled objects
+# actually occur in the linker inputs. This loop does not enable candidates,
+# so its hash check validates split integrity and its raw-ELF fallback is
+# disabled unless a caller explicitly supplies verified source-link provenance.
 
 from __future__ import annotations
 
@@ -40,6 +23,7 @@ from pathlib import Path
 
 ROOT_DIR = Path.cwd()
 EXE = ".exe" if platform.system() == "Windows" else ""
+DTK_OVERRIDE: Path | None = None
 
 ENTRY_RE = re.compile(r"^(?P<section>\S+)\s+start:0x(?P<start>[0-9A-Fa-f]+)\s+end:0x(?P<end>[0-9A-Fa-f]+)")
 
@@ -110,6 +94,10 @@ class SymbolNeighbors:
 
 
 def run(cmd, capture=False):
+    # Match and split must use the same binary. Passing --dtk only to match
+    # otherwise lets configure/ninja silently download a different DTK.
+    if DTK_OVERRIDE is not None and len(cmd) > 1 and str(cmd[1]) == "configure.py":
+        cmd = [*cmd, "--dtk", str(DTK_OVERRIDE)]
     print("+", " ".join(str(c) for c in cmd))
     if capture:
         return subprocess.run(cmd, cwd=ROOT_DIR, check=True, capture_output=True, text=True)
@@ -1099,8 +1087,8 @@ def resolve_batch_link_order(
     existing_blocks: dict[str, list[str]],
     scored_candidates: list[tuple[str, list[str]]],
 ) -> tuple[list[tuple[str, list[str]]], list[tuple[str, str]]]:
-    """Drops the minimum number of lowest-priority candidates needed to
-    make the whole batch's implied link order acyclic, using the exact
+    """Greedily drops low-priority candidates until the model is acyclic.
+    This does not guarantee a minimum removal set. It uses a simplified
     address-adjacency graph decomp-toolkit's own resolve_link_order builds
     (see build_link_order_graph) -- entirely in-process, so a batch that
     would otherwise take dozens of real (multi-second) builds to whittle
@@ -1205,7 +1193,7 @@ def trim_to_confirmed_functions(unit: dict, lines: list[str], bad_section_names:
     return trimmed
 
 
-def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf):
+def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf, *, source_linked=False):
     """Classifies one staged-and-built candidate against `by_path` (a
     report's units, keyed by source path -- see main()). Returns (bucket,
     reason, byte_confirmed, trim): bucket is 'promoted', 'rejected', or
@@ -1219,7 +1207,10 @@ def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf):
     unit = by_path.get(name)
     if unit is None:
         return "rejected", "not found in the rebuilt report", False, None
-    bad = [s for s in unit.get("sections") or [] if s.get("fuzzy_match_percent", 0.0) < 100.0]
+    sections = unit.get("sections") or []
+    if not sections:
+        return "rejected", "no comparable sections in rebuilt report", False, None
+    bad = [s for s in sections if s.get("fuzzy_match_percent", 0.0) < 100.0]
     if not bad:
         return "promoted", None, False, None
     worst = min(bad, key=lambda s: s.get("fuzzy_match_percent", 0.0))
@@ -1243,7 +1234,8 @@ def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf):
     elif all(neighbors.borders_unclaimed(*section_range(s)) for s in bad):
         own_ranges = {r[0]: (r[1], r[2] - r[1]) for r in (parse_range(l) for l in lines) if r}
         confirmed = (
-            orig_dol is not None
+            source_linked
+            and orig_dol is not None
             and linked_elf is not None
             and all(
                 (rng := own_ranges.get(s["name"])) is not None
@@ -1254,7 +1246,7 @@ def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf):
         )
         if confirmed:
             return "promoted", None, True, None
-        return "blocked", f"{reason} -- borders unclaimed content, not a real mismatch", False, None
+        return "blocked", f"{reason} -- neighboring auto symbol is only a boundary-artifact heuristic", False, None
     else:
         return "rejected", reason, False, None
 
@@ -1315,21 +1307,22 @@ def stage_and_build(splits_path, header, existing_blocks, existing_order, candid
     raise RuntimeError(f"gave up after {MAX_CONFLICT_RETRIES} conflict retries; restored the original splits.txt")
 
 
-def main():
+def _main():
+    global DTK_OVERRIDE
     parser = argparse.ArgumentParser(
         description="Speculatively build dtk match's candidate split proposals and keep "
-        "only the ones that come out byte-identical."
+        "only the ones with matching comparison sections (not whole-file link verification)."
     )
     parser.add_argument("--source", default="GM8E01_00", help="source version (the one with known names)")
     parser.add_argument("--target", required=True, help="target version to propose new splits for")
     parser.add_argument("--dtk", type=Path, default=None, help="path to the dtk binary (default: build/tools/dtk)")
     parser.add_argument("-c", "--min-confidence", type=float, default=None, help="passed through to `dtk match`")
-    parser.add_argument("--limit", type=int, default=None, help="try at most this many candidate units, smallest first")
+    parser.add_argument("--limit", type=int, default=None, help="seed this many candidates, highest function confidence first; companions may exceed this")
     parser.add_argument(
         "--skip-file",
         type=Path,
         default=None,
-        help="units to never re-try, one per line -- units this script rejected or excluded "
+        help="units to never re-try, one per line -- units this script rejected "
         "before are appended here automatically (default: build/<target>/split_confidence_skip.txt)",
     )
     args = parser.parse_args()
@@ -1337,6 +1330,9 @@ def main():
     dtk = args.dtk or (ROOT_DIR / "build" / "tools" / f"dtk{EXE}")
     if not dtk.exists():
         parser.error(f"{dtk} not found; run configure.py once first, or pass --dtk")
+    DTK_OVERRIDE = dtk.resolve()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
 
     splits_path = ROOT_DIR / "config" / args.target / "splits.txt"
     proposal_path = ROOT_DIR / "build" / args.target / "match_candidates.txt"
@@ -1363,9 +1359,8 @@ def main():
     _, proposal_blocks, proposal_order = parse_splits(proposal_text)
     raw_proposal_blocks = raw_proposal_lines(proposal_text)
 
-    # NTSC's own declaration order -- the ground truth for "which units
-    # are supposed to sit near each other" that find_suspicious_sections
-    # (below) checks proposed target neighbors against.
+    # Source declaration order is a heuristic for nearby target units, not
+    # ground truth: section order and template ownership can differ by version.
     source_splits_path = ROOT_DIR / "config" / args.source / "splits.txt"
     _, _, source_order = parse_splits(source_splits_path.read_text(encoding="utf-8"))
     ntsc_position = {name: i for i, name in enumerate(source_order)}
@@ -1571,27 +1566,11 @@ def main():
             if u.get("metadata", {}).get("source_path")
         }
 
-        # A "borders unclaimed content" rejection (below) is a strong
-        # heuristic, not proof -- confirming it outright means comparing
-        # our own declared range's real bytes against the retail DOL, and
-        # that's only valid once relocations are actually resolved (an
-        # unlinked .o's relocated fields are placeholders that would never
-        # byte-match even for genuinely correct code). Link the *full*
-        # staged batch once, upfront, so every "blocked" candidate below
-        # can be checked directly instead of waiting on a neighbor that
-        # might not land for many more rounds. A failure here just means
-        # the byte-check gets skipped for this round -- normal fuzzy-based
-        # classification doesn't depend on it.
-        linked_elf: Elf | None = None
-        if built:
-            try:
-                run([sys.executable, "configure.py", "configure", "-v", args.target], capture=True)
-                run(["ninja", f"build/{args.target}/main.elf"], capture=True)
-                linked_elf = Elf(ROOT_DIR / "build" / args.target / "main.elf")
-            except subprocess.CalledProcessError:
-                pass
-        orig_dol_path = ROOT_DIR / "orig" / args.target / "sys" / "main.dol"
-        orig_dol = Dol(orig_dol_path) if linked_elf is not None and orig_dol_path.exists() else None
+        # A default build links candidates from extracted retail objects. Reading
+        # those bytes back cannot validate compiled output. Do not construct a
+        # comparison ELF without proving source linkage (verify_source_units.py).
+        linked_elf = None
+        orig_dol = None
 
         # symbols_path/neighbors were already built (from the same,
         # untouched-since-then symbols.txt) before staging, for the
@@ -1632,8 +1611,8 @@ def main():
         # the per-function data looked good.
         if trim_candidates:
             print(
-                f"\n{len(trim_candidates)} rejected unit(s) had at least one function confirmed "
-                "byte-identical -- retrying with the boundary shrunk to just that confirmed run:"
+                f"\n{len(trim_candidates)} rejected unit(s) had at least one objdiff-matched function "
+                "-- retrying with the boundary shrunk to that comparison-matched run:"
             )
             for name, lines in trim_candidates:
                 print(f"  ? {name} (was: {trim_origin[name]})")
@@ -1675,7 +1654,7 @@ def main():
         print("\nEvaluating the build failed; restored the original splits.txt.")
         raise
 
-    print(f"\nPromoted {len(promoted)} unit(s), verified byte-identical in every section:")
+    print(f"\nPromoted {len(promoted)} unit(s) with matching comparison sections (pending final split-integrity check):")
     for name in promoted:
         tag = " (confirmed by direct byte comparison, not fuzzy match)" if name in byte_confirmed else ""
         print(f"  + {name}{tag}")
@@ -1778,12 +1757,8 @@ def main():
                 splits_path.write_text(original_text, encoding="utf-8")
                 raise RuntimeError(f"gave up after {MAX_CONFLICT_RETRIES} hash-check retries")
 
-        # Unlike `unlinkable`/`excluded`/`blocked`, a hash-check break isn't
-        # context-dependent -- it's a confirmed wrong boundary for this
-        # unit's own declared range, so (like `rejected`) it's worth
-        # persisting rather than silently re-proposing the same bad guess
-        # next run.
-        append_skip_list(skip_path, hash_broken)
+        # Address proximity only chooses a trial to revert. It does not prove
+        # that unit caused the batch failure, so never permanently blacklist it.
 
         if unlinkable or hash_broken:
             print("\nRegenerating report.json for the final, verified set...")
@@ -1801,10 +1776,44 @@ def main():
             run(["ninja", "apply"])
 
     print(
-        "\nThese are verified split boundaries, confirmed against the full-DOL hash check -- still "
-        "review before adding MatchingFor, which is this project's separate, deliberate marker for "
-        "'done', not further correctness verification."
+        "\nKept comparison-matched splits. The retail hash checks split integrity only: "
+        "candidates are not enabled as source link inputs. Whole-file verification requires "
+        "linking their compiled objects and then checking the retail hash."
     )
+
+
+def main():
+    # The historical loop has several independent failure paths, including
+    # symbol fixes and apply. Roll all inputs back together, not just splits.
+    probe = argparse.ArgumentParser(add_help=False)
+    probe.add_argument("--target")
+    probe.add_argument("--skip-file", type=Path)
+    args, _ = probe.parse_known_args()
+    snapshots = {}
+    if args.target:
+        paths = [ROOT_DIR / "config" / args.target / name for name in ("splits.txt", "symbols.txt")]
+        paths.append(args.skip_file or ROOT_DIR / "build" / args.target / "split_confidence_skip.txt")
+        snapshots = {p: p.read_bytes() if p.exists() else None for p in paths}
+    try:
+        _main()
+        if args.target:
+            reconfigure_and_build(args.target, f"build/{args.target}/report.json")
+            ok, output = verify_full_hash(args.target)
+            if not ok:
+                raise RuntimeError(output)
+    except BaseException:
+        for path, data in snapshots.items():
+            if data is None:
+                if path.exists():
+                    path.unlink()
+            elif not path.exists() or path.read_bytes() != data:
+                path.write_bytes(data)
+        if args.target and DTK_OVERRIDE is not None:
+            try:
+                reconfigure_and_build(args.target, f"build/{args.target}/report.json")
+            except Exception as error:
+                print(f"Input files restored, but regenerating the baseline report failed: {error}")
+        raise
 
 
 if __name__ == "__main__":
