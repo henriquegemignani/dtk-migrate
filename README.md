@@ -24,23 +24,80 @@ this mistake, including a circular "direct byte comparison" fallback. See
 
 ## Requirements
 
-Run the scripts **from the game project's root**, not this repository. They use
-`Path.cwd()` and expect `configure.py`, `tools/project.py`, Ninja,
+Use **uv and Python 3.14t**. From this repository, `uv sync` installs the pinned
+free-threaded interpreter and creates the environment. Run commands with `uv run`.
+The game project must contain `configure.py`, `tools/project.py`, Ninja,
 `config/<version>/{config.yml,splits.txt,symbols.txt}`, extracted retail inputs,
-and the project's compiler tools. Python 3.9 or later is supported.
+and installed compiler tools (build the project once before snapshotting it).
 
-Use a DTK build containing `match --splits` and `symbols rename`. A downloaded
+Use a DTK build containing `match --splits`, `match --coverage`, and `symbols rename`. A downloaded
 release is not guaranteed to have these development features. Pass an absolute
 `--dtk` path: both matching and configure/Ninja then use that binary. Do not copy a
 development executable over a Ninja-managed downloaded tool.
 
-Run only one migration/build process per game checkout; they share configuration,
-build files, and reports.
+Migration commands share an OS-held project lock. Do not run an unrelated build
+in a checkout while migration uses it. The parallel runner builds in private copies.
+
+## Repository layout
+
+- `src/` contains the command-line applications and their shared runtime modules.
+- `tests/` contains the `unittest` suite.
+- `docs/` contains operational guidance and validation records.
+
+## Parallel migration
+
+From this repository:
+
+```sh
+uv run src/parallel_migration.py --project-root ../prime --source GM8E01_00 --target GM8P01_00 --dtk /path/to/dtk --stage both --workers 3 --build-jobs 4
+```
+
+`--stage` accepts `coverage`, `discover`, `verify`, `both` (default), or `all`.
+`all` runs coverage → discovery → source verification. `--limit` bounds
+candidates **per stage**; `--batch-size` defaults to 40. `--workers 1` uses exactly
+the same batches and validation as parallel execution. The default resource
+setting is three processes with four Ninja jobs each. See the measured guidance
+in [parallel execution](docs/parallel.md) before choosing a pool size.
+
+The runner captures current files, including dirty and untracked inputs and
+submodule contents, freezes tool binaries and scripts, and gives each worker a
+private configuration and build cache. It prepares proposals once, evaluates
+batches concurrently, then revalidates their union in deterministic order. Only
+the coordinator publishes validated changes. User input drift stops publication.
+Python's free-threaded runtime does not replace process and filesystem isolation.
+
+Coverage is opt-in through `--stage coverage` or `--stage all`. It assigns only an
+exact function interval, or an adjacent run of such intervals, when the normalized
+body is unique in both binaries, at least 128 bytes, has compatible relocations,
+and belongs wholly to one explicit source TU. It deliberately allows zero objdiff
+gain and keeps the candidate source object disabled. A passing range therefore
+establishes partial split representation; it does not establish source equivalence.
+The run's `coverage/coverage.json` and `coverage/coverage.md` separate represented
+TUs, objdiff matching, configured source linkage, and verified source linkage.
+
+Calibrate the fixed policy against `_02` without letting known target names or
+ownership influence candidate generation:
+
+```sh
+uv run src/calibrate_coverage.py --project-root ../prime --source GM8E01_00 --target GM8E01_02 --dtk /path/to/dtk
+```
+
+Runs and evidence live under `build/parallel-migration/runs/<RUN_ID>` in the game
+project. Resume an interrupted run using its saved options:
+
+```sh
+uv run src/parallel_migration.py --project-root ../prime --resume RUN_ID
+```
+
+Changed project inputs, tools, scripts, or interpreter require a fresh run.
+Successful sibling jobs are retained after a worker failure. Windows Job Objects
+stop Ninja and compiler descendants when a worker is cancelled. Symlinks and
+junctions in snapshot inputs are rejected; use materialized project files.
 
 ## Discover useful code splits
 
 ```sh
-python /path/to/discover_splits.py --target GM8P01_00 --dtk /path/to/dtk
+uv run src/discover_splits.py --project-root ../prime --target GM8P01_00 --dtk /path/to/dtk
 ```
 
 `--source` defaults to `GM8E01_00`. `--batch-size` defaults to 40; `--limit N`
@@ -64,28 +121,37 @@ rebuild them. Process termination or power loss cannot run Python cleanup.
 ## Verify whole source files
 
 ```sh
-python /path/to/verify_source_units.py --target GM8P01_00 --dtk /path/to/dtk
+uv run src/verify_source_units.py --project-root ../prime --target GM8P01_00 --dtk /path/to/dtk
 ```
 
 This tests currently comparison-matched files as **compiled link inputs**. It
 bisects failing groups, checks the linker dependency graph, checks the retail
 hash, and also compares the final DOL directly with retail. Accepted files are
-recorded in a generated, version-specific block in `configure.py`; other versions
-keep their existing settings. Commands and results go under
+recorded directly in each object's `MatchingFor(...)` call in `configure.py`, with
+arguments ordered by `VERSIONS`. Existing version flags are preserved;
+`NonMatching` becomes `MatchingFor(<target>)` where needed. Commands and results go under
 `build/<target>/source-verification/`.
 
-The current configure adapter requires the dtk-template `config.libs` structure
-and `if args.mode == "configure":` dispatch. The all-sections objdiff filter is
+Old `BEGIN AUTOMATED SOURCE VERIFICATION` blocks are migrated automatically on
+the next successful run. To migrate them and verify the current target without
+trying additional files, pass `--migrate-only`. Failed trials restore the accepted
+declarations; exceptions restore the complete original file.
+
+The configure adapter requires a literal `VERSIONS` list and unique literal
+`Object(status, "path")` declarations. It supports `MatchingFor`, `NonMatching`/
+`Equivalent`/`False`, and already-enabled `Matching`/`True`; unknown expressions or modified
+legacy block logic fail before editing. The all-sections objdiff filter is
 conservative: files with misleading data comparisons may remain untested. Failure
 of an individual trial also does not rule out a mutually dependent group.
 
 ## Status and the historical loop
 
 ```sh
-python /path/to/split_status_report.py --target GM8P01_00
-python -m unittest -v test_migration
+uv run --project /path/to/dtk-version-matching /path/to/dtk-version-matching/src/split_status_report.py --target GM8P01_00
+uv run python -m unittest -v
 ```
 
+Run the status command from the game checkout, and tests from this repository.
 The report distinguishes comparison matches from source-link configuration. It
 requires a report and DTK proposals from a previous run. Tests run from this repo.
 

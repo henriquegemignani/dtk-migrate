@@ -26,12 +26,12 @@ having Ninja replace it with a downloaded release.
 
 ## Automated migration
 
-From the Prime checkout:
+From the tooling checkout:
 
 ```powershell
-python ../dtk-version-matching/discover_splits.py --source GM8E01_00 --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
-python ../dtk-version-matching/verify_source_units.py --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
-python ../dtk-version-matching/split_status_report.py --target GM8P01_00
+uv run src/parallel_migration.py --project-root ../prime --source GM8E01_00 --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe --stage all --workers 3 --build-jobs 4
+uv run src/discover_splits.py --project-root ../prime --source GM8E01_00 --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
+uv run src/verify_source_units.py --project-root ../prime --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
 ```
 
 For a bounded discovery run add `--limit 100`. `--batch-size 40` sets initial
@@ -39,6 +39,9 @@ group size; failures are bisected. The old recommendation to keep `--limit` near
 25 concerned the historical loop, whose companion expansion could exceed the
 limit and whose cycle heuristic discarded many proposals.
 
+The first command runs coverage, discovery, and verification in isolated workers;
+the latter two are serial
+alternatives using the same validation adapters. See [parallel execution](parallel.md).
 Do not run these commands concurrently in one checkout. Generated reports must
 describe the final accepted splits, not an intermediate trial.
 
@@ -70,6 +73,16 @@ C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe match config/GM
 Hidden-name validation measures name agreement on named target functions. It is
 neither a compiler comparison nor a retail hash check. PAL remains the primary
 target; do not spend the migration effort optimizing `_02` instead.
+
+The partial-coverage policy has a separate ownership calibration:
+
+```powershell
+uv run src/calibrate_coverage.py --project-root ../prime --source GM8E01_00 --target GM8E01_02 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
+```
+
+This masks `_02` names and split ownership during proposal generation, partitions
+TUs deterministically, and checks every proposed anchor and complete range against
+the separately generated ownership oracle. It does not publish configuration.
 
 ## Existing legacy state
 

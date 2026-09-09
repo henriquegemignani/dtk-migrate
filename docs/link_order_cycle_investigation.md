@@ -90,7 +90,7 @@ only the drop-order heuristic.
    `build/GM8P01_00/split_confidence_skip.txt` empty (or close to it) and
    `config/GM8P01_00/splits.txt` at its current state, run:
    ```
-   python /path/to/split_confidence_loop.py --target GM8P01_00 --dtk /path/to/development/dtk
+   uv run --project /path/to/dtk-version-matching /path/to/dtk-version-matching/src/split_confidence_loop.py --target GM8P01_00 --dtk /path/to/development/dtk
    ```
    inspect the cyclic component (or adapt the standalone repro
    snippet below, which doesn't require a real build — it only needs
@@ -113,7 +113,7 @@ only the drop-order heuristic.
 
 ```python
 import importlib.util
-spec = importlib.util.spec_from_file_location("scl", r"path/to/split_confidence_loop.py")
+spec = importlib.util.spec_from_file_location("scl", r"path/to/src/split_confidence_loop.py")
 scl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scl)
 

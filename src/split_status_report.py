@@ -12,7 +12,7 @@
 #
 # Usage (run from the project's root directory, after a `dtk match --splits`
 # and a real build have populated build/<target>/):
-#   python /path/to/split_status_report.py --target GM8P01_00
+#   python /path/to/src/split_status_report.py --target GM8P01_00
 ###
 
 from __future__ import annotations

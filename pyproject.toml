@@ -1,0 +1,9 @@
+[project]
+name = "dtk-version-matching"
+version = "0.1.0"
+description = "Validated cross-version split discovery and source migration"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.uv]
+package = false
