@@ -106,9 +106,8 @@ class SnapshotTests(unittest.TestCase):
             while not marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.025)
             self.assertTrue(marker.exists())
-            with self.assertRaises(RuntimeError):
-                with workspace.project_lock(self.root):
-                    pass
+            with self.assertRaises(RuntimeError), workspace.project_lock(self.root):
+                pass
         finally:
             process.kill()
             process.wait()
@@ -166,6 +165,7 @@ class SnapshotTests(unittest.TestCase):
         result = subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
             capture_output=True,
+            check=False,
         )
         if result.returncode:
             self.skipTest("Junction unavailable")
@@ -190,10 +190,12 @@ class SnapshotTests(unittest.TestCase):
         )
 
     def test_project_lock_contention_and_release(self):
-        with workspace.project_lock(self.root):
-            with self.assertRaisesRegex(RuntimeError, "Another migration"):
-                with workspace.project_lock(self.root):
-                    self.fail("Lock should not be acquired")
+        with (
+            workspace.project_lock(self.root),
+            self.assertRaisesRegex(RuntimeError, "Another migration"),
+            workspace.project_lock(self.root),
+        ):
+            self.fail("Lock should not be acquired")
         with workspace.project_lock(self.root):
             pass
         self.assertNotIn(workspace.LOCK_NAME, workspace.snapshot_manifest(self.root))
@@ -363,14 +365,16 @@ class CommandTests(unittest.TestCase):
                 descendant.append(self.await_marker(marker))
                 raise KeyboardInterrupt
 
-            with patch.object(subprocess.Popen, "communicate", interrupted):
-                with self.assertRaises(KeyboardInterrupt):
-                    workspace.run_command(
-                        self.tree_command(marker),
-                        cwd=directory,
-                        env=os.environ,
-                        log=log,
-                    )
+            with (
+                patch.object(subprocess.Popen, "communicate", interrupted),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                workspace.run_command(
+                    self.tree_command(marker),
+                    cwd=directory,
+                    env=os.environ,
+                    log=log,
+                )
             self.assert_dead(descendant[0])
 
 

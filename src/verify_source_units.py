@@ -66,9 +66,11 @@ def legacy_blocks(text):
                 f"Modified legacy verification block for {version}; refusing to remove it"
             )
         blocks.append((match.start(), match.end(), version, names))
-    if len(blocks) != len(re.findall(r"^" + re.escape(BEGIN), text, re.MULTILINE)) or len(
-        blocks
-    ) != len(re.findall(r"^" + re.escape(END.rstrip("\n")) + r"$", text, re.MULTILINE)):
+    if len(blocks) != len(
+        re.findall(r"^" + re.escape(BEGIN), text, re.MULTILINE)
+    ) or len(blocks) != len(
+        re.findall(r"^" + re.escape(END.rstrip("\n")) + r"$", text, re.MULTILINE)
+    ):
         raise ValueError("Malformed legacy verification block")
     return blocks
 

@@ -19,6 +19,7 @@ import re
 import struct
 import subprocess
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 ROOT_DIR = Path.cwd()
@@ -929,7 +930,7 @@ def suggest_undefined_symbol_fixes(
         for f in unit.get("functions") or []
         if f.get("fuzzy_match_percent") == 100.0
     }
-    fn_starts, unresolved = parse_disasm(disasm_text)
+    _fn_starts, unresolved = parse_disasm(disasm_text)
 
     applied: dict[str, int] = {}
     all_resolved = True
@@ -1097,7 +1098,7 @@ def build_link_order_graph(blocks: dict[str, list[str]]) -> dict[str, set[str]]:
     graph: dict[str, set[str]] = {}
     for ranges in by_section.values():
         ranges.sort()
-        for (_, _, a), (_, _, b) in zip(ranges, ranges[1:]):
+        for (_, _, a), (_, _, b) in pairwise(ranges):
             if a != b:
                 graph.setdefault(a, set()).add(b)
     return graph
@@ -2006,7 +2007,7 @@ def main():
         if args.target and DTK_OVERRIDE is not None:
             try:
                 reconfigure_and_build(args.target, f"build/{args.target}/report.json")
-            except Exception as error:
+            except (OSError, subprocess.CalledProcessError) as error:
                 print(
                     f"Input files restored, but regenerating the baseline report failed: {error}"
                 )

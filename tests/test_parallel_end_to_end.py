@@ -125,7 +125,11 @@ class ParallelEndToEndTests(unittest.TestCase):
 
             def invoke(*args):
                 return subprocess.run(
-                    command + list(args), capture_output=True, text=True, timeout=60
+                    command + list(args),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
                 )
 
             result = invoke(

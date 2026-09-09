@@ -68,8 +68,8 @@ def main():
     pal_text = (ROOT_DIR / "config" / args.target / "splits.txt").read_text(
         encoding="utf-8"
     )
-    _, ntsc_blocks, ntsc_order = scl.parse_splits(ntsc_text)
-    _, pal_blocks, pal_order = scl.parse_splits(pal_text)
+    _, _ntsc_blocks, ntsc_order = scl.parse_splits(ntsc_text)
+    _, pal_blocks, _pal_order = scl.parse_splits(pal_text)
 
     proposal_options = [
         ROOT_DIR / "build" / args.target / "match_candidates.txt",
@@ -85,7 +85,7 @@ def main():
             f"{proposal_path} not found -- run split_confidence_loop.py (or `dtk match --splits`) first"
         )
     proposal_raw_text = proposal_path.read_text(encoding="utf-8")
-    _, proposal_blocks, proposal_order = scl.parse_splits(proposal_raw_text)
+    _, proposal_blocks, _proposal_order = scl.parse_splits(proposal_raw_text)
     raw_proposal_blocks = scl.raw_proposal_lines(proposal_raw_text)
 
     report_path = ROOT_DIR / "build" / args.target / "report.json"
@@ -170,8 +170,10 @@ def main():
             return (
                 "not present",
                 f"rejected: {reason}",
-                "A previous proposal failed a check. Retry after tooling, symbols or boundaries change; "
-                "failure of one proposal does not rule out this unit.",
+                (
+                    "A previous proposal failed a check. Retry after tooling, symbols or boundaries change; "
+                    "failure of one proposal does not rule out this unit."
+                ),
                 "previous proposal rejected",
             )
 
@@ -180,8 +182,10 @@ def main():
             return (
                 "not present",
                 "dtk match found no functions from this source unit with a plausible correspondence in the target",
-                "Investigate attribution and improve automated proposal generation; a missing proposal "
-                "does not prove the code is absent.",
+                (
+                    "Investigate attribution and improve automated proposal generation; a missing proposal "
+                    "does not prove the code is absent."
+                ),
                 "no candidate found",
             )
 
@@ -192,10 +196,14 @@ def main():
             if reduced is None:
                 return (
                     "not present",
-                    "matcher proposed disjoint ranges in the same section, and every range in each "
-                    "fragmented section is itself misaligned -- no valid boundary to even guess",
-                    "Needs manual investigation of the real boundary; dtk's own bridging (for small "
-                    "unmatched-function gaps) and dominant_cluster (for larger gaps) both gave up here.",
+                    (
+                        "matcher proposed disjoint ranges in the same section, and every range in each "
+                        "fragmented section is itself misaligned -- no valid boundary to even guess"
+                    ),
+                    (
+                        "Needs manual investigation of the real boundary; dtk's own bridging (for small "
+                        "unmatched-function gaps) and dominant_cluster (for larger gaps) both gave up here."
+                    ),
                     "fragmented, unresolvable",
                 )
             lines = reduced
@@ -204,8 +212,10 @@ def main():
         if not aligned_lines:
             return (
                 "not present",
-                "every section dtk match proposed for this unit fails the target section's alignment "
-                "requirement (ALIGNMENT_REASON) -- dtk dol split would hard-reject it",
+                (
+                    "every section dtk match proposed for this unit fails the target section's alignment "
+                    "requirement (ALIGNMENT_REASON) -- dtk dol split would hard-reject it"
+                ),
                 "Needs a correctly-aligned boundary found manually; the proposed one(s) can't be staged as-is.",
                 "misaligned proposal",
             )

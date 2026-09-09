@@ -52,8 +52,12 @@ Chocolatey's launcher to the real binary before freezing it.
 Replay a prepared stage without publishing:
 
 ```sh
-uv run src/benchmark_parallel.py --run-dir /path/to/prime/build/parallel-migration/runs/RUN_ID --stage discover --repetitions 3
+uv run src/benchmark_parallel.py --run-dir F:/programming/decomp/prime/build/parallel-migration/runs/RUN_ID --stage discover --repetitions 3
 ```
+
+Use `F:/programming/decomp/prime` for future benchmark inputs and artifacts. The
+paths in the measured sections below describe historical runs and remain relative
+to the checkout used for those runs.
 
 Use `--stage coverage` to replay a prepared coverage candidate set. Coverage
 equality includes the selected alternative IDs and complete final report hash.

@@ -38,7 +38,7 @@ class DiscoveryTests(unittest.TestCase):
         proposed = {"A.cpp": [line(0x140, 0x180)]}
         result = dict(discovery.code_proposals(proposed, existing))["A.cpp"]
         self.assertEqual(
-            set(scl.parse_range(l) for l in result),
+            {scl.parse_range(line) for line in result},
             {(".text", 0x100, 0x180), (".data", 0x300, 0x320)},
         )
 
@@ -81,7 +81,8 @@ class EvidenceTests(unittest.TestCase):
                 patch.object(scl, "_main", fail),
                 patch(
                     "sys.argv", ["loop", "--target", "PAL", "--skip-file", str(skip)]
-                ),self.assertRaisesRegex(RuntimeError, "trial failure")
+                ),
+                self.assertRaisesRegex(RuntimeError, "trial failure"),
             ):
                 scl.main()
             self.assertEqual(splits.read_bytes(), b"original splits\r\n")
@@ -158,10 +159,11 @@ class ConfigureTests(unittest.TestCase):
             namespace = {
                 "NonMatching": False,
                 "Matching": True,
-                "MatchingFor": lambda *vs: version in vs,
+                "MatchingFor": lambda *vs, version=version: version in vs,
                 "Object": lambda completed, name: (name, completed),
             }
-            exec(text, namespace)
+            # Execute the trusted generated fixture to verify its runtime semantics.
+            exec(text, namespace)  # noqa: S102
             self.assertEqual(
                 dict(namespace["objects"]),
                 {"A.cpp": True, "B.cpp": version == "PAL", "C.cpp": True},
@@ -214,9 +216,8 @@ class ConfigureTests(unittest.TestCase):
             (self.BASE + 'extra = Object(NonMatching, "B.cpp")\n', {"B.cpp"}),
             (self.BASE.replace('"JP"), "A.cpp"', '"INVALID"), "A.cpp"'), {"A.cpp"}),
         ):
-            with self.subTest(text=text, names=names):
-                with self.assertRaises(ValueError):
-                    render_config(text, "PAL", names)
+            with self.subTest(text=text, names=names), self.assertRaises(ValueError):
+                render_config(text, "PAL", names)
 
     def test_equivalent_can_be_promoted_for_one_version(self):
         original = self.BASE.replace(
@@ -275,7 +276,8 @@ class ConfigureTests(unittest.TestCase):
                     "MatchingFor": lambda *versions: "PAL" in versions,
                     "Object": lambda status, name: (name, status),
                 }
-                exec(config.read_text(encoding="utf-8"), namespace)
+                # Execute the test-owned configure fixture used by the fake builder.
+                exec(config.read_text(encoding="utf-8"), namespace)  # noqa: S102
                 return dict(namespace["objects"])
 
             def report():

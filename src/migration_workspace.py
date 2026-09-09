@@ -164,9 +164,9 @@ def reset_workspace(baseline: Path, workspace: Path, manifest: dict[str, str]) -
     workspace.mkdir(parents=True, exist_ok=True)
     # Validate both trees before removing anything. Generated outputs are retained.
     current = snapshot_manifest(workspace)
-    for relative in manifest:
+    for relative, expected in manifest.items():
         source = _safe_path(baseline, relative)
-        if _hash(source) != manifest[relative]:
+        if _hash(source) != expected:
             raise RuntimeError(f"Baseline changed: {relative}")
         _safe_path(workspace, relative)
     for relative in current.keys() - manifest.keys():

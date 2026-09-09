@@ -18,7 +18,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from migration_runtime import BuildContext
+from migration_runtime import TRIAL_ERRORS, BuildContext
 from migration_workspace import (
     cancel_commands,
     copy_snapshot,
@@ -32,6 +32,13 @@ from migration_workspace import (
 SCHEMA = 2
 SOURCE_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = SOURCE_ROOT.parent
+EXPECTED_OPERATION_ERRORS = TRIAL_ERRORS + (
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    RuntimeError,
+)
 
 
 def read_json(path):
@@ -287,7 +294,7 @@ def execute_jobs(
                     ]
                 )
                 results[spec["job_id"]] = verify_result(read_json(result_path), spec)
-            except Exception as error:
+            except EXPECTED_OPERATION_ERRORS as error:
                 if cancelled.is_set():
                     return
                 write_json(
@@ -573,8 +580,11 @@ def publish(root, integrated, run_dir, run, result):
         if not conflicts and snapshot_manifest(root) == expected:
             try:
                 ctx.build()
-            except Exception:
-                pass
+            except EXPECTED_OPERATION_ERRORS as error:
+                print(
+                    f"Owner inputs were restored, but rebuilding their report failed: {error}",
+                    file=sys.stderr,
+                )
         raise
     journal["status"] = "published"
     write_json(journal_path, journal)

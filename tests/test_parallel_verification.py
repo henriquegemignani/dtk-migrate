@@ -39,7 +39,8 @@ class FixtureContext:
             "NonMatching": False,
             "MatchingFor": lambda *versions: self.target in versions,
         }
-        exec((self.root / "configure.py").read_text(), ns)
+        # Execute the test-owned configure fixture to model project configuration.
+        exec((self.root / "configure.py").read_text(), ns)  # noqa: S102
         return dict(ns["objects"])
 
     def build(self):
@@ -175,9 +176,11 @@ class VerificationAdapterTests(unittest.TestCase):
             )
             return report
 
-        with patch.object(self.ctx, "build", side_effect=changed):
-            with self.assertRaises(ConfigChangedError):
-                evaluate(self.ctx, [{"name": "A.cpp"}])
+        with (
+            patch.object(self.ctx, "build", side_effect=changed),
+            self.assertRaises(ConfigChangedError),
+        ):
+            evaluate(self.ctx, [{"name": "A.cpp"}])
         self.assertIn(b"# edited during successful build", self.path.read_bytes())
 
     def test_prepare_migrates_and_validates_legacy_baseline(self):

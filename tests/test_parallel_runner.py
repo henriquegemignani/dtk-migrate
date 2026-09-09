@@ -178,17 +178,17 @@ class WorkerTests(unittest.TestCase):
                 patch.object(runner, "context", return_value=Context()),
                 patch.object(runner, "as_completed", side_effect=interrupt),
                 patch.object(runner, "cancel_commands", side_effect=stopped.set),
+                self.assertRaises(KeyboardInterrupt),
             ):
-                with self.assertRaises(KeyboardInterrupt):
-                    runner.execute_jobs(
-                        base,
-                        run,
-                        "discover",
-                        base / "stage",
-                        baseline,
-                        snapshot_manifest(baseline),
-                        [{"name": str(n)} for n in range(3)],
-                    )
+                runner.execute_jobs(
+                    base,
+                    run,
+                    "discover",
+                    base / "stage",
+                    baseline,
+                    snapshot_manifest(baseline),
+                    [{"name": str(n)} for n in range(3)],
+                )
             self.assertEqual(len(calls), 1)
 
 
@@ -256,9 +256,11 @@ class IntegrationTests(unittest.TestCase):
                         raise RuntimeError("owner failed")
                     return {"measures": {}}
 
-            with patch.object(runner, "context", return_value=Context()):
-                with self.assertRaisesRegex(RuntimeError, "owner failed"):
-                    runner.publish(root, integrated, run_dir, run, {})
+            with (
+                patch.object(runner, "context", return_value=Context()),
+                self.assertRaisesRegex(RuntimeError, "owner failed"),
+            ):
+                runner.publish(root, integrated, run_dir, run, {})
             self.assertEqual(calls, [b"after", b"before"])
             self.assertEqual(
                 runner.read_json(run_dir / "publication.json")["status"], "rolled-back"
@@ -279,7 +281,8 @@ class IntegrationTests(unittest.TestCase):
 
     def test_union_conflicts_and_dependencies_revalidate_in_canonical_order(self):
         class Context:
-            accepted = set()
+            def __init__(self):
+                self.accepted = set()
 
             def build(self):
                 return {"measures": {"matched_code": len(self.accepted)}}
@@ -288,7 +291,8 @@ class IntegrationTests(unittest.TestCase):
                 return "retail"
 
         class Adapter:
-            calls = []
+            def __init__(self):
+                self.calls = []
 
             def evaluate(self, ctx, candidates):
                 self.calls.append([c["name"] for c in candidates])
@@ -330,7 +334,8 @@ class IntegrationTests(unittest.TestCase):
                 return "retail"
 
         class Adapter:
-            calls = []
+            def __init__(self):
+                self.calls = []
 
             def evaluate(self, ctx, candidates, preferred=None):
                 self.calls.append((candidates, preferred))
