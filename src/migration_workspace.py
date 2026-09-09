@@ -109,7 +109,7 @@ def snapshot_manifest(root: Path) -> dict[str, str]:
     return result
 
 
-def fingerprint(manifest: dict[str, str]) -> str:
+def fingerprint(manifest: object) -> str:
     return hashlib.sha256(
         json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -305,25 +305,33 @@ def run_command(cmd, *, cwd, env, log, capture=False, cancel_event=None):
     job = _WindowsJob() if os.name == "nt" else None
     process = None
     try:
-        options = (
-            {"creationflags": 0x00000004 | subprocess.CREATE_NO_WINDOW}
-            if job
-            else {"start_new_session": True}
-        )
         with _ACTIVE_LOCK:
             if cancel_event is not None and cancel_event.is_set():
                 raise subprocess.CalledProcessError(-9, cmd)
-            process = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                env=env,
-                stdout=subprocess.PIPE if capture else log,
-                stderr=log,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **options,
-            )
+            if job:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdout=subprocess.PIPE if capture else log,
+                    stderr=log,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=0x00000004 | subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    env=env,
+                    stdout=subprocess.PIPE if capture else log,
+                    stderr=log,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    start_new_session=True,
+                )
             _ACTIVE_COMMANDS[process] = job
             if job:
                 job.assign_and_resume(process)
@@ -363,8 +371,11 @@ def _terminate(process, job):
     if job:
         job.close()
     else:
+        kill_process_group = getattr(os, "killpg", None)
+        sigkill = getattr(signal, "SIGKILL", None)
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            if kill_process_group is not None and sigkill is not None:
+                kill_process_group(process.pid, sigkill)
         except ProcessLookupError:
             pass
     if process.poll() is None:

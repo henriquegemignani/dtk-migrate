@@ -4,6 +4,7 @@ Ninja can regenerate itself; the configure rule must retain this adapter too.
 The patch lives only in this subprocess and changes generated rules, not sources.
 """
 
+import importlib
 import os
 import runpy
 import sys
@@ -13,7 +14,7 @@ from pathlib import Path
 def main():
     root = Path.cwd()
     sys.path.insert(0, str(root))
-    from tools import ninja_syntax
+    ninja_syntax = importlib.import_module("tools.ninja_syntax")
 
     original_rule = ninja_syntax.Writer.rule
     jobs = int(os.environ.get("DTK_MIGRATION_BUILD_JOBS", "4"))

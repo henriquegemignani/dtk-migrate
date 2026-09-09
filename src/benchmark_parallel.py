@@ -11,6 +11,7 @@ import statistics
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import parallel_migration as runner
 from migration_workspace import (
@@ -51,11 +52,11 @@ def main():
     if args.repetitions < 1:
         parser.error("repetitions must be positive")
     run_dir = args.run_dir.resolve()
-    run = runner.read_json(run_dir / "run.json")
+    run: dict[str, Any] = runner.read_json(run_dir / "run.json")
     stage = args.stage
     prepared = runner.read_json(run_dir / stage / "prepared.json")
     baseline = run_dir / stage / "baseline"
-    manifest = runner.read_json(run_dir / stage / "manifest.json")
+    manifest = cast(dict[str, str], runner.read_json(run_dir / stage / "manifest.json"))
     if (
         snapshot_manifest(baseline) != manifest
         or runner.symbol_mappings(baseline) != prepared["symbol_mappings"]
@@ -94,9 +95,9 @@ def main():
         toolchain_manifest=toolchain_manifest,
         tooling_root=str(output / "tooling"),
     )
-    samples = []
+    samples: list[dict[str, Any]] = []
     canonical = None
-    with project_lock(Path(run["project_root"])):
+    with project_lock(Path(cast(str, run["project_root"]))):
         for repetition in range(args.repetitions):
             # Alternate order to reduce warm OS cache / thermal bias.
             for count in (1, 3) if repetition % 2 == 0 else (3, 1):

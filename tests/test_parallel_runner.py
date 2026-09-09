@@ -339,6 +339,7 @@ class IntegrationTests(unittest.TestCase):
 
             def evaluate(self, ctx, candidates, preferred=None):
                 self.calls.append((candidates, preferred))
+                preferred = preferred or {}
                 selected = {
                     c["name"]: preferred.get(c["name"], c["alternatives"][0]["id"])
                     for c in candidates

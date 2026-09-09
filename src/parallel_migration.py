@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from migration_runtime import TRIAL_ERRORS, BuildContext
 from migration_workspace import (
@@ -227,7 +228,7 @@ def execute_jobs(
     check_frozen_environment(run)
     batches = candidate_batches(candidates, run["batch_size"])
     baseline_hash = fingerprint(manifest)
-    specs = []
+    specs: list[dict[str, Any]] = []
     for index, batch in enumerate(batches):
         job_id = f"{index:05d}"
         output = stage_dir / "jobs" / epoch / job_id

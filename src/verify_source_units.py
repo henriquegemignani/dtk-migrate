@@ -154,6 +154,10 @@ def render_config(original, version, names):
         else:
             raise ValueError(f"Unsupported matching expression for {name}")
         values = sorted(set(old) | wanted[name], key=rank.__getitem__)
+        if status.end_lineno is None or status.end_col_offset is None:
+            raise ValueError(
+                f"Missing source location for matching expression in {name}"
+            )
         start = offsets[status.lineno - 1] + status.col_offset
         end = offsets[status.end_lineno - 1] + status.end_col_offset
         if b"#" in data[start:end]:

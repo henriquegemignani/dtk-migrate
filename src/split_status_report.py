@@ -30,6 +30,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location(
     "scl", str(SCRIPT_DIR / "split_confidence_loop.py")
 )
+if spec is None or spec.loader is None:
+    raise ImportError("Unable to load split_confidence_loop.py")
 scl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scl)
 

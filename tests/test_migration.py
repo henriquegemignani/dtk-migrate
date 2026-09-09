@@ -164,8 +164,11 @@ class ConfigureTests(unittest.TestCase):
             }
             # Execute the trusted generated fixture to verify its runtime semantics.
             exec(text, namespace)  # noqa: S102
+            objects = namespace.get("objects")
+            if not isinstance(objects, list):
+                self.fail("Generated configuration did not define an object list")
             self.assertEqual(
-                dict(namespace["objects"]),
+                dict(objects),
                 {"A.cpp": True, "B.cpp": version == "PAL", "C.cpp": True},
             )
 
@@ -278,7 +281,10 @@ class ConfigureTests(unittest.TestCase):
                 }
                 # Execute the test-owned configure fixture used by the fake builder.
                 exec(config.read_text(encoding="utf-8"), namespace)  # noqa: S102
-                return dict(namespace["objects"])
+                objects = namespace.get("objects")
+                if not isinstance(objects, list):
+                    self.fail("Fixture configuration did not define an object list")
+                return dict(objects)
 
             def report():
                 flags = enabled()

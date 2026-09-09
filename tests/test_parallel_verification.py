@@ -41,7 +41,10 @@ class FixtureContext:
         }
         # Execute the test-owned configure fixture to model project configuration.
         exec((self.root / "configure.py").read_text(), ns)  # noqa: S102
-        return dict(ns["objects"])
+        objects = ns.get("objects")
+        if not isinstance(objects, list):
+            raise TypeError("Fixture configuration did not define an object list")
+        return dict(objects)
 
     def build(self):
         if self.fatal:
