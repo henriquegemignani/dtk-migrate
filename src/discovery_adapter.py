@@ -1,12 +1,13 @@
 """Measured code discovery with explicit paths and isolated, reversible trials."""
+
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import tempfile
+from pathlib import Path
 
-from discover_splits import by_path, code_bytes, code_proposals
 import split_confidence_loop as scl
+from discover_splits import by_path, code_bytes, code_proposals
 from migration_runtime import TRIAL_ERRORS
 
 VALIDATION = "objdiff matched code; retail hash checks split integrity, not candidate source linkage"
@@ -20,7 +21,9 @@ def _replace(path, data, expected):
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(data)
         if path.read_bytes() != expected:
-            raise RuntimeError(f"{path.name} changed during trial; refusing to overwrite edits")
+            raise RuntimeError(
+                f"{path.name} changed during trial; refusing to overwrite edits"
+            )
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -28,7 +31,9 @@ def _replace(path, data, expected):
 
 def _regresses(before, after):
     old, new = by_path(before), by_path(after)
-    return any(code_bytes(new.get(name, {})) < code_bytes(unit) for name, unit in old.items())
+    return any(
+        code_bytes(new.get(name, {})) < code_bytes(unit) for name, unit in old.items()
+    )
 
 
 def prepare(ctx, limit=None):
@@ -41,30 +46,56 @@ def prepare(ctx, limit=None):
     events = []
     starting = ctx.build()
     try:
-        ctx.run([ctx.dtk, "match", f"config/{ctx.source}/config.yml",
-                 f"config/{ctx.target}/config.yml", "--splits", ctx.output / "proposals.txt",
-                 "--renames", ctx.output / "renames.txt", "-o", ctx.output / "matches.json"])
+        ctx.run(
+            [
+                ctx.dtk,
+                "match",
+                f"config/{ctx.source}/config.yml",
+                f"config/{ctx.target}/config.yml",
+                "--splits",
+                ctx.output / "proposals.txt",
+                "--renames",
+                ctx.output / "renames.txt",
+                "-o",
+                ctx.output / "matches.json",
+            ]
+        )
         try:
             ctx.run([ctx.dtk, "symbols", "rename", symbols, ctx.output / "renames.txt"])
             owned = symbols.read_bytes()
             renamed = ctx.build()
-            reason = "regressed existing matched code" if _regresses(starting, renamed) else None
+            reason = (
+                "regressed existing matched code"
+                if _regresses(starting, renamed)
+                else None
+            )
         except TRIAL_ERRORS as exc:
             owned = symbols.read_bytes()
             reason = str(exc)
         if reason:
             if symbols.read_bytes() != owned:
-                raise RuntimeError("Symbols changed during preparation; refusing to overwrite edits")
+                raise RuntimeError(
+                    "Symbols changed during preparation; refusing to overwrite edits"
+                )
             _replace(symbols, original, owned)
             owned = original
             events.append({"status": "rename-batch-reverted", "reason": reason})
         baseline = ctx.build()
         _, blocks, _ = scl.parse_splits(splits.read_text(encoding="utf-8"))
-        _, proposals, _ = scl.parse_splits((ctx.output / "proposals.txt").read_text(encoding="utf-8"))
-        candidates = [{"name": n, "lines": ls} for n, ls in code_proposals(proposals, blocks)]
+        _, proposals, _ = scl.parse_splits(
+            (ctx.output / "proposals.txt").read_text(encoding="utf-8")
+        )
+        candidates = [
+            {"name": n, "lines": ls} for n, ls in code_proposals(proposals, blocks)
+        ]
         if limit is not None:
             candidates = candidates[:limit]
-        return {"candidates": candidates, "baseline": baseline, "starting": starting, "events": events}
+        return {
+            "candidates": candidates,
+            "baseline": baseline,
+            "starting": starting,
+            "events": events,
+        }
     except BaseException:
         if symbols.read_bytes() == owned:
             _replace(symbols, original, owned)
@@ -84,7 +115,9 @@ def evaluate(ctx, candidates):
     def write(staged, staged_order):
         nonlocal owned
         if splits.read_bytes() != owned:
-            raise RuntimeError("Splits changed during trial; refusing to overwrite edits")
+            raise RuntimeError(
+                "Splits changed during trial; refusing to overwrite edits"
+            )
         descriptor, name = tempfile.mkstemp(prefix="trial-splits.", dir=splits.parent)
         os.close(descriptor)
         temporary = Path(name)
@@ -117,11 +150,19 @@ def evaluate(ctx, candidates):
             retry(batch, "build-conflict")
             return
         before, after = by_path(report), by_path(tested)
-        keep = [c for c in batch if code_bytes(after.get(c["name"], {})) > code_bytes(before.get(c["name"], {}))]
+        keep = [
+            c
+            for c in batch
+            if code_bytes(after.get(c["name"], {}))
+            > code_bytes(before.get(c["name"], {}))
+        ]
         if len(keep) != len(batch):
             kept_names = {c["name"] for c in keep}
-            events.extend({"unit": c["name"], "status": "no-matched-code-gain"}
-                          for c in batch if c["name"] not in kept_names)
+            events.extend(
+                {"unit": c["name"], "status": "no-matched-code-gain"}
+                for c in batch
+                if c["name"] not in kept_names
+            )
             write(blocks, order)
             if keep:
                 trial(keep)
@@ -131,8 +172,13 @@ def evaluate(ctx, candidates):
             return
         for c in keep:
             name = c["name"]
-            events.append({"unit": name, "status": "accepted",
-                           "gain": code_bytes(after[name]) - code_bytes(before.get(name, {}))})
+            events.append(
+                {
+                    "unit": name,
+                    "status": "accepted",
+                    "gain": code_bytes(after[name]) - code_bytes(before.get(name, {})),
+                }
+            )
             if name not in blocks:
                 order.append(name)
             blocks[name] = c["lines"]
@@ -148,9 +194,13 @@ def evaluate(ctx, candidates):
         final = ctx.build()
         if _regresses(report, final):
             raise RuntimeError("Final discovery report regressed after validation")
-        return {"accepted": [c for c in candidates if c["name"] in accepted_names],
-                "deferred": [c for c in candidates if c["name"] not in accepted_names],
-                "events": events, "report": final, "validation": VALIDATION}
+        return {
+            "accepted": [c for c in candidates if c["name"] in accepted_names],
+            "deferred": [c for c in candidates if c["name"] not in accepted_names],
+            "events": events,
+            "report": final,
+            "validation": VALIDATION,
+        }
     except BaseException:
         if splits.read_bytes() == owned:
             _replace(splits, original, owned)

@@ -25,7 +25,9 @@ ROOT_DIR = Path.cwd()
 EXE = ".exe" if platform.system() == "Windows" else ""
 DTK_OVERRIDE: Path | None = None
 
-ENTRY_RE = re.compile(r"^(?P<section>\S+)\s+start:0x(?P<start>[0-9A-Fa-f]+)\s+end:0x(?P<end>[0-9A-Fa-f]+)")
+ENTRY_RE = re.compile(
+    r"^(?P<section>\S+)\s+start:0x(?P<start>[0-9A-Fa-f]+)\s+end:0x(?P<end>[0-9A-Fa-f]+)"
+)
 
 # configure.py's src_dir overrides (grep '"src_dir"' configure.py): most units
 # live under the default "src/", but the two SDK-derived modules override it.
@@ -39,7 +41,7 @@ SOURCE_ROOTS = ("extern/musyx/src/", "extern/sdk/", "src/")
 def strip_source_root(path: str) -> str:
     for root in SOURCE_ROOTS:
         if path.startswith(root):
-            return path[len(root):]
+            return path[len(root) :]
     return path
 
 
@@ -100,12 +102,16 @@ def run(cmd, capture=False):
         cmd = [*cmd, "--dtk", str(DTK_OVERRIDE)]
     print("+", " ".join(str(c) for c in cmd))
     if capture:
-        return subprocess.run(cmd, cwd=ROOT_DIR, check=True, capture_output=True, text=True)
+        return subprocess.run(
+            cmd, cwd=ROOT_DIR, check=True, capture_output=True, text=True
+        )
     subprocess.run(cmd, cwd=ROOT_DIR, check=True)
     return None
 
 
-CONFLICT_RE = re.compile(r"Mismatched splits for .*?\(([^)]+)\) and function .*?\(([^)]+)\)")
+CONFLICT_RE = re.compile(
+    r"Mismatched splits for .*?\(([^)]+)\) and function .*?\(([^)]+)\)"
+)
 CYCLE_RE = re.compile(r"Cyclic dependency encountered while resolving link order: (.+)")
 # decomp-toolkit's own root-cause diagnosis for a link-order cycle: it isolates
 # the specific section (and a small handful of its edges) that's actually
@@ -151,7 +157,9 @@ def extract_conflict_names(text: str) -> set[str]:
 ADDR_RE = re.compile(r"0x[0-9A-Fa-f]{6,8}")
 
 
-def nearest_candidate_by_address(text: str, remaining: list[tuple[str, list[str]]]) -> str | None:
+def nearest_candidate_by_address(
+    text: str, remaining: list[tuple[str, list[str]]]
+) -> str | None:
     """Fallback for a split-step failure shape extract_conflict_names doesn't
     recognize (e.g. an alignment error on an auto_* leftover chunk, which
     names that auto chunk, not one of ours). These are all local
@@ -177,8 +185,7 @@ def nearest_candidate_by_address(text: str, remaining: list[tuple[str, list[str]
 def clean_entry_line(line: str) -> str:
     """Strips a proposal file's leading '#' and trailing '# candidate: ...'
     annotation, if present. A no-op on an already-clean splits.txt line."""
-    if line.startswith("#"):
-        line = line[1:]
+    line = line.removeprefix("#")
     idx = line.find("  # candidate:")
     if idx != -1:
         line = line[:idx]
@@ -274,7 +281,9 @@ def raw_proposal_lines(text: str) -> dict[str, list[str]]:
     return blocks
 
 
-def write_splits(path: Path, header: str, blocks: dict[str, list[str]], order: list[str]):
+def write_splits(
+    path: Path, header: str, blocks: dict[str, list[str]], order: list[str]
+):
     """Writes blocks in exactly `order`. Callers must pass the target file's
     own original order for its existing blocks -- the file isn't sorted by
     address, so re-sorting it would turn every untouched unit into a diff.
@@ -418,7 +427,9 @@ def dominant_cluster(raw_lines: list[str]) -> list[str] | None:
         r = parse_range(cleaned)
         if r:
             section, start, end = r
-            by_section.setdefault(section, []).append((start, end, cleaned, ALIGNMENT_REASON in raw_line))
+            by_section.setdefault(section, []).append(
+                (start, end, cleaned, ALIGNMENT_REASON in raw_line)
+            )
 
     kept: list[str] = []
     for ranges in by_section.values():
@@ -566,7 +577,15 @@ def diff_symbol_addresses(version: str, dtk: Path) -> str:
     nearest_candidate_by_address needs to place blame on a promoted unit."""
     try:
         result = run(
-            [str(dtk), "-L", "error", "dol", "diff", f"config/{version}/config.yml", f"build/{version}/main.elf"],
+            [
+                str(dtk),
+                "-L",
+                "error",
+                "dol",
+                "diff",
+                f"config/{version}/config.yml",
+                f"build/{version}/main.elf",
+            ],
             capture=True,
         )
         return (result.stdout or "") + (result.stderr or "") if result else ""
@@ -667,7 +686,9 @@ class Elf:
 
         # (type, addr, offset, size) -- name kept only for section_name's
         # lookup above, not needed afterward.
-        self.sections = [(sh_type, addr, offset, size) for _, sh_type, addr, offset, size in raw]
+        self.sections = [
+            (sh_type, addr, offset, size) for _, sh_type, addr, offset, size in raw
+        ]
 
     def read_bytes(self, va: int, length: int) -> bytes | None:
         """None for a BSS address (SHT_NOBITS -- runtime-zeroed, no file
@@ -688,8 +709,12 @@ FN_RE = re.compile(r'^\.fn\s+"?([^",]+)"?,')
 # the hard way: it looked like it worked (found a real address, backed by a
 # real opcode-18 decode) purely by luck on the first call site tried, then
 # fell apart on the 2nd and 3rd -- see docs/match_learnings.md.
-ANY_INSTR_RE = re.compile(r"^/\* ([0-9A-Fa-f]{8}) [0-9A-Fa-f]{8}\s+[0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2} \*/")
-BL_INSTR_RE = re.compile(r"^/\* ([0-9A-Fa-f]{8}) [0-9A-Fa-f]{8}\s+([0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2}) \*/\s+bl (\S+)")
+ANY_INSTR_RE = re.compile(
+    r"^/\* ([0-9A-Fa-f]{8}) [0-9A-Fa-f]{8}\s+[0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2} \*/"
+)
+BL_INSTR_RE = re.compile(
+    r"^/\* ([0-9A-Fa-f]{8}) [0-9A-Fa-f]{8}\s+([0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2} [0-9A-Fa-f]{2}) \*/\s+bl (\S+)"
+)
 
 # MWCC's placeholder encoding for a `bl` to an external symbol the compiler
 # has no local definition for: displacement zeroed, LK set. This is what a
@@ -699,7 +724,9 @@ BL_INSTR_RE = re.compile(r"^/\* ([0-9A-Fa-f]{8}) [0-9A-Fa-f]{8}\s+([0-9A-Fa-f]{2
 UNRESOLVED_BL_BYTES = "48 00 00 01"
 
 
-def parse_disasm(disasm_text: str) -> tuple[dict[str, int], dict[str, list[tuple[str, int]]]]:
+def parse_disasm(
+    disasm_text: str,
+) -> tuple[dict[str, int], dict[str, list[tuple[str, int]]]]:
     """Parses `dtk elf disasm` output for (a) each function's own start
     offset within the object file, and (b) every still-unresolved `bl`,
     grouped by the mangled name of the symbol it targets. Offsets are
@@ -779,7 +806,11 @@ def parse_linker_errors(text: str) -> list[dict[str, str]]:
         ref_m = REFERENCED_FROM_RE.search(joined)
         if undefined_m and ref_m:
             errors.append(
-                {"undefined": undefined_m.group(1), "referenced_from": ref_m.group(1), "object": ref_m.group(2)}
+                {
+                    "undefined": undefined_m.group(1),
+                    "referenced_from": ref_m.group(1),
+                    "object": ref_m.group(2),
+                }
             )
     return errors
 
@@ -800,7 +831,10 @@ def demangled_to_mangled(unit: dict, demangled_name: str) -> str | None:
     by mangled name."""
     target = normalize_signature(demangled_name)
     for f in unit.get("functions") or []:
-        if normalize_signature(f.get("metadata", {}).get("demangled_name", "")) == target:
+        if (
+            normalize_signature(f.get("metadata", {}).get("demangled_name", ""))
+            == target
+        ):
             return f["name"]
     return None
 
@@ -834,14 +868,20 @@ def apply_symbol_fix(symbols_path: Path, mangled_name: str, address: int) -> boo
     return False
 
 
-def suggest_undefined_symbol_fixes(version: str, unit_name: str, link_error_text: str, report: dict, symbols_path: Path) -> bool:
+def suggest_undefined_symbol_fixes(
+    version: str, unit_name: str, link_error_text: str, report: dict, symbols_path: Path
+) -> bool:
     """For every undefined-symbol error blamed on `unit_name`, tries to
     recover the real address from the retail DOL (see resolve_undefined_symbol)
     and, when every call site agrees, applies it to symbols.txt via
     apply_symbol_fix and prints what it did. Returns True only if every
     error for this unit got resolved and applied -- the caller can then
     retry linking this unit instead of giving up on it."""
-    errors = [e for e in parse_linker_errors(link_error_text) if e["object"] == Path(unit_name).stem]
+    errors = [
+        e
+        for e in parse_linker_errors(link_error_text)
+        if e["object"] == Path(unit_name).stem
+    ]
     if not errors:
         return False
 
@@ -849,7 +889,8 @@ def suggest_undefined_symbol_fixes(version: str, unit_name: str, link_error_text
         (
             u
             for u in report["units"]
-            if strip_source_root(u.get("metadata", {}).get("source_path", "")) == unit_name
+            if strip_source_root(u.get("metadata", {}).get("source_path", ""))
+            == unit_name
         ),
         None,
     )
@@ -866,9 +907,17 @@ def suggest_undefined_symbol_fixes(version: str, unit_name: str, link_error_text
         return False
     disasm_path = ROOT_DIR / "build" / version / f"{Path(unit_name).stem}.disasm.s"
     try:
-        run([str(ROOT_DIR / "build" / "tools" / f"dtk{EXE}"), "elf", "disasm", str(obj_path), str(disasm_path)])
+        run(
+            [
+                str(ROOT_DIR / "build" / "tools" / f"dtk{EXE}"),
+                "elf",
+                "disasm",
+                str(obj_path),
+                str(disasm_path),
+            ]
+        )
         disasm_text = disasm_path.read_text(encoding="utf-8")
-    except (subprocess.CalledProcessError, OSError):
+    except subprocess.CalledProcessError, OSError:
         return False
     finally:
         disasm_path.unlink(missing_ok=True)
@@ -897,14 +946,23 @@ def suggest_undefined_symbol_fixes(version: str, unit_name: str, link_error_text
             if not any(caller == caller_mangled for caller, _off in sites):
                 continue
             demangled = run(
-                [str(ROOT_DIR / "build" / "tools" / f"dtk{EXE}"), "demangle", mangled_name], capture=True
+                [
+                    str(ROOT_DIR / "build" / "tools" / f"dtk{EXE}"),
+                    "demangle",
+                    mangled_name,
+                ],
+                capture=True,
             ).stdout.strip()
-            if normalize_signature(demangled) != normalize_signature(error["undefined"]):
+            if normalize_signature(demangled) != normalize_signature(
+                error["undefined"]
+            ):
                 continue
             if mangled_name in applied:
                 resolved_this_error = True
                 break
-            result = resolve_undefined_symbol(dol, disasm_text, mangled_name, function_vas)
+            result = resolve_undefined_symbol(
+                dol, disasm_text, mangled_name, function_vas
+            )
             if result is None:
                 print(f"    (couldn't recover an address for {error['undefined']})")
                 continue
@@ -928,7 +986,9 @@ def suggest_undefined_symbol_fixes(version: str, unit_name: str, link_error_text
     return all_resolved
 
 
-def sorted_ranges_by_section(blocks: dict[str, list[str]]) -> dict[str, list[tuple[int, int, str]]]:
+def sorted_ranges_by_section(
+    blocks: dict[str, list[str]],
+) -> dict[str, list[tuple[int, int, str]]]:
     """(start, end, unit) triples per section, address-sorted -- the
     layout find_suspicious_sections (below) checks a candidate's proposed
     neighbors against."""
@@ -984,15 +1044,23 @@ def find_suspicious_sections(
         if not r:
             continue
         section, start, end = r
-        items = [it for it in target_ranges_by_section.get(section, []) if it[2] != name]
+        items = [
+            it for it in target_ranges_by_section.get(section, []) if it[2] != name
+        ]
         i = bisect.bisect_left(items, (start, end, ""))
         neighbor_names = [items[j][2] for j in (i - 1, i) if 0 <= j < len(items)]
-        distances = [abs(ntsc_position[n] - our_pos) for n in neighbor_names if n in ntsc_position]
+        distances = [
+            abs(ntsc_position[n] - our_pos)
+            for n in neighbor_names
+            if n in ntsc_position
+        ]
         if distances and min(distances) > MAX_NTSC_NEIGHBOR_DISTANCE:
-            flagged.append((
-                section,
-                f"target neighbor is {min(distances)} position(s) away in NTSC's own declaration order",
-            ))
+            flagged.append(
+                (
+                    section,
+                    f"target neighbor is {min(distances)} position(s) away in NTSC's own declaration order",
+                )
+            )
     return flagged
 
 
@@ -1119,15 +1187,19 @@ def resolve_batch_link_order(
         blocks.update({n: candidates[n] for n in order})
         graph = build_link_order_graph(blocks)
         sccs = find_sccs(graph)
-        cyclic_candidates = {n for scc in sccs if len(scc) > 1 for n in scc if n in candidates}
+        cyclic_candidates = {
+            n for scc in sccs if len(scc) > 1 for n in scc if n in candidates
+        }
         if not cyclic_candidates:
             break
         worst = max((n for n in order if n in cyclic_candidates), key=order.index)
         order.remove(worst)
-        dropped.append((
-            worst,
-            "implied link order conflicts with another staged candidate (resolved before building)",
-        ))
+        dropped.append(
+            (
+                worst,
+                "implied link order conflicts with another staged candidate (resolved before building)",
+            )
+        )
     kept = [(n, candidates[n]) for n in order]
     return kept, dropped
 
@@ -1135,7 +1207,9 @@ def resolve_batch_link_order(
 MAX_CONFLICT_RETRIES = 450
 
 
-def trim_to_confirmed_functions(unit: dict, lines: list[str], bad_section_names: set[str]) -> list[str] | None:
+def trim_to_confirmed_functions(
+    unit: dict, lines: list[str], bad_section_names: set[str]
+) -> list[str] | None:
     """A rejected candidate's *section*-level fuzzy score can hide that most
     of its individual functions actually compiled byte-identical -- dtk's
     report carries a separate fuzzy_match_percent per function, not just the
@@ -1193,7 +1267,9 @@ def trim_to_confirmed_functions(unit: dict, lines: list[str], bad_section_names:
     return trimmed
 
 
-def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf, *, source_linked=False):
+def classify_built_unit(
+    name, lines, by_path, neighbors, orig_dol, linked_elf, *, source_linked=False
+):
     """Classifies one staged-and-built candidate against `by_path` (a
     report's units, keyed by source path -- see main()). Returns (bucket,
     reason, byte_confirmed, trim): bucket is 'promoted', 'rejected', or
@@ -1232,7 +1308,9 @@ def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf, *
         trim = trim_to_confirmed_functions(unit, lines, bad_names)
         return "rejected", reason, False, trim
     elif all(neighbors.borders_unclaimed(*section_range(s)) for s in bad):
-        own_ranges = {r[0]: (r[1], r[2] - r[1]) for r in (parse_range(l) for l in lines) if r}
+        own_ranges = {
+            r[0]: (r[1], r[2] - r[1]) for r in (parse_range(l) for l in lines) if r
+        }
         confirmed = (
             source_linked
             and orig_dol is not None
@@ -1246,12 +1324,25 @@ def classify_built_unit(name, lines, by_path, neighbors, orig_dol, linked_elf, *
         )
         if confirmed:
             return "promoted", None, True, None
-        return "blocked", f"{reason} -- neighboring auto symbol is only a boundary-artifact heuristic", False, None
+        return (
+            "blocked",
+            f"{reason} -- neighboring auto symbol is only a boundary-artifact heuristic",
+            False,
+            None,
+        )
     else:
         return "rejected", reason, False, None
 
 
-def stage_and_build(splits_path, header, existing_blocks, existing_order, candidates, original_text, version):
+def stage_and_build(
+    splits_path,
+    header,
+    existing_blocks,
+    existing_order,
+    candidates,
+    original_text,
+    version,
+):
     """Stages `candidates` on top of `existing_blocks` and builds. The DOL
     split step catches things the address-overlap filter can't -- e.g. a
     .ctors table entry and the function it points to ending up attributed to
@@ -1266,11 +1357,16 @@ def stage_and_build(splits_path, header, existing_blocks, existing_order, candid
     for _ in range(MAX_CONFLICT_RETRIES):
         staged = dict(existing_blocks)
         staged.update(remaining)
-        write_splits(splits_path, header, staged, existing_order + [n for n, _ in remaining])
+        write_splits(
+            splits_path, header, staged, existing_order + [n for n, _ in remaining]
+        )
         if not remaining:
             return load_report(version), remaining, excluded
         try:
-            run([sys.executable, "configure.py", "configure", "-v", version], capture=True)
+            run(
+                [sys.executable, "configure.py", "configure", "-v", version],
+                capture=True,
+            )
             run(["ninja", f"build/{version}/report.json"], capture=True)
             return load_report(version), remaining, excluded
         except subprocess.CalledProcessError as e:
@@ -1296,7 +1392,9 @@ def stage_and_build(splits_path, header, existing_blocks, existing_order, candid
                     reason = "unrecognized split-step failure nearby (see log); dropped by address proximity"
             if not dropped:
                 splits_path.write_text(original_text, encoding="utf-8")
-                print("\nBuild failed for a reason this script can't auto-resolve; restored the original splits.txt.")
+                print(
+                    "\nBuild failed for a reason this script can't auto-resolve; restored the original splits.txt."
+                )
                 print(text[-4000:])
                 raise
             for name in dropped:
@@ -1304,7 +1402,9 @@ def stage_and_build(splits_path, header, existing_blocks, existing_order, candid
             excluded.extend((name, reason) for name in dropped)
             remaining = [(n, l) for n, l in remaining if n not in dropped]
     splits_path.write_text(original_text, encoding="utf-8")
-    raise RuntimeError(f"gave up after {MAX_CONFLICT_RETRIES} conflict retries; restored the original splits.txt")
+    raise RuntimeError(
+        f"gave up after {MAX_CONFLICT_RETRIES} conflict retries; restored the original splits.txt"
+    )
 
 
 def _main():
@@ -1313,11 +1413,33 @@ def _main():
         description="Speculatively build dtk match's candidate split proposals and keep "
         "only the ones with matching comparison sections (not whole-file link verification)."
     )
-    parser.add_argument("--source", default="GM8E01_00", help="source version (the one with known names)")
-    parser.add_argument("--target", required=True, help="target version to propose new splits for")
-    parser.add_argument("--dtk", type=Path, default=None, help="path to the dtk binary (default: build/tools/dtk)")
-    parser.add_argument("-c", "--min-confidence", type=float, default=None, help="passed through to `dtk match`")
-    parser.add_argument("--limit", type=int, default=None, help="seed this many candidates, highest function confidence first; companions may exceed this")
+    parser.add_argument(
+        "--source",
+        default="GM8E01_00",
+        help="source version (the one with known names)",
+    )
+    parser.add_argument(
+        "--target", required=True, help="target version to propose new splits for"
+    )
+    parser.add_argument(
+        "--dtk",
+        type=Path,
+        default=None,
+        help="path to the dtk binary (default: build/tools/dtk)",
+    )
+    parser.add_argument(
+        "-c",
+        "--min-confidence",
+        type=float,
+        default=None,
+        help="passed through to `dtk match`",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="seed this many candidates, highest function confidence first; companions may exceed this",
+    )
     parser.add_argument(
         "--skip-file",
         type=Path,
@@ -1337,21 +1459,29 @@ def _main():
     splits_path = ROOT_DIR / "config" / args.target / "splits.txt"
     proposal_path = ROOT_DIR / "build" / args.target / "match_candidates.txt"
     proposal_path.parent.mkdir(parents=True, exist_ok=True)
-    skip_path = args.skip_file or (ROOT_DIR / "build" / args.target / "split_confidence_skip.txt")
+    skip_path = args.skip_file or (
+        ROOT_DIR / "build" / args.target / "split_confidence_skip.txt"
+    )
     skip_list = load_skip_list(skip_path)
 
     match_report_path = ROOT_DIR / "build" / args.target / "match_report.json"
     print(f"Matching {args.source} -> {args.target} ...")
     match_cmd = [
-        str(dtk), "match",
-        f"config/{args.source}/config.yml", f"config/{args.target}/config.yml",
-        "--splits", str(proposal_path),
-        "-o", str(match_report_path),
+        str(dtk),
+        "match",
+        f"config/{args.source}/config.yml",
+        f"config/{args.target}/config.yml",
+        "--splits",
+        str(proposal_path),
+        "-o",
+        str(match_report_path),
     ]
     if args.min_confidence is not None:
         match_cmd += ["-c", str(args.min_confidence)]
     run(match_cmd)
-    func_confidence = FunctionConfidence(json.loads(match_report_path.read_text(encoding="utf-8")))
+    func_confidence = FunctionConfidence(
+        json.loads(match_report_path.read_text(encoding="utf-8"))
+    )
 
     original_text = splits_path.read_text(encoding="utf-8")
     header, existing_blocks, existing_order = parse_splits(original_text)
@@ -1394,7 +1524,10 @@ def _main():
         if not lines:
             continue
         ranges = [r for r in (parse_range(l) for l in lines) if r]
-        if any(overlaps_claimed(claimed, section, start, end) for section, start, end in ranges):
+        if any(
+            overlaps_claimed(claimed, section, start, end)
+            for section, start, end in ranges
+        ):
             print(f"  skip {name}: overlaps an existing or already-staged split")
             continue
         for section, start, end in ranges:
@@ -1417,7 +1550,9 @@ def _main():
             "its boundary as failing the section's alignment requirement, see drop_misaligned_sections)"
         )
     if skipped_known_bad:
-        print(f"  ({skipped_known_bad} proposed unit(s) skipped: already ruled out by a previous run, see {skip_path})")
+        print(
+            f"  ({skipped_known_bad} proposed unit(s) skipped: already ruled out by a previous run, see {skip_path})"
+        )
 
     # A section whose nearest real target-side neighbor is nowhere near
     # this unit's own NTSC position is a weak, likely-wrong match, even
@@ -1425,12 +1560,16 @@ def _main():
     # just the flagged section(s); the rest of the candidate (often just
     # .text) is usually still a real, worthwhile bet, and this is cheap
     # to run before ever staging anything, let alone building it.
-    target_ranges_by_section = sorted_ranges_by_section({**existing_blocks, **dict(candidates)})
+    target_ranges_by_section = sorted_ranges_by_section(
+        {**existing_blocks, **dict(candidates)}
+    )
     suspicious_sections = 0
     suspicious_units = 0
     checked_candidates = []
     for name, lines in candidates:
-        flagged = find_suspicious_sections(name, lines, ntsc_position, target_ranges_by_section)
+        flagged = find_suspicious_sections(
+            name, lines, ntsc_position, target_ranges_by_section
+        )
         if not flagged:
             checked_candidates.append((name, lines))
             continue
@@ -1519,7 +1658,9 @@ def _main():
     # this first turns what used to take dozens of slow build-and-drop-one
     # retries into a single, near-instant pass; stage_and_build's own
     # retry loop still catches whatever this simplified model misses.
-    candidates, link_order_dropped = resolve_batch_link_order(existing_blocks, candidates)
+    candidates, link_order_dropped = resolve_batch_link_order(
+        existing_blocks, candidates
+    )
     if link_order_dropped:
         print(
             f"  ({len(link_order_dropped)} candidate(s) dropped up front: implied link order "
@@ -1542,7 +1683,11 @@ def _main():
     print(f"\nStaging {len(candidates)} candidate unit(s) for a speculative build:")
     for name, lines in candidates:
         all_conf, min_conf = func_confidence.score(lines)
-        tag = "confident" if all_conf else ("no .text" if min_conf < 0 else "mixed/probable")
+        tag = (
+            "confident"
+            if all_conf
+            else ("no .text" if min_conf < 0 else "mixed/probable")
+        )
         if name in reduced_names:
             tag += ", reduced from fragmented"
         if name in companion_of:
@@ -1551,7 +1696,13 @@ def _main():
     print()
 
     report, built, excluded = stage_and_build(
-        splits_path, header, existing_blocks, existing_order, candidates, original_text, args.target
+        splits_path,
+        header,
+        existing_blocks,
+        existing_order,
+        candidates,
+        original_text,
+        args.target,
     )
     excluded = link_order_dropped + excluded
 
@@ -1618,8 +1769,13 @@ def _main():
                 print(f"  ? {name} (was: {trim_origin[name]})")
             retry_existing_blocks = dict(final_blocks)
             retry_report, retry_built, retry_excluded = stage_and_build(
-                splits_path, header, retry_existing_blocks, existing_order + promoted,
-                trim_candidates, original_text, args.target,
+                splits_path,
+                header,
+                retry_existing_blocks,
+                existing_order + promoted,
+                trim_candidates,
+                original_text,
+                args.target,
             )
             excluded += retry_excluded
             retry_by_path = {
@@ -1644,7 +1800,12 @@ def _main():
                 elif bucket == "blocked":
                     blocked.append((name, reason))
                 else:
-                    rejected.append((name, f"auto-trimmed boundary still {reason} (was: {trim_origin[name]})"))
+                    rejected.append(
+                        (
+                            name,
+                            f"auto-trimmed boundary still {reason} (was: {trim_origin[name]})",
+                        )
+                    )
             final_blocks = dict(existing_blocks)
         for name in promoted:
             final_blocks[name] = candidates_by_name[name]
@@ -1654,19 +1815,29 @@ def _main():
         print("\nEvaluating the build failed; restored the original splits.txt.")
         raise
 
-    print(f"\nPromoted {len(promoted)} unit(s) with matching comparison sections (pending final split-integrity check):")
+    print(
+        f"\nPromoted {len(promoted)} unit(s) with matching comparison sections (pending final split-integrity check):"
+    )
     for name in promoted:
-        tag = " (confirmed by direct byte comparison, not fuzzy match)" if name in byte_confirmed else ""
+        tag = (
+            " (confirmed by direct byte comparison, not fuzzy match)"
+            if name in byte_confirmed
+            else ""
+        )
         print(f"  + {name}{tag}")
     print(f"\nRejected {len(rejected)} unit(s):")
     for name, reason in rejected:
         print(f"  - {name}: {reason}")
     if blocked:
-        print(f"\nBlocked on an unclaimed neighbor (not persisted, retry later) {len(blocked)} unit(s):")
+        print(
+            f"\nBlocked on an unclaimed neighbor (not persisted, retry later) {len(blocked)} unit(s):"
+        )
         for name, reason in blocked:
             print(f"  - {name}: {reason}")
     if excluded:
-        print(f"\nExcluded {len(excluded)} unit(s) before build, due to a structural split conflict:")
+        print(
+            f"\nExcluded {len(excluded)} unit(s) before build, due to a structural split conflict:"
+        )
         for name, reason in excluded:
             print(f"  - {name}: {reason}")
 
@@ -1685,7 +1856,9 @@ def _main():
 
     unlinkable: list[tuple[str, str]] = []
     if promoted:
-        print("\nVerifying the promoted set actually links (report.json alone doesn't check this)...")
+        print(
+            "\nVerifying the promoted set actually links (report.json alone doesn't check this)..."
+        )
         for _ in range(MAX_CONFLICT_RETRIES):
             ok, text = verify_link(args.target)
             if ok:
@@ -1703,8 +1876,12 @@ def _main():
             still_broken = []
             for name in reverted:
                 print(f"  {name}: calls an undefined symbol at link time (see log)")
-                if suggest_undefined_symbol_fixes(args.target, name, text, report, symbols_path):
-                    print(f"    -> resolved and applied to symbols.txt; retrying {name}")
+                if suggest_undefined_symbol_fixes(
+                    args.target, name, text, report, symbols_path
+                ):
+                    print(
+                        f"    -> resolved and applied to symbols.txt; retrying {name}"
+                    )
                 else:
                     print(f"  revert {name}")
                     unlinkable.append((name, "causes an undefined-symbol link error"))
@@ -1716,16 +1893,22 @@ def _main():
             write_splits(splits_path, header, final_blocks, existing_order + promoted)
         else:
             splits_path.write_text(original_text, encoding="utf-8")
-            raise RuntimeError(f"gave up after {MAX_CONFLICT_RETRIES} link-check retries")
+            raise RuntimeError(
+                f"gave up after {MAX_CONFLICT_RETRIES} link-check retries"
+            )
 
         if unlinkable:
-            print(f"\nReverted {len(unlinkable)} unit(s) that broke the link (not persisted, retry later):")
+            print(
+                f"\nReverted {len(unlinkable)} unit(s) that broke the link (not persisted, retry later):"
+            )
             for name, reason in unlinkable:
                 print(f"  - {name}: {reason}")
 
         hash_broken: list[tuple[str, str]] = []
         if promoted:
-            print("\nVerifying the promoted set doesn't break the full-DOL hash check...")
+            print(
+                "\nVerifying the promoted set doesn't break the full-DOL hash check..."
+            )
             for _ in range(MAX_CONFLICT_RETRIES):
                 ok, _text = verify_full_hash(args.target)
                 if ok:
@@ -1752,10 +1935,14 @@ def _main():
                 final_blocks = dict(existing_blocks)
                 for name in promoted:
                     final_blocks[name] = candidates_by_name[name]
-                write_splits(splits_path, header, final_blocks, existing_order + promoted)
+                write_splits(
+                    splits_path, header, final_blocks, existing_order + promoted
+                )
             else:
                 splits_path.write_text(original_text, encoding="utf-8")
-                raise RuntimeError(f"gave up after {MAX_CONFLICT_RETRIES} hash-check retries")
+                raise RuntimeError(
+                    f"gave up after {MAX_CONFLICT_RETRIES} hash-check retries"
+                )
 
         # Address proximity only chooses a trial to revert. It does not prove
         # that unit caused the batch failure, so never permanently blacklist it.
@@ -1771,7 +1958,9 @@ def _main():
             # ELF, so `dol apply` (see decomp-toolkit's src/cmd/dol.rs) can
             # safely copy those names/sizes/scopes back into symbols.txt,
             # replacing any auto_* placeholder dtk had invented there.
-            print("\nSyncing symbol names/sizes for the newly fully-matching unit(s) (`ninja apply`)...")
+            print(
+                "\nSyncing symbol names/sizes for the newly fully-matching unit(s) (`ninja apply`)..."
+            )
             run([sys.executable, "configure.py", "configure", "-v", args.target])
             run(["ninja", "apply"])
 
@@ -1791,8 +1980,14 @@ def main():
     args, _ = probe.parse_known_args()
     snapshots = {}
     if args.target:
-        paths = [ROOT_DIR / "config" / args.target / name for name in ("splits.txt", "symbols.txt")]
-        paths.append(args.skip_file or ROOT_DIR / "build" / args.target / "split_confidence_skip.txt")
+        paths = [
+            ROOT_DIR / "config" / args.target / name
+            for name in ("splits.txt", "symbols.txt")
+        ]
+        paths.append(
+            args.skip_file
+            or ROOT_DIR / "build" / args.target / "split_confidence_skip.txt"
+        )
         snapshots = {p: p.read_bytes() if p.exists() else None for p in paths}
     try:
         _main()
@@ -1812,7 +2007,9 @@ def main():
             try:
                 reconfigure_and_build(args.target, f"build/{args.target}/report.json")
             except Exception as error:
-                print(f"Input files restored, but regenerating the baseline report failed: {error}")
+                print(
+                    f"Input files restored, but regenerating the baseline report failed: {error}"
+                )
         raise
 
 

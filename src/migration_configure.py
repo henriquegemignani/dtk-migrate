@@ -3,10 +3,11 @@
 Ninja can regenerate itself; the configure rule must retain this adapter too.
 The patch lives only in this subprocess and changes generated rules, not sources.
 """
-from pathlib import Path
+
 import os
 import runpy
 import sys
+from pathlib import Path
 
 
 def main():
@@ -24,7 +25,9 @@ def main():
         if name == "split":
             if " dol split " not in command:
                 raise RuntimeError("Unsupported dtk-template split rule")
-            command = command.replace(" dol split ", f" dol split --no-update -j {jobs} ", 1)
+            command = command.replace(
+                " dol split ", f" dol split --no-update -j {jobs} ", 1
+            )
         elif name == "configure":
             if "$python" not in command or "$configure_args" not in command:
                 raise RuntimeError("Unsupported dtk-template configure rule")

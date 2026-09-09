@@ -1,22 +1,30 @@
 """Discovery gates exercised without invoking a retail project or compiler."""
+
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
 import discovery_adapter as adapter
-from migration_runtime import ValidationError
 import split_confidence_loop as scl
+from migration_runtime import ValidationError
 
 
 def candidate(name):
     start = 0x100 + ord(name[0]) * 16
-    return {"name": name, "lines": [f"\t.text start:0x{start:08X} end:0x{start + 16:08X}"]}
+    return {
+        "name": name,
+        "lines": [f"\t.text start:0x{start:08X} end:0x{start + 16:08X}"],
+    }
 
 
 def report(values):
-    return {"units": [{"metadata": {"source_path": "src/" + n}, "measures": {"matched_code": v}}
-                      for n, v in values.items()],
-            "measures": {"matched_code": sum(values.values()), "total_code": 1000}}
+    return {
+        "units": [
+            {"metadata": {"source_path": "src/" + n}, "measures": {"matched_code": v}}
+            for n, v in values.items()
+        ],
+        "measures": {"matched_code": sum(values.values()), "total_code": 1000},
+    }
 
 
 class FakeContext:
@@ -38,8 +46,12 @@ class FakeContext:
 
     def run(self, cmd):
         if cmd[1] == "match":
-            scl.write_splits(self.output / "proposals.txt", "Sections:\n\t.text type:code\n\n",
-                             {"A.cpp": candidate("A.cpp")["lines"]}, ["A.cpp"])
+            scl.write_splits(
+                self.output / "proposals.txt",
+                "Sections:\n\t.text type:code\n\n",
+                {"A.cpp": candidate("A.cpp")["lines"]},
+                ["A.cpp"],
+            )
         else:
             self.splits.with_name("symbols.txt").write_text("renamed", encoding="utf-8")
 
@@ -51,7 +63,9 @@ class DiscoveryAdapterTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
 
     def test_gain_filters_and_final_report_matches_restored_state(self):
-        ctx = FakeContext(self.root, lambda names: {n: 0 if n == "B.cpp" else 10 for n in names})
+        ctx = FakeContext(
+            self.root, lambda names: {n: 0 if n == "B.cpp" else 10 for n in names}
+        )
         a, b = candidate("A.cpp"), candidate("B.cpp")
         result = adapter.evaluate(ctx, [a, b])
         self.assertEqual(result["accepted"], [a])
@@ -64,6 +78,7 @@ class DiscoveryAdapterTests(unittest.TestCase):
             if "B.cpp" in names:
                 raise ValidationError("retail differs")
             return {n: 10 for n in names}
+
         ctx = FakeContext(self.root, behavior)
         a, b, c = [candidate(n + ".cpp") for n in "ABC"]
         result = adapter.evaluate(ctx, [a, b, c])
@@ -75,6 +90,7 @@ class DiscoveryAdapterTests(unittest.TestCase):
             if {"A.cpp", "B.cpp"} <= names:
                 raise ValidationError("combined conflict")
             return {n: 10 for n in names}
+
         ctx = FakeContext(self.root, behavior)
         a, b = candidate("A.cpp"), candidate("B.cpp")
         self.assertEqual(adapter.evaluate(ctx, [a])["accepted"], [a])
@@ -82,7 +98,13 @@ class DiscoveryAdapterTests(unittest.TestCase):
         self.assertEqual(set(adapter.by_path(ctx.build())), {"A.cpp"})
 
     def test_per_unit_regression_rejects_aggregate_gain(self):
-        ctx = FakeContext(self.root, lambda names: {"existing.cpp": 0 if names else 10, **{n: 100 for n in names}})
+        ctx = FakeContext(
+            self.root,
+            lambda names: {
+                "existing.cpp": 0 if names else 10,
+                **{n: 100 for n in names},
+            },
+        )
         a = candidate("A.cpp")
         result = adapter.evaluate(ctx, [a])
         self.assertEqual(result["accepted"], [])
@@ -93,6 +115,7 @@ class DiscoveryAdapterTests(unittest.TestCase):
             if names:
                 raise OSError("disk error")
             return {}
+
         ctx = FakeContext(self.root, behavior)
         original = ctx.splits.read_bytes()
         with self.assertRaises(OSError):
@@ -101,11 +124,13 @@ class DiscoveryAdapterTests(unittest.TestCase):
 
     def test_external_edit_survives_fatal_exception(self):
         ctx = FakeContext(self.root)
+
         def behavior(names):
             if names:
                 ctx.splits.write_text("user edits")
                 raise OSError("interrupted")
             return {}
+
         ctx.behavior = behavior
         with self.assertRaises(OSError):
             adapter.evaluate(ctx, [candidate("A.cpp")])
@@ -113,7 +138,11 @@ class DiscoveryAdapterTests(unittest.TestCase):
 
     def test_prepare_reverts_regressing_renames(self):
         ctx = FakeContext(self.root)
-        ctx.behavior = lambda names: {"existing.cpp": 0 if ctx.splits.with_name("symbols.txt").read_text() == "renamed" else 10}
+        ctx.behavior = lambda names: {
+            "existing.cpp": 0
+            if ctx.splits.with_name("symbols.txt").read_text() == "renamed"
+            else 10
+        }
         prepared = adapter.prepare(ctx)
         self.assertEqual(ctx.splits.with_name("symbols.txt").read_text(), "original")
         self.assertEqual(prepared["events"][0]["status"], "rename-batch-reverted")

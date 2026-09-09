@@ -1,14 +1,14 @@
 """Filesystem isolation and real subprocess-tree lifecycle regression tests."""
+
 import ctypes
-import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import migration_workspace as workspace
@@ -61,7 +61,16 @@ class SnapshotTests(unittest.TestCase):
         write(self.root, "objdiff.json", "generated")
         write(self.root, ".migration.lock", "lock")
         manifest = workspace.snapshot_manifest(self.root)
-        self.assertEqual(set(manifest), {"src/dirty.cpp", "new.cpp", "vendor/library/file", "build/compilers/mwcceppc.exe", "build/tools/dtk.exe"})
+        self.assertEqual(
+            set(manifest),
+            {
+                "src/dirty.cpp",
+                "new.cpp",
+                "vendor/library/file",
+                "build/compilers/mwcceppc.exe",
+                "build/tools/dtk.exe",
+            },
+        )
         destination = self.root.parent / "copy"
         workspace.copy_snapshot(self.root, destination, manifest)
         self.assertEqual(manifest, workspace.snapshot_manifest(destination))
@@ -80,14 +89,22 @@ class SnapshotTests(unittest.TestCase):
         marker = self.root.parent / "ready"
         source_root = str(Path(workspace.__file__).resolve().parent)
         code = "from pathlib import Path; import sys,time; "
-        code += "sys.path.insert(0, " + repr(source_root) + "); from migration_workspace import project_lock; "
-        code += "lock = project_lock(Path(" + repr(str(self.root)) + ")); lock.__enter__(); "
+        code += (
+            "sys.path.insert(0, "
+            + repr(source_root)
+            + "); from migration_workspace import project_lock; "
+        )
+        code += (
+            "lock = project_lock(Path("
+            + repr(str(self.root))
+            + ")); lock.__enter__(); "
+        )
         code += "Path(" + repr(str(marker)) + ").write_text('ready'); time.sleep(60)"
         process = subprocess.Popen([sys.executable, "-c", code])
         try:
             deadline = time.monotonic() + 10
             while not marker.exists() and time.monotonic() < deadline:
-                time.sleep(.025)
+                time.sleep(0.025)
             self.assertTrue(marker.exists())
             with self.assertRaises(RuntimeError):
                 with workspace.project_lock(self.root):
@@ -115,16 +132,22 @@ class SnapshotTests(unittest.TestCase):
         write(destination, "build/PAL/cache.o", "private cache")
         workspace.reset_workspace(self.root, destination, manifest)
         self.assertEqual(workspace.snapshot_manifest(destination), manifest)
-        self.assertEqual((destination / "build/PAL/cache.o").read_text(), "private cache")
+        self.assertEqual(
+            (destination / "build/PAL/cache.o").read_text(), "private cache"
+        )
 
     def test_no_copy_into_source(self):
         write(self.root, "file")
         with self.assertRaises(ValueError):
-            workspace.copy_snapshot(self.root, self.root / "nested", workspace.snapshot_manifest(self.root))
+            workspace.copy_snapshot(
+                self.root, self.root / "nested", workspace.snapshot_manifest(self.root)
+            )
 
     def test_rejects_path_escape(self):
         with self.assertRaises(ValueError):
-            workspace.copy_snapshot(self.root, self.root.parent / "copy", {"../escape": "hash"})
+            workspace.copy_snapshot(
+                self.root, self.root.parent / "copy", {"../escape": "hash"}
+            )
 
     def test_link_is_rejected(self):
         target = write(self.root.parent, "external/file")
@@ -140,7 +163,10 @@ class SnapshotTests(unittest.TestCase):
         target = self.root.parent / "external"
         target.mkdir()
         junction = self.root / "junction"
-        result = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(target)], capture_output=True)
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+            capture_output=True,
+        )
         if result.returncode:
             self.skipTest("Junction unavailable")
         try:
@@ -158,7 +184,10 @@ class SnapshotTests(unittest.TestCase):
             workspace.preflight_space(self.root, 100, 3)
 
     def test_fingerprint_is_order_independent(self):
-        self.assertEqual(workspace.fingerprint({"b": "2", "a": "1"}), workspace.fingerprint({"a": "1", "b": "2"}))
+        self.assertEqual(
+            workspace.fingerprint({"b": "2", "a": "1"}),
+            workspace.fingerprint({"a": "1", "b": "2"}),
+        )
 
     def test_project_lock_contention_and_release(self):
         with workspace.project_lock(self.root):
@@ -178,14 +207,23 @@ class CommandTests(unittest.TestCase):
         with tempfile.TemporaryFile(mode="w+") as log:
             with patch.object(subprocess, "Popen") as popen:
                 with self.assertRaises(subprocess.CalledProcessError) as error:
-                    workspace.run_command([sys.executable, "-c", "print('late')"],
-                                          cwd=Path.cwd(), env=os.environ, log=log,
-                                          cancel_event=event)
+                    workspace.run_command(
+                        [sys.executable, "-c", "print('late')"],
+                        cwd=Path.cwd(),
+                        env=os.environ,
+                        log=log,
+                        cancel_event=event,
+                    )
                 popen.assert_not_called()
                 self.assertEqual(error.exception.returncode, -9)
             # Cancellation is attached to that scheduler, not globally latched.
-            output = workspace.run_command([sys.executable, "-c", "print('unrelated')"],
-                                           cwd=Path.cwd(), env=os.environ, log=log, capture=True)
+            output = workspace.run_command(
+                [sys.executable, "-c", "print('unrelated')"],
+                cwd=Path.cwd(),
+                env=os.environ,
+                log=log,
+                capture=True,
+            )
             self.assertEqual(output.strip(), "unrelated")
 
     def test_cancel_during_process_creation_cannot_escape_registration(self):
@@ -194,24 +232,34 @@ class CommandTests(unittest.TestCase):
         cancellation_started = threading.Event()
         actual_popen = subprocess.Popen
         errors = []
+
         def slow_creation(*args, **kwargs):
             creation_entered.set()
             if not cancellation_started.wait(10):
                 raise RuntimeError("Cancellation did not start")
             return actual_popen(*args, **kwargs)
+
         def cancel():
             if not creation_entered.wait(10):
                 return
             event.set()
             cancellation_started.set()
             workspace.cancel_commands()
+
         with tempfile.TemporaryFile(mode="w+") as log:
+
             def run():
                 try:
-                    workspace.run_command([sys.executable, "-c", "import time; time.sleep(60)"],
-                                          cwd=Path.cwd(), env=os.environ, log=log, cancel_event=event)
+                    workspace.run_command(
+                        [sys.executable, "-c", "import time; time.sleep(60)"],
+                        cwd=Path.cwd(),
+                        env=os.environ,
+                        log=log,
+                        cancel_event=event,
+                    )
                 except subprocess.CalledProcessError as error:
                     errors.append(error)
+
             with patch.object(subprocess, "Popen", slow_creation):
                 runner = threading.Thread(target=run)
                 canceller = threading.Thread(target=cancel)
@@ -228,39 +276,70 @@ class CommandTests(unittest.TestCase):
 
     def test_capture_and_failure(self):
         with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as log:
-            output = workspace.run_command([sys.executable, "-c", "print('hello')"], cwd=Path.cwd(), env=os.environ, log=log, capture=True)
+            output = workspace.run_command(
+                [sys.executable, "-c", "print('hello')"],
+                cwd=Path.cwd(),
+                env=os.environ,
+                log=log,
+                capture=True,
+            )
             self.assertEqual(output.strip(), "hello")
             with self.assertRaises(subprocess.CalledProcessError) as error:
-                workspace.run_command([sys.executable, "-c", "raise SystemExit(7)"], cwd=Path.cwd(), env=os.environ, log=log)
+                workspace.run_command(
+                    [sys.executable, "-c", "raise SystemExit(7)"],
+                    cwd=Path.cwd(),
+                    env=os.environ,
+                    log=log,
+                )
             self.assertEqual(error.exception.returncode, 7)
 
     def tree_command(self, marker):
-        child = "import os,time,pathlib; pathlib.Path(" + repr(str(marker)) + ").write_text(str(os.getpid())); time.sleep(60)"
-        return [sys.executable, "-c", "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c'," + repr(child) + "]); time.sleep(60)"]
+        child = (
+            "import os,time,pathlib; pathlib.Path("
+            + repr(str(marker))
+            + ").write_text(str(os.getpid())); time.sleep(60)"
+        )
+        return [
+            sys.executable,
+            "-c",
+            "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',"
+            + repr(child)
+            + "]); time.sleep(60)",
+        ]
 
     def await_marker(self, marker):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if marker.exists() and marker.read_text():
                 return int(marker.read_text())
-            time.sleep(.025)
+            time.sleep(0.025)
         self.fail("Descendant never became ready")
 
     def assert_dead(self, pid):
         deadline = time.monotonic() + 5
         while alive(pid) and time.monotonic() < deadline:
-            time.sleep(.025)
+            time.sleep(0.025)
         self.assertFalse(alive(pid), f"Descendant {pid} survived cancellation")
 
     def test_coordinator_cancellation_kills_descendants(self):
-        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile(mode="w+") as log:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryFile(mode="w+") as log,
+        ):
             marker = Path(directory) / "pid"
             errors = []
+
             def run():
                 try:
-                    workspace.run_command(self.tree_command(marker), cwd=directory, env=os.environ, log=log)
+                    workspace.run_command(
+                        self.tree_command(marker),
+                        cwd=directory,
+                        env=os.environ,
+                        log=log,
+                    )
                 except subprocess.CalledProcessError as error:
                     errors.append(error)
+
             thread = threading.Thread(target=run)
             thread.start()
             try:
@@ -273,15 +352,25 @@ class CommandTests(unittest.TestCase):
             self.assert_dead(pid)
 
     def test_keyboard_interrupt_kills_descendants(self):
-        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryFile(mode="w+") as log:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryFile(mode="w+") as log,
+        ):
             marker = Path(directory) / "pid"
             descendant = []
+
             def interrupted(*args, **kwargs):
                 descendant.append(self.await_marker(marker))
                 raise KeyboardInterrupt
+
             with patch.object(subprocess.Popen, "communicate", interrupted):
                 with self.assertRaises(KeyboardInterrupt):
-                    workspace.run_command(self.tree_command(marker), cwd=directory, env=os.environ, log=log)
+                    workspace.run_command(
+                        self.tree_command(marker),
+                        cwd=directory,
+                        env=os.environ,
+                        log=log,
+                    )
             self.assert_dead(descendant[0])
 
 

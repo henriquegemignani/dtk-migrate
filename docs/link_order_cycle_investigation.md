@@ -113,7 +113,10 @@ only the drop-order heuristic.
 
 ```python
 import importlib.util
-spec = importlib.util.spec_from_file_location("scl", r"path/to/src/split_confidence_loop.py")
+
+spec = importlib.util.spec_from_file_location(
+    "scl", r"path/to/src/split_confidence_loop.py"
+)
 scl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scl)
 

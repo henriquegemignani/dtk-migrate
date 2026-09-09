@@ -1,20 +1,19 @@
 """Orchestration checks with real isolated Python workers and synthetic trials."""
-import json
-from pathlib import Path
+
 import shutil
-import sys
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import parallel_migration as runner
 from benchmark_parallel import evidence
 from migration_workspace import snapshot_manifest
 
-
-FAKE_ADAPTER = '''
+FAKE_ADAPTER = """
 import pathlib
 import time
 def evaluate(ctx, candidates):
@@ -30,7 +29,7 @@ def evaluate(ctx, candidates):
     dol.parent.mkdir(parents=True, exist_ok=True)
     dol.write_bytes(b"retail")
     return {"accepted": candidates, "deferred": [], "events": [], "report": {"measures": {"matched_code": len(candidates)}}, "validation": "fixture"}
-'''
+"""
 
 
 class WorkerTests(unittest.TestCase):
@@ -40,11 +39,23 @@ class WorkerTests(unittest.TestCase):
         (baseline / "owned.txt").write_text("baseline")
         tooling = base / "tooling"
         tooling.mkdir()
-        for name in ("parallel_migration.py", "migration_runtime.py", "migration_workspace.py"):
+        for name in (
+            "parallel_migration.py",
+            "migration_runtime.py",
+            "migration_workspace.py",
+        ):
             shutil.copy2(Path(runner.__file__).parent / name, tooling / name)
         (tooling / "discovery_adapter.py").write_text(FAKE_ADAPTER)
-        run = {"workers": workers, "build_jobs": 1, "batch_size": 1, "environment": {"fixture": "v1"},
-               "source": "SRC", "target": "PAL", "frozen_dtk": sys.executable, "frozen_ninja": sys.executable}
+        run = {
+            "workers": workers,
+            "build_jobs": 1,
+            "batch_size": 1,
+            "environment": {"fixture": "v1"},
+            "source": "SRC",
+            "target": "PAL",
+            "frozen_dtk": sys.executable,
+            "frozen_ninja": sys.executable,
+        }
         return baseline, run
 
     def test_one_and_three_workers_produce_same_results_and_preserve_baseline(self):
@@ -53,10 +64,27 @@ class WorkerTests(unittest.TestCase):
             baseline, run = self.fixture(base)
             manifest = snapshot_manifest(baseline)
             candidates = [{"name": str(i)} for i in range(7)]
-            one = runner.execute_jobs(base, dict(run, workers=1), "discover", base / "one", baseline, manifest, candidates)
-            three = runner.execute_jobs(base, run, "discover", base / "three", baseline, manifest, candidates)
+            one = runner.execute_jobs(
+                base,
+                dict(run, workers=1),
+                "discover",
+                base / "one",
+                baseline,
+                manifest,
+                candidates,
+            )
+            three = runner.execute_jobs(
+                base, run, "discover", base / "three", baseline, manifest, candidates
+            )
             for a, b in zip(one, three):
-                for key in ("accepted", "deferred", "fingerprint", "validation", "dol_sha1", "report"):
+                for key in (
+                    "accepted",
+                    "deferred",
+                    "fingerprint",
+                    "validation",
+                    "dol_sha1",
+                    "report",
+                ):
                     self.assertEqual(a[key], b[key])
             self.assertEqual(snapshot_manifest(baseline), manifest)
 
@@ -66,33 +94,60 @@ class WorkerTests(unittest.TestCase):
             baseline, run = self.fixture(base)
             marker = base / "crash"
             marker.touch()
-            candidates = [{"name": "A"}, {"name": "B", "crash_marker": str(marker)}, {"name": "C"}]
+            candidates = [
+                {"name": "A"},
+                {"name": "B", "crash_marker": str(marker)},
+                {"name": "C"},
+            ]
             stage = base / "stage"
             manifest = snapshot_manifest(baseline)
             with self.assertRaisesRegex(RuntimeError, "successful siblings"):
-                runner.execute_jobs(base, run, "discover", stage, baseline, manifest, candidates)
+                runner.execute_jobs(
+                    base, run, "discover", stage, baseline, manifest, candidates
+                )
             cached = stage / "jobs/00000/result.json"
             old = cached.read_bytes()
             modified = cached.stat().st_mtime_ns
             marker.unlink()
-            outcomes = runner.execute_jobs(base, run, "discover", stage, baseline, manifest, candidates)
+            outcomes = runner.execute_jobs(
+                base, run, "discover", stage, baseline, manifest, candidates
+            )
             self.assertEqual(len(outcomes), 3)
             self.assertEqual(cached.read_bytes(), old)
             self.assertEqual(cached.stat().st_mtime_ns, modified)
 
     def test_foreign_or_mutated_candidates_are_rejected(self):
-        spec = {"job_id": "a", "fingerprint": "hash", "candidates": [{"name": "A", "lines": ["original"]}]}
-        result = {"schema": runner.SCHEMA, "job_id": "a", "fingerprint": "hash",
-                  "accepted": [{"name": "A", "lines": ["changed"]}], "deferred": []}
+        spec = {
+            "job_id": "a",
+            "fingerprint": "hash",
+            "candidates": [{"name": "A", "lines": ["original"]}],
+        }
+        result = {
+            "schema": runner.SCHEMA,
+            "job_id": "a",
+            "fingerprint": "hash",
+            "accepted": [{"name": "A", "lines": ["changed"]}],
+            "deferred": [],
+        }
         with self.assertRaises(ValueError):
             runner.verify_result(result, spec)
 
     def test_forged_coverage_selection_is_rejected(self):
         candidate = {"name": "A", "alternatives": [{"id": "real"}]}
-        spec = {"stage": "coverage", "job_id": "a", "fingerprint": "hash",
-                "candidates": [candidate]}
-        result = {"schema": runner.SCHEMA, "job_id": "a", "fingerprint": "hash",
-                  "accepted": [candidate], "deferred": [], "selected": {"A": "forged"}}
+        spec = {
+            "stage": "coverage",
+            "job_id": "a",
+            "fingerprint": "hash",
+            "candidates": [candidate],
+        }
+        result = {
+            "schema": runner.SCHEMA,
+            "job_id": "a",
+            "fingerprint": "hash",
+            "accepted": [candidate],
+            "deferred": [],
+            "selected": {"A": "forged"},
+        }
         with self.assertRaisesRegex(ValueError, "unknown coverage alternative"):
             runner.verify_result(result, spec)
 
@@ -119,21 +174,44 @@ class WorkerTests(unittest.TestCase):
                 self.assertTrue(started.wait(5))
                 raise KeyboardInterrupt()
 
-            with patch.object(runner, "context", return_value=Context()), \
-                 patch.object(runner, "as_completed", side_effect=interrupt), \
-                 patch.object(runner, "cancel_commands", side_effect=stopped.set):
+            with (
+                patch.object(runner, "context", return_value=Context()),
+                patch.object(runner, "as_completed", side_effect=interrupt),
+                patch.object(runner, "cancel_commands", side_effect=stopped.set),
+            ):
                 with self.assertRaises(KeyboardInterrupt):
-                    runner.execute_jobs(base, run, "discover", base / "stage", baseline,
-                                        snapshot_manifest(baseline), [{"name": str(n)} for n in range(3)])
+                    runner.execute_jobs(
+                        base,
+                        run,
+                        "discover",
+                        base / "stage",
+                        baseline,
+                        snapshot_manifest(baseline),
+                        [{"name": str(n)} for n in range(3)],
+                    )
             self.assertEqual(len(calls), 1)
 
 
 class IntegrationTests(unittest.TestCase):
     def test_benchmark_detects_per_unit_changes_with_identical_totals(self):
-        result = {"accepted": [], "deferred": [], "dol_sha1": "retail", "validation": "fixture",
-                  "report": {"measures": {"matched_code": 8}, "units": [{"name": "A", "matched_code": 8}, {"name": "B", "matched_code": 0}]}}
+        result = {
+            "accepted": [],
+            "deferred": [],
+            "dol_sha1": "retail",
+            "validation": "fixture",
+            "report": {
+                "measures": {"matched_code": 8},
+                "units": [
+                    {"name": "A", "matched_code": 8},
+                    {"name": "B", "matched_code": 0},
+                ],
+            },
+        }
         first = evidence(result)
-        result["report"]["units"] = [{"name": "A", "matched_code": 0}, {"name": "B", "matched_code": 8}]
+        result["report"]["units"] = [
+            {"name": "A", "matched_code": 0},
+            {"name": "B", "matched_code": 8},
+        ]
         second = evidence(result)
         self.assertEqual(first["measures"], second["measures"])
         self.assertNotEqual(first["report_sha256"], second["report_sha256"])
@@ -146,17 +224,28 @@ class IntegrationTests(unittest.TestCase):
             expected = runner.digest_file(executable)
             executable.write_bytes(b"changed")
             with self.assertRaisesRegex(RuntimeError, "Frozen dtk binary changed"):
-                runner.check_frozen_environment({"frozen_dtk": str(executable), "environment": {"dtk": expected}})
+                runner.check_frozen_environment(
+                    {"frozen_dtk": str(executable), "environment": {"dtk": expected}}
+                )
 
     def test_failed_owner_build_rolls_back_and_rebuilds_original(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            root, integrated, run_dir = base / "owner", base / "integration", base / "run"
+            root, integrated, run_dir = (
+                base / "owner",
+                base / "integration",
+                base / "run",
+            )
             root.mkdir()
             integrated.mkdir()
             (root / "configure.py").write_bytes(b"before")
             (integrated / "configure.py").write_bytes(b"after")
-            run = {"owner_manifest": snapshot_manifest(root), "symbol_mappings": {}, "target": "PAL", "build_jobs": 1}
+            run = {
+                "owner_manifest": snapshot_manifest(root),
+                "symbol_mappings": {},
+                "target": "PAL",
+                "build_jobs": 1,
+            }
             calls = []
 
             class Context:
@@ -171,7 +260,9 @@ class IntegrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "owner failed"):
                     runner.publish(root, integrated, run_dir, run, {})
             self.assertEqual(calls, [b"after", b"before"])
-            self.assertEqual(runner.read_json(run_dir / "publication.json")["status"], "rolled-back")
+            self.assertEqual(
+                runner.read_json(run_dir / "publication.json")["status"], "rolled-back"
+            )
             self.assertEqual(snapshot_manifest(root), run["owner_manifest"])
 
     def test_downstream_resume_rejects_changed_upstream(self):
@@ -180,7 +271,9 @@ class IntegrationTests(unittest.TestCase):
             owner = base / "owner"
             owner.mkdir()
             (owner / "configure.py").write_text("new upstream")
-            runner.write_json(base / "verify/prepared.json", {"source_fingerprint": "old"})
+            runner.write_json(
+                base / "verify/prepared.json", {"source_fingerprint": "old"}
+            )
             with self.assertRaisesRegex(RuntimeError, "Upstream verify inputs changed"):
                 runner.run_stage(base, {}, "verify", owner)
 
@@ -208,15 +301,25 @@ class IntegrationTests(unittest.TestCase):
                     else:
                         ctx.accepted.add(c["name"])
                         accepted.append(c)
-                return {"accepted": accepted, "deferred": deferred, "events": [], "report": ctx.build(), "validation": "fixture"}
+                return {
+                    "accepted": accepted,
+                    "deferred": deferred,
+                    "events": [],
+                    "report": ctx.build(),
+                    "validation": "fixture",
+                }
 
         candidates = [{"name": n} for n in "ADBC"]
-        outcomes = [{"accepted": [{"name": n}]} for n in "CBA"]  # completion order intentionally differs
+        outcomes = [
+            {"accepted": [{"name": n}]} for n in "CBA"
+        ]  # completion order intentionally differs
         mod, ctx = Adapter(), Context()
         with patch.object(runner, "adapter", return_value=mod):
             result = runner.integrate(ctx, "discover", candidates, outcomes)
         self.assertEqual(mod.calls[0], ["A", "B", "C"])
-        self.assertEqual(result["accepted"], [c for c in candidates if c["name"] in "ADC"])
+        self.assertEqual(
+            result["accepted"], [c for c in candidates if c["name"] in "ADC"]
+        )
         self.assertEqual(result["deferred"], [{"name": "B"}])
 
     def test_coverage_integration_prefers_worker_selection_and_validates_it(self):
@@ -231,19 +334,33 @@ class IntegrationTests(unittest.TestCase):
 
             def evaluate(self, ctx, candidates, preferred=None):
                 self.calls.append((candidates, preferred))
-                selected = {c["name"]: preferred.get(c["name"], c["alternatives"][0]["id"])
-                            for c in candidates}
-                return {"accepted": candidates, "deferred": [], "selected": selected,
-                        "events": [], "report": {"measures": {}}, "validation": "coverage"}
+                selected = {
+                    c["name"]: preferred.get(c["name"], c["alternatives"][0]["id"])
+                    for c in candidates
+                }
+                return {
+                    "accepted": candidates,
+                    "deferred": [],
+                    "selected": selected,
+                    "events": [],
+                    "report": {"measures": {}},
+                    "validation": "coverage",
+                }
 
             def validate(self, ctx, candidates, selected):
                 self.validated = (candidates, selected)
                 return {"measures": {}}
 
         mod = Adapter()
-        outcomes = [{"job_id": "00000", "accepted": [candidate], "deferred": [],
-                     "selected": {"A": "worker"},
-                     "events": [{"unit": "A", "status": "accepted"}]}]
+        outcomes = [
+            {
+                "job_id": "00000",
+                "accepted": [candidate],
+                "deferred": [],
+                "selected": {"A": "worker"},
+                "events": [{"unit": "A", "status": "accepted"}],
+            }
+        ]
         with patch.object(runner, "adapter", return_value=mod):
             result = runner.integrate(Context(), "coverage", [candidate], outcomes)
         self.assertEqual(mod.calls[0][1], {"A": "worker"})
@@ -260,10 +377,20 @@ class IntegrationTests(unittest.TestCase):
             before = runner.digest_file(path)
             path.write_bytes(b"after")
             after = runner.digest_file(path)
-            journal = {"staging": str(root / "build/staging"), "changes": {"configure.py": {
-                "before_sha256": before, "after_sha256": after, "before_hex": b"before".hex()}}}
+            journal = {
+                "staging": str(root / "build/staging"),
+                "changes": {
+                    "configure.py": {
+                        "before_sha256": before,
+                        "after_sha256": after,
+                        "before_hex": b"before".hex(),
+                    }
+                },
+            }
             path.write_bytes(b"user edit")
-            self.assertEqual(runner.restore_publication(root, journal), ["configure.py"])
+            self.assertEqual(
+                runner.restore_publication(root, journal), ["configure.py"]
+            )
             self.assertEqual(path.read_bytes(), b"user edit")
             path.write_bytes(b"after")
             self.assertEqual(runner.restore_publication(root, journal), [])
@@ -277,7 +404,13 @@ class IntegrationTests(unittest.TestCase):
             manifest = snapshot_manifest(root)
             (root / "configure.py").write_text("user edit")
             with self.assertRaisesRegex(RuntimeError, "Project inputs changed"):
-                runner.publish(root, root, Path(tmp), {"owner_manifest": manifest, "symbol_mappings": {}}, {})
+                runner.publish(
+                    root,
+                    root,
+                    Path(tmp),
+                    {"owner_manifest": manifest, "symbol_mappings": {}},
+                    {},
+                )
             self.assertEqual((root / "configure.py").read_text(), "user edit")
 
     def test_mapping_seed_retains_only_user_configuration(self):
@@ -285,11 +418,24 @@ class IntegrationTests(unittest.TestCase):
             root = Path(tmp)
             source, dest = root / "source", root / "dest"
             source.mkdir()
-            runner.write_json(source / "objdiff.json", {"units": [
-                {"name": "A", "base_path": "owner/build/A.o", "symbol_mappings": {"a": "b"}},
-                {"name": "B", "base_path": "owner/build/B.o"}]})
+            runner.write_json(
+                source / "objdiff.json",
+                {
+                    "units": [
+                        {
+                            "name": "A",
+                            "base_path": "owner/build/A.o",
+                            "symbol_mappings": {"a": "b"},
+                        },
+                        {"name": "B", "base_path": "owner/build/B.o"},
+                    ]
+                },
+            )
             runner.seed_objdiff(source, dest)
-            self.assertEqual(runner.read_json(dest / "objdiff.json"), {"units": [{"name": "A", "symbol_mappings": {"a": "b"}}]})
+            self.assertEqual(
+                runner.read_json(dest / "objdiff.json"),
+                {"units": [{"name": "A", "symbol_mappings": {"a": "b"}}]},
+            )
 
 
 if __name__ == "__main__":
