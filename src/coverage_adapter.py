@@ -329,10 +329,14 @@ def _failure_category(error, log):
         return "retail-mismatch"
     if "cycle" in text:
         return "link-order-cycle"
+    if (
+        "multiply defined" in text
+        or "multiply-defined" in text
+        or "duplicate symbol" in text
+    ):
+        return "duplicate-symbol"
     if "undefined:" in text or "undefined symbol" in text:
         return "undefined-symbol"
-    if "multiply defined" in text or "duplicate symbol" in text:
-        return "duplicate-symbol"
     if "invalid alignment" in text or "split alignment" in text:
         return "split-alignment"
     if "cannot open" in text or "no such file" in text or "fatal error" in text:

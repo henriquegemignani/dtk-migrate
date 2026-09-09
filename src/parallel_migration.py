@@ -441,7 +441,22 @@ def run_stage(run_dir, run, stage, source_root):
         ctx = context(
             baseline, run, stage, stage_dir / "preparation", run["build_jobs"]
         )
-        prepared = adapter(stage).prepare(ctx, limit=run["limit"])
+        prepared = adapter(stage).prepare(
+            ctx, limit=None if run.get("only") else run["limit"]
+        )
+        requested = set(run.get("only", []))
+        if requested:
+            available = {candidate["name"] for candidate in prepared["candidates"]}
+            missing = requested - available
+            if missing:
+                raise RuntimeError(
+                    f"Requested {stage} candidates were not proposed: {sorted(missing)}"
+                )
+            prepared["candidates"] = [
+                candidate
+                for candidate in prepared["candidates"]
+                if candidate["name"] in requested
+            ]
         prepared["source_fingerprint"] = source_fingerprint
         prepared["symbol_mappings"] = symbol_mappings(baseline)
         manifest = snapshot_manifest(baseline)
@@ -651,6 +666,12 @@ def main(argv=None):
     parser.add_argument("--build-jobs", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=40)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--only",
+        action="append",
+        metavar="UNIT",
+        help="run only an exact proposed unit name; repeat for multiple units",
+    )
     parser.add_argument("--resume", metavar="RUN_ID")
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -785,6 +806,7 @@ def main(argv=None):
                 "build_jobs": args.build_jobs,
                 "batch_size": args.batch_size,
                 "limit": args.limit,
+                "only": args.only or [],
                 "stage": args.stage,
             }
             check_frozen_environment(run)

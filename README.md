@@ -58,6 +58,8 @@ candidates **per stage**; `--batch-size` defaults to 40. `--workers 1` uses exac
 the same batches and validation as parallel execution. The default resource
 setting is three processes with four Ninja jobs each. See the measured guidance
 in [parallel execution](docs/parallel.md) before choosing a pool size.
+Use `--only UNIT` to evaluate an exact proposed unit name without running other
+candidates; repeat the option to select more than one unit.
 
 The runner captures current files, including dirty and untracked inputs and
 submodule contents, freezes tool binaries and scripts, and gives each worker a
