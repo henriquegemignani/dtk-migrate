@@ -20,34 +20,85 @@ def partition(name):
     )
 
 
+def _range_state(name, section, start, end, oracle_blocks):
+    own_ranges = [
+        value
+        for line in oracle_blocks.get(name, [])
+        if (value := scl.parse_range(line)) and value[0] == section
+    ]
+    if any(left <= start and end <= right for _, left, right in own_ranges):
+        return "correct"
+    overlaps_other = any(
+        section == other_section and start < right and left < end
+        for other_name, lines in oracle_blocks.items()
+        if other_name != name
+        for line in lines
+        if (value := scl.parse_range(line))
+        for other_section, left, right in [value]
+    )
+    return "incorrect" if overlaps_other else "unknown"
+
+
+def ownership_at_layout(target_layout, oracle_blocks):
+    result = {}
+    parsed = {
+        name: [value for line in lines if (value := scl.parse_range(line))]
+        for name, lines in oracle_blocks.items()
+    }
+    for item in target_layout:
+        address = int(item["address"], 16)
+        owners = [
+            name
+            for name, ranges in parsed.items()
+            if any(
+                section == item["section"] and start <= address < end
+                for section, start, end in ranges
+            )
+        ]
+        result[(item["section"], item["address"])] = (
+            owners[0] if len(owners) == 1 else None
+        )
+    return result
+
+
 def score_candidate(candidate, oracle_blocks, oracle_owners):
     scored_alternatives = []
     unique_anchors = {}
     for alternative in candidate["alternatives"]:
         section = alternative["section"]
         start, end = int(alternative["start"], 16), int(alternative["end"], 16)
-        ranges = [
-            value
-            for line in oracle_blocks.get(candidate["name"], [])
-            if (value := scl.parse_range(line)) and value[0] == section
-        ]
         scored_alternatives.append(
             {
                 "id": alternative["id"],
-                "correct": any(
-                    left <= start and end <= right for _, left, right in ranges
+                "evidence": alternative.get("evidence", "exact-body"),
+                "state": _range_state(
+                    candidate["name"], section, start, end, oracle_blocks
                 ),
             }
         )
         for anchor in alternative["anchors"]:
-            unique_anchors[(anchor["section"], anchor["target_address"])] = anchor
+            unique_anchors[
+                (
+                    alternative.get("evidence", "exact-body"),
+                    anchor["section"],
+                    anchor["target_address"],
+                )
+            ] = anchor
     anchors = [
         {
             "address": anchor["target_address"],
-            "correct": oracle_owners.get((anchor["section"], anchor["target_address"]))
-            == candidate["name"],
+            "evidence": key[0],
+            "state": (
+                "correct"
+                if oracle_owners.get((anchor["section"], anchor["target_address"]))
+                == candidate["name"]
+                else "unknown"
+                if oracle_owners.get((anchor["section"], anchor["target_address"]))
+                is None
+                else "incorrect"
+            ),
         }
-        for anchor in unique_anchors.values()
+        for key, anchor in unique_anchors.items()
     ]
     return {
         "name": candidate["name"],
@@ -70,19 +121,56 @@ def summarize(records):
             "tus": len(rows),
             "ranges": len(alternatives),
             "ranges_correct": sum(
-                alternative["correct"] for alternative in alternatives
+                alternative["state"] == "correct" for alternative in alternatives
             ),
             "ranges_incorrect": sum(
-                not alternative["correct"] for alternative in alternatives
+                alternative["state"] == "incorrect" for alternative in alternatives
+            ),
+            "ranges_unknown": sum(
+                alternative["state"] == "unknown" for alternative in alternatives
             ),
             "anchors": len(anchors),
-            "anchors_correct": sum(anchor["correct"] for anchor in anchors),
-            "anchors_incorrect": sum(not anchor["correct"] for anchor in anchors),
+            "anchors_correct": sum(anchor["state"] == "correct" for anchor in anchors),
+            "anchors_incorrect": sum(
+                anchor["state"] == "incorrect" for anchor in anchors
+            ),
+            "anchors_unknown": sum(anchor["state"] == "unknown" for anchor in anchors),
             "represented_bytes": sum(
                 row["selected_alternative"]["covered_bytes"]
                 for row in rows
-                if all(a["correct"] for a in row["alternatives"])
+                if row["alternatives"][0]["state"] == "correct"
             ),
+            "evidence": {
+                evidence: {
+                    "ranges": sum(
+                        alternative["evidence"] == evidence
+                        for alternative in alternatives
+                    ),
+                    "ranges_incorrect": sum(
+                        alternative["evidence"] == evidence
+                        and alternative["state"] == "incorrect"
+                        for alternative in alternatives
+                    ),
+                    "ranges_unknown": sum(
+                        alternative["evidence"] == evidence
+                        and alternative["state"] == "unknown"
+                        for alternative in alternatives
+                    ),
+                    "anchors": sum(
+                        anchor["evidence"] == evidence for anchor in anchors
+                    ),
+                    "anchors_incorrect": sum(
+                        anchor["evidence"] == evidence
+                        and anchor["state"] == "incorrect"
+                        for anchor in anchors
+                    ),
+                    "anchors_unknown": sum(
+                        anchor["evidence"] == evidence and anchor["state"] == "unknown"
+                        for anchor in anchors
+                    ),
+                }
+                for evidence in ("exact-body", "this-layout-shift")
+            },
         }
     return result
 
@@ -94,6 +182,11 @@ def main(argv=None):
     parser.add_argument("--target", default="GM8E01_02")
     parser.add_argument("--dtk", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--oracle-splits",
+        type=Path,
+        help="independent target splits used only for scoring",
+    )
     args = parser.parse_args(argv)
     root, dtk = args.project_root.resolve(), args.dtk.resolve(strict=True)
     with dtk.open("rb") as stream:
@@ -141,13 +234,13 @@ def main(argv=None):
         ):
             raise RuntimeError("Unsupported DTK coverage evidence schema or policy")
 
-    _, oracle_blocks, _ = scl.parse_splits(
-        (root / "config" / args.target / "splits.txt").read_text(encoding="utf-8")
+    oracle_splits = (
+        args.oracle_splits.resolve()
+        if args.oracle_splits
+        else root / "config" / args.target / "splits.txt"
     )
-    oracle_owners = {
-        (item["section"], item["address"]): item["current_owner"]
-        for item in oracle_value["target_layout"]
-    }
+    _, oracle_blocks, _ = scl.parse_splits(oracle_splits.read_text(encoding="utf-8"))
+    oracle_owners = ownership_at_layout(oracle_value["target_layout"], oracle_blocks)
     candidates: list[dict[str, Any]] = []
     for unit in masked_value["source_units"]:
         if unit.get("autogenerated") or unit["name"] not in oracle_blocks:
@@ -174,10 +267,11 @@ def main(argv=None):
     ]
     measures = summarize(records)
     result = {
-        "schema": 1,
+        "schema": 2,
         "policy": masked_value["policy"],
         "source": args.source,
         "target": args.target,
+        "oracle_splits": str(oracle_splits),
         "partition": "sha256-first-byte-less-than-128",
         "dtk_sha256": dtk_sha256,
         "records": records,
@@ -191,13 +285,14 @@ def main(argv=None):
         "",
         f"Policy version: {masked_value['policy']['version']}",
         "",
-        "| Partition | TUs | Ranges | Correct ranges | Incorrect ranges | Correct anchors | Incorrect anchors | Bytes |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Partition | TUs | Ranges | Correct | Unknown | Incorrect | Anchors correct | Unknown | Incorrect | Bytes |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for name, value in measures.items():
         lines.append(
-            f"| {name} | {value['tus']} | {value['ranges']} | {value['ranges_correct']} | {value['ranges_incorrect']} | "
-            f"{value['anchors_correct']} | {value['anchors_incorrect']} | {value['represented_bytes']} |"
+            f"| {name} | {value['tus']} | {value['ranges']} | {value['ranges_correct']} | "
+            f"{value['ranges_unknown']} | {value['ranges_incorrect']} | {value['anchors_correct']} | "
+            f"{value['anchors_unknown']} | {value['anchors_incorrect']} | {value['represented_bytes']} |"
         )
     (output / "result.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps(measures, indent=2))

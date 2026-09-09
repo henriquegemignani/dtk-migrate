@@ -285,3 +285,38 @@ coverage run is under `build/parallel-migration/runs/20260909T145033.634726Z/`;
 the replay is under
 `build/parallel-migration/benchmarks/20260909T151934.581608Z/`. The final suites
 contain 79 passing Python tests and 65 passing DTK tests.
+
+## Corroborated object-layout coverage (2026-09-10)
+
+Coverage policy version 2 adds a separate `this`-layout evidence class without
+weakening exact-body matching. DTK follows the incoming object pointer through
+register copies and `addi`, masks only immediates proven relative to that pointer,
+and leaves stack and unrelated offsets significant. A pair must have otherwise
+equal normalized bytes, equal relocation layouts, known extents, and a unique body
+in each binary. One support group requires at least two functions from the same
+source TU, 128 source bytes, four changed accesses, one nonzero offset delta, and
+at most one inferred breakpoint. The runner proposes only the complete group span.
+
+PAL calibration hid target names and ownership during proposal generation and used
+the pre-feature split file as its independent oracle. The calibration partition
+contained 434 layout anchors: 379 known-correct and 55 unknown. The held-out
+partition contained 497: 434 known-correct and 63 unknown. All 813 labeled anchors
+belonged to the proposed source TU, and all 49 fully labeled group ranges were
+correct; 44 group ranges remain unknown. Neither partition had a cross-unit
+attribution. Calibration evidence is in
+`build/GM8P01_00/layout-shift-calibration/` in the F: Prime checkout.
+
+The real run `20260909T204906.906167Z` tested 35 missing candidates and accepted 16
+layout groups totaling 30,056 bytes. It added `CBomb.cpp` as
+`.text 0x8009086C..0x80090DDC` based on `Explode` and the constructor: 1,212 source
+bytes and 33 changed object accesses agreed on `+0x10` beginning at the inferred
+`0xEC` object offset. Overall split representation moved from 747 to 763 of 822
+source TUs. Objdiff-matched code moved from 1,256,368 to 1,256,580 bytes
+(32.147167%); configured source-linked code remained 176,844 bytes (4.5242114%).
+The final DOL SHA-1 remained
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`.
+
+The final validation suites contain 83 passing Python tests and 69 passing DTK
+tests. Ruff, ty, the changed-file Rust formatter, and Clippy on all targets pass;
+Clippy's unrelated pre-existing `iter_kv_map` finding in `src/obj/symbols.rs` was
+excluded from the feature check.

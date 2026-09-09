@@ -66,21 +66,29 @@ batches concurrently, then revalidates their union in deterministic order. Only
 the coordinator publishes validated changes. User input drift stops publication.
 Python's free-threaded runtime does not replace process and filesystem isolation.
 
-Coverage is opt-in through `--stage coverage` or `--stage all`. It assigns only an
-exact function interval, or an adjacent run of such intervals, when the normalized
-body is unique in both binaries, at least 128 bytes, has compatible relocations,
-and belongs wholly to one explicit source TU. It deliberately allows zero objdiff
-gain and keeps the candidate source object disabled. A passing range therefore
-establishes partial split representation; it does not establish source equivalence.
+Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 2
+accepts strict exact-body intervals and corroborated `this`-layout groups. A layout
+group requires at least two unique functions whose normalized instruction streams
+and relocation layouts agree after masking only proven object-relative offsets;
+all functions must infer the same one-breakpoint offset transformation. The runner
+proposes the group span, never an individual layout function, then checks ownership,
+linker inputs, existing-unit regressions, and retail bytes. It deliberately allows
+zero objdiff gain and keeps the candidate source object disabled. A passing range
+therefore establishes partial split representation; it does not establish source
+equivalence.
 The run's `coverage/coverage.json` and `coverage/coverage.md` separate represented
 TUs, objdiff matching, configured source linkage, and verified source linkage.
 
-Calibrate the fixed policy against `_02` without letting known target names or
-ownership influence candidate generation:
+Calibrate the policy against a named target without letting target names or
+ownership influence candidate generation. Known labels are scored as correct or
+incorrect; unlabeled parts of partial splits remain unknown:
 
 ```sh
-uv run src/calibrate_coverage.py --project-root ../prime --source GM8E01_00 --target GM8E01_02 --dtk /path/to/dtk
+uv run src/calibrate_coverage.py --project-root F:/programming/decomp/prime --source GM8E01_00 --target GM8P01_00 --dtk /path/to/dtk
 ```
+
+If the target has already received the proposals being evaluated, pass
+`--oracle-splits` with a saved pre-change split file to keep the labels independent.
 
 Runs and evidence live under `build/parallel-migration/runs/<RUN_ID>` in the game
 project. Resume an interrupted run using its saved options:

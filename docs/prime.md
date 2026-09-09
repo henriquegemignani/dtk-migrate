@@ -77,12 +77,17 @@ target; do not spend the migration effort optimizing `_02` instead.
 The partial-coverage policy has a separate ownership calibration:
 
 ```powershell
-uv run src/calibrate_coverage.py --project-root ../prime --source GM8E01_00 --target GM8E01_02 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
+uv run src/calibrate_coverage.py --project-root F:/programming/decomp/prime --source GM8E01_00 --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
 ```
 
-This masks `_02` names and split ownership during proposal generation, partitions
-TUs deterministically, and checks every proposed anchor and complete range against
-the separately generated ownership oracle. It does not publish configuration.
+Use `GM8P01_00` as the target when calibrating layout-shift evidence against PAL.
+The command masks target names and split ownership during proposal generation,
+partitions TUs deterministically, and checks every proposed anchor and complete
+range against a separately generated ownership oracle. Unowned portions of partial
+splits are reported as unknown instead of being counted as errors. It does not
+publish configuration. After applying coverage changes, pass `--oracle-splits`
+with the saved pre-change split file so calibration cannot score its own output as
+an oracle label.
 
 ## Existing legacy state
 

@@ -8,7 +8,12 @@ from pathlib import Path
 
 import coverage_adapter as adapter
 import split_confidence_loop as scl
-from calibrate_coverage import partition, score_candidate, summarize
+from calibrate_coverage import (
+    ownership_at_layout,
+    partition,
+    score_candidate,
+    summarize,
+)
 from migration_runtime import ValidationError
 
 
@@ -38,6 +43,34 @@ def anchor(start, end, *, eligible=True):
     }
 
 
+def layout_anchor(
+    start,
+    end,
+    group="layout-1",
+    *,
+    eligible=True,
+    breakpoint=0xEC,
+    source_address=None,
+):
+    value = anchor(start, end, eligible=eligible)
+    value.update(
+        {
+            "normalized_body_equal": None,
+            "layout_masked_body_equal": True,
+            "support_group": group,
+            "support_functions": 2,
+            "support_bytes": 384,
+            "support_changed_accesses": 8,
+            "this_accesses": 5,
+            "changed_this_accesses": 4,
+            "offset_delta": 16,
+            "inferred_breakpoint": breakpoint,
+            "source_address": f"0x{source_address or start + 0x1000:08X}",
+        }
+    )
+    return value
+
+
 def candidate(name="A.cpp"):
     alternatives = [
         adapter._alternative(".text", 0x200, 0x300, [anchor(0x200, 0x300)]),
@@ -45,7 +78,7 @@ def candidate(name="A.cpp"):
     ]
     return {
         "name": name,
-        "policy_version": 1,
+        "policy_version": adapter.POLICY_VERSION,
         "source_code_bytes": 1024,
         "alternatives": alternatives,
     }
@@ -160,6 +193,50 @@ class CoverageTests(unittest.TestCase):
             [("0x00000400", "0x00000500")],
         )
 
+    def test_layout_shift_evidence_is_only_proposed_as_a_corroborated_group(self):
+        unit = {
+            "code_bytes": 0x600,
+            "anchors": [],
+            "layout_shift_anchors": [
+                layout_anchor(0x100, 0x180),
+                layout_anchor(0x240, 0x340),
+            ],
+        }
+        alternatives = adapter.build_alternatives(unit, {})
+        self.assertEqual(len(alternatives), 1)
+        self.assertEqual(
+            (alternatives[0]["start"], alternatives[0]["end"]),
+            ("0x00000100", "0x00000340"),
+        )
+        self.assertEqual(alternatives[0]["evidence"], "this-layout-shift")
+        self.assertEqual(len(alternatives[0]["anchors"]), 2)
+
+    def test_layout_shift_evidence_rejects_singletons_and_disagreement(self):
+        singleton = {
+            "code_bytes": 0x600,
+            "anchors": [],
+            "layout_shift_anchors": [layout_anchor(0x100, 0x180)],
+        }
+        self.assertEqual(adapter.build_alternatives(singleton, {}), [])
+        disagreement = {
+            "code_bytes": 0x600,
+            "anchors": [],
+            "layout_shift_anchors": [
+                layout_anchor(0x100, 0x180),
+                layout_anchor(0x240, 0x340, breakpoint=0x100),
+            ],
+        }
+        self.assertEqual(adapter.build_alternatives(disagreement, {}), [])
+        reversed_source_order = {
+            "code_bytes": 0x600,
+            "anchors": [],
+            "layout_shift_anchors": [
+                layout_anchor(0x100, 0x180, source_address=0x2000),
+                layout_anchor(0x240, 0x340, source_address=0x1800),
+            ],
+        }
+        self.assertEqual(adapter.build_alternatives(reversed_source_order, {}), [])
+
     def test_zero_objdiff_gain_is_accepted_with_extracted_link_input(self):
         with tempfile.TemporaryDirectory() as temporary:
             ctx = FakeContext(Path(temporary))
@@ -209,10 +286,36 @@ class CoverageTests(unittest.TestCase):
         owners = {(".text", "0x00000200"): "A.cpp"}
         record = score_candidate(value, oracle, owners)
         self.assertEqual(record["partition"], partition("A.cpp"))
-        self.assertTrue(all(item["correct"] for item in record["alternatives"]))
-        self.assertTrue(record["anchors"][0]["correct"])
+        self.assertTrue(
+            all(item["state"] == "correct" for item in record["alternatives"])
+        )
+        self.assertEqual(record["anchors"][0]["state"], "correct")
         measures = summarize([record])
         self.assertEqual(sum(item["tus"] for item in measures.values()), 1)
+        partition_measures = measures[record["partition"]]
+        self.assertEqual(partition_measures["ranges_unknown"], 0)
+        self.assertEqual(partition_measures["ranges_incorrect"], 0)
+
+    def test_calibration_separates_unowned_ranges_from_cross_unit_errors(self):
+        value = candidate()
+        unknown = score_candidate(value, {}, {})
+        self.assertTrue(
+            all(item["state"] == "unknown" for item in unknown["alternatives"])
+        )
+        other = {"B.cpp": ["\t.text start:0x00000200 end:0x00000300"]}
+        incorrect = score_candidate(value, other, {})
+        self.assertEqual(incorrect["alternatives"][0]["state"], "incorrect")
+
+    def test_calibration_uses_the_explicit_oracle_split(self):
+        layout = [
+            {"section": ".text", "address": "0x00000200"},
+            {"section": ".text", "address": "0x00000400"},
+        ]
+        blocks = {"A.cpp": ["\t.text start:0x00000200 end:0x00000300"]}
+        self.assertEqual(
+            ownership_at_layout(layout, blocks),
+            {(".text", "0x00000200"): "A.cpp", (".text", "0x00000400"): None},
+        )
 
     def test_summary_separates_metrics_and_reports_deferred_build_failure(self):
         value = candidate()

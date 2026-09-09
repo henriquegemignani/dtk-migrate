@@ -6,17 +6,16 @@ import hashlib
 import json
 import os
 import tempfile
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 
 import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError
 
-EVIDENCE_SCHEMA = 1
-POLICY_VERSION = 1
-VALIDATION = (
-    "unique-normalized-body-ownership-and-extracted-link-inputs-and-retail-bytes"
-)
+EVIDENCE_SCHEMA = 2
+POLICY_VERSION = 2
+VALIDATION = "unique-exact-or-corroborated-this-layout-ownership-and-extracted-link-inputs-and-retail-bytes"
 
 
 def _replace(path, data, expected):
@@ -70,10 +69,12 @@ def _overlaps_existing(section, start, end, blocks):
     )
 
 
-def _alternative(section, start, end, anchors):
-    identity = f"{section}:{start:08X}-{end:08X}"
+def _alternative(section, start, end, anchors, *, evidence="exact-body", group=None):
+    identity = f"{evidence}:{group or ''}:{section}:{start:08X}-{end:08X}"
     return {
         "id": hashlib.sha256(identity.encode()).hexdigest()[:16],
+        "evidence": evidence,
+        "support_group": group,
         "section": section,
         "start": f"0x{start:08X}",
         "end": f"0x{end:08X}",
@@ -84,7 +85,7 @@ def _alternative(section, start, end, anchors):
 
 
 def build_alternatives(unit, target_blocks):
-    """Create exact anchors, then contiguous runs; never bridge or widen."""
+    """Create exact ranges and corroborated layout-shift group ranges."""
     eligible = [anchor for anchor in unit["anchors"] if anchor["eligible"]]
     individual = []
     for anchor in eligible:
@@ -120,8 +121,62 @@ def build_alternatives(unit, target_blocks):
             combined.append(_alternative(anchors[0]["section"], start, end, anchors))
     combined.sort(key=lambda alt: (-alt["covered_bytes"], int(alt["start"], 16)))
 
+    layout_groups = {}
+    for anchor in unit.get("layout_shift_anchors", []):
+        if anchor["eligible"]:
+            layout_groups.setdefault(anchor["support_group"], []).append(anchor)
+    shifted = []
+    for group, anchors in layout_groups.items():
+        anchors.sort(key=lambda anchor: int(anchor["target_address"], 16))
+        sections = {anchor["section"] for anchor in anchors}
+        deltas = {anchor["offset_delta"] for anchor in anchors}
+        breakpoints = {anchor["inferred_breakpoint"] for anchor in anchors}
+        source_addresses = [int(anchor["source_address"], 16) for anchor in anchors]
+        target_ranges = [
+            (
+                int(anchor["target_address"], 16),
+                int(anchor["target_end"], 16),
+            )
+            for anchor in anchors
+        ]
+        if (
+            len(anchors) < 2
+            or len(sections) != 1
+            or len(deltas) != 1
+            or len(breakpoints) != 1
+            or source_addresses != sorted(source_addresses)
+            or len(set(source_addresses)) != len(source_addresses)
+            or any(
+                left < previous_end
+                for (_, previous_end), (left, _) in pairwise(target_ranges)
+            )
+            or {anchor["support_functions"] for anchor in anchors} != {len(anchors)}
+            or {anchor["support_bytes"] for anchor in anchors}
+            != {sum(anchor["size"] for anchor in anchors)}
+            or {anchor["support_changed_accesses"] for anchor in anchors}
+            != {sum(anchor["changed_this_accesses"] for anchor in anchors)}
+        ):
+            continue
+        start = int(anchors[0]["target_address"], 16)
+        end = max(int(anchor["target_end"], 16) for anchor in anchors)
+        if end - start > 2 * unit["code_bytes"]:
+            continue
+        section = anchors[0]["section"]
+        if not _overlaps_existing(section, start, end, target_blocks):
+            shifted.append(
+                _alternative(
+                    section,
+                    start,
+                    end,
+                    anchors,
+                    evidence="this-layout-shift",
+                    group=group,
+                )
+            )
+    shifted.sort(key=lambda alt: (-alt["covered_bytes"], int(alt["start"], 16)))
+
     result, seen = [], set()
-    for alternative in individual + combined:
+    for alternative in shifted + individual + combined:
         key = (alternative["section"], alternative["start"], alternative["end"])
         if key not in seen:
             seen.add(key)
@@ -138,11 +193,17 @@ def _disposition(unit, alternatives):
         return "tiny-code"
     if unit.get("ambiguous_exact_bodies", 0):
         return "ambiguous-shared-evidence"
-    reasons = {reason for anchor in unit["anchors"] for reason in anchor["reasons"]}
+    reasons = {
+        reason
+        for anchor in unit["anchors"] + unit.get("layout_shift_anchors", [])
+        for reason in anchor["reasons"]
+    }
     if "target range is owned by another explicit unit" in reasons:
         return "overlap"
     if "function range is not split-aligned" in reasons:
         return "alignment"
+    if unit.get("layout_shift_candidates", 0):
+        return "layout-shift-insufficient-support"
     return "no-qualifying-anchor"
 
 
@@ -388,6 +449,7 @@ def evaluate(ctx, candidates, preferred=None):
                     "unit": candidate["name"],
                     "alternative": chosen["id"],
                     "status": "accepted",
+                    "evidence": chosen["evidence"],
                     "covered_bytes": chosen["covered_bytes"],
                 }
             )
@@ -496,10 +558,16 @@ def markdown_summary(value):
         "",
     ]
     if value["selected"]:
-        lines.extend(["| TU | Section | Range | Bytes |", "|---|---|---:|---:|"])
+        lines.extend(
+            [
+                "| TU | Evidence | Section | Range | Bytes |",
+                "|---|---|---|---:|---:|",
+            ]
+        )
         for name, alternative in sorted(value["selected"].items()):
             lines.append(
-                f"| `{name}` | `{alternative['section']}` | `{alternative['start']}..{alternative['end']}` | {alternative['covered_bytes']} |"
+                f"| `{name}` | `{alternative['evidence']}` | `{alternative['section']}` | "
+                f"`{alternative['start']}..{alternative['end']}` | {alternative['covered_bytes']} |"
             )
     else:
         lines.append("No range passed the coverage gates.")

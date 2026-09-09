@@ -18,8 +18,8 @@ The generated Ninja split rule uses DTK's `--no-update` and bounded `-j` flags.
 `migration_configure.py` preserves those flags when Ninja regenerates its rules;
 it does not edit the project's configure script or build helper sources.
 
-Coverage preparation generates independent exact-body ownership evidence without
-applying symbol renames. Discovery preparation then runs matching and confident
+Coverage preparation generates independent exact-body and corroborated `this`-layout
+ownership evidence without applying symbol renames. Discovery preparation then runs matching and confident
 renames once. Every batch starts from the same prepared baseline. With `--stage
 all`, source verification starts only after coverage and discovery integration
 have produced the next baselines. A single project lock
@@ -103,6 +103,23 @@ Evidence: Prime's
 `build/parallel-migration/benchmarks/20260909T085824.747819Z/result.json`.
 The benchmark now compares complete-report hashes as well as aggregate measures,
 so a per-unit difference cannot be hidden by equal totals.
+
+### Layout-shift coverage validation
+
+Policy version 2 was calibrated against the named PAL target with target names and
+ownership hidden during proposal generation and the pre-feature split file supplied
+as an independent oracle. Across the deterministic calibration and held-out
+partitions, all 813 layout-shift anchors with known ownership pointed to the correct
+source TU. Another 118 anchors landed in unlabeled portions of partial PAL splits
+and remain unknown; none landed in a different explicit TU. All 49 group ranges
+with complete known ownership were correct; another 44 remain unknown.
+
+The subsequent 35-candidate PAL run accepted 16 layout-group ranges totaling
+30,056 bytes. Representation rose from 747 to 763 of 822 source TUs. The combined
+run retained retail DOL SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`; configured source linkage remained
+176,844 bytes because coverage keeps source objects disabled. Evidence is under
+`build/parallel-migration/runs/20260909T204906.906167Z/` in the F: checkout.
 
 ### Measured coverage replay
 
