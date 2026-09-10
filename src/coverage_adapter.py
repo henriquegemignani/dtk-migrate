@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
-from migration_runtime import TRIAL_ERRORS, ValidationError
+from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
 
 EVIDENCE_SCHEMA = 3
 POLICY_VERSION = 3
@@ -378,6 +378,8 @@ def _validate_extracted_inputs(ctx, names, report):
 
 def _failure_category(error, log):
     text = f"{error}\n{log}".lower()
+    if "timed out after" in text:
+        return "build-timeout"
     if "retail dol bytes differ" in text or "checksum" in text:
         return "retail-mismatch"
     if "cycle" in text:
@@ -459,7 +461,7 @@ def evaluate(ctx, candidates, preferred=None):
                     order.append(candidate["name"])
                 write()
                 try:
-                    tested = ctx.build()
+                    tested = trial_build(ctx)
                     _validate_extracted_inputs(ctx, {candidate["name"]}, tested)
                     if _regresses(report, tested):
                         raise ValidationError(

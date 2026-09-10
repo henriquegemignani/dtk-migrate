@@ -29,7 +29,9 @@ prevents multiple migration pools from competing for the checkout.
 Each job records its baseline fingerprint, candidate list, accepted/deferred
 changes, command log, report, retail hash, and duration. Results are reduced in
 candidate order, never completion order. The coordinator rebuilds combined
-changes, bisects conflicts, and retries deferred candidates after progress.
+changes, bisects conflicts, and retries deferred candidates only after an
+accepted change creates a new baseline. It reuses the adapter's validated final
+report instead of performing a duplicate final link.
 Coverage requires bounded ownership evidence, extracted linker inputs, no existing
 regression, and retail integrity; it does not require objdiff code gain. Discovery
 requires code gain without per-unit regression plus retail integrity; source
@@ -49,6 +51,12 @@ to the same per-worker job limit. Disk preflight includes copies and build headr
 Both stages keep their artifacts for inspection and resume, so long runs consume
 additional disk. `--ninja` accepts a portable executable; the default resolves
 Chocolatey's launcher to the real binary before freezing it.
+
+Candidate builds use a 120-second timeout by default. The timeout starts only
+after the private workspace has a prepared baseline, so a legitimate cold build
+is not bounded by the trial limit. Override it with `--build-timeout SECONDS` for
+unusually large incremental links. A timeout kills the complete compiler/linker
+process tree and enters the normal bisection or deferred-candidate path.
 
 Replay a prepared stage without publishing:
 
@@ -77,7 +85,9 @@ Do not assume three workers are faster for a small or mostly rejected candidate
 set. Use `--workers 1` when measured warm throughput does not improve.
 Reduce `--batch-size` for small candidate sets if you want multiple workers busy;
 three candidates with the default batch size of forty form only one job. Keep
-batch size fixed when comparing worker counts.
+batch size fixed when comparing worker counts. Avoid `--batch-size 1` for a full
+migration: the adapters already bisect rejected groups, while singleton batches
+force a configure and link cycle for every candidate.
 
 ### Measured Prime replay
 

@@ -56,7 +56,9 @@ uv run src/parallel_migration.py --project-root ../prime --source GM8E01_00 --ta
 `all` runs coverage → discovery → source verification. `--limit` bounds
 candidates **per stage**; `--batch-size` defaults to 40. `--workers 1` uses exactly
 the same batches and validation as parallel execution. The default resource
-setting is three processes with four Ninja jobs each. See the measured guidance
+setting is three processes with four Ninja jobs each. Warmed candidate builds
+time out after 120 seconds by default; use `--build-timeout SECONDS` to adjust
+that bound without limiting cold baseline builds. See the measured guidance
 in [parallel execution](docs/parallel.md) before choosing a pool size.
 Use `--only UNIT` to evaluate an exact proposed unit name without running other
 candidates; repeat the option to select more than one unit.

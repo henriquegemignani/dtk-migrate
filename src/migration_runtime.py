@@ -27,8 +27,9 @@ class BuildContext:
     ninja: str = "ninja"
     cancel_event: object = None
     toolchain_root: Path | None = None
+    build_timeout: float | None = None
 
-    def run(self, cmd, capture=False):
+    def run(self, cmd, capture=False, timeout=None):
         from migration_workspace import run_command
 
         self.output.mkdir(parents=True, exist_ok=True)
@@ -52,13 +53,14 @@ class BuildContext:
                     log=log,
                     capture=capture,
                     cancel_event=self.cancel_event,
+                    timeout=timeout,
                 )
             except subprocess.CalledProcessError as error:
                 log.write(f"! exit status {error.returncode}\n")
                 log.flush()
                 raise
 
-    def build(self):
+    def build(self, *, timeout=None):
         command = [
             self.python,
             Path(__file__).with_name("migration_configure.py"),
@@ -91,7 +93,8 @@ class BuildContext:
                 self.build_jobs,
                 f"build/{self.target}/report.json",
                 f"build/{self.target}/ok",
-            ]
+            ],
+            timeout=timeout,
         )
         retail = self.root / "orig" / self.target / "sys/main.dol"
         built = self.root / "build" / self.target / "main.dol"
@@ -105,10 +108,24 @@ class BuildContext:
             )
         )
 
+    def trial_build(self):
+        """Build a candidate with the run's bounded trial timeout."""
+        return self.build(timeout=self.build_timeout)
+
     def dol_sha1(self):
         return hashlib.sha1(
             (self.root / "build" / self.target / "main.dol").read_bytes()
         ).hexdigest()
 
 
-TRIAL_ERRORS = (subprocess.CalledProcessError, ValidationError)
+def trial_build(ctx):
+    """Use bounded candidate builds while retaining small structural test contexts."""
+    bounded = getattr(ctx, "trial_build", None)
+    return bounded() if bounded is not None else ctx.build()
+
+
+TRIAL_ERRORS = (
+    subprocess.CalledProcessError,
+    subprocess.TimeoutExpired,
+    ValidationError,
+)

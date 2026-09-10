@@ -8,9 +8,36 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import migration_workspace as workspace
+from migration_runtime import BuildContext
 from parallel_migration import ninja_binary
+
+
+class BuildContextTests(unittest.TestCase):
+    def test_trial_timeout_only_bounds_the_incremental_ninja_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "orig/PAL/sys").mkdir(parents=True)
+            (root / "build/PAL").mkdir(parents=True)
+            (root / "orig/PAL/sys/main.dol").write_bytes(b"retail")
+            (root / "build/PAL/main.dol").write_bytes(b"retail")
+            (root / "build/PAL/report.json").write_text('{"measures": {}}')
+            ctx = BuildContext(
+                root,
+                "SRC",
+                "PAL",
+                Path(sys.executable),
+                root / "evidence",
+                ninja=sys.executable,
+                build_timeout=17,
+            )
+            with patch("migration_workspace.run_command", return_value=None) as run:
+                ctx.trial_build()
+            self.assertEqual(len(run.call_args_list), 2)
+            self.assertIsNone(run.call_args_list[0].kwargs["timeout"])
+            self.assertEqual(run.call_args_list[1].kwargs["timeout"], 17)
 
 
 class BuildSystemTests(unittest.TestCase):

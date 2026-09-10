@@ -132,6 +132,13 @@ class WorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.verify_result(result, spec)
 
+    def test_build_timeout_changes_the_resumable_job_identity(self):
+        common = ("baseline", [{"name": "A"}], "verify", {"fixture": "v1"})
+        self.assertNotEqual(
+            runner.job_identity(*common, build_timeout=60),
+            runner.job_identity(*common, build_timeout=120),
+        )
+
     def test_forged_coverage_selection_is_rejected(self):
         candidate = {"name": "A", "alternatives": [{"id": "real"}]}
         spec = {
@@ -193,6 +200,44 @@ class WorkerTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_no_progress_skips_deferred_retry_and_duplicate_build(self):
+        candidate = {"name": "A"}
+        report = {"measures": {"matched_code": 0}}
+
+        class Context:
+            def dol_sha1(self):
+                return "retail"
+
+        class Adapter:
+            def __init__(self):
+                self.calls = []
+
+            def evaluate(self, ctx, candidates):
+                self.calls.append(list(candidates))
+                return {
+                    "accepted": [],
+                    "deferred": list(candidates),
+                    "events": [],
+                    "report": report,
+                    "validation": "fixture",
+                }
+
+        mod = Adapter()
+        outcomes = [
+            {
+                "job_id": "00000",
+                "accepted": [],
+                "deferred": [candidate],
+                "events": [{"unit": "A", "status": "failed"}],
+            }
+        ]
+        with patch.object(runner, "adapter", return_value=mod):
+            result = runner.integrate(Context(), "verify", [candidate], outcomes)
+        self.assertEqual(mod.calls, [[]])
+        self.assertIs(result["report"], report)
+        self.assertEqual(result["deferred"], [candidate])
+        self.assertEqual(result["events"][0]["phase"], "worker")
+
     def test_benchmark_detects_per_unit_changes_with_identical_totals(self):
         result = {
             "accepted": [],
@@ -266,6 +311,61 @@ class IntegrationTests(unittest.TestCase):
                 runner.read_json(run_dir / "publication.json")["status"], "rolled-back"
             )
             self.assertEqual(snapshot_manifest(root), run["owner_manifest"])
+
+    def test_publication_validates_source_upgrades_without_extracted_objects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, integrated, run_dir = (
+                base / "owner",
+                base / "integration",
+                base / "run",
+            )
+            root.mkdir()
+            integrated.mkdir()
+            (root / "configure.py").write_text("same")
+            (integrated / "configure.py").write_text("same")
+            run = {
+                "owner_manifest": snapshot_manifest(root),
+                "symbol_mappings": {},
+                "target": "TARGET",
+                "build_jobs": 1,
+            }
+
+            class Context:
+                def build(self):
+                    return {"measures": {}}
+
+            class CoverageAdapter:
+                def validate(self, ctx, candidates, selected):
+                    self.validated = (candidates, selected)
+                    return {"measures": {}}
+
+            class VerifyAdapter:
+                def validate(self, ctx, names):
+                    self.validated = names
+                    return {"measures": {}}
+
+            coverage, verify = CoverageAdapter(), VerifyAdapter()
+            result = {
+                "coverage": {
+                    "accepted": [{"name": "A"}, {"name": "B"}],
+                    "selected": {"A": "a", "B": "b"},
+                },
+                "verify": {"accepted": [{"name": "B"}, {"name": "C"}]},
+            }
+            with (
+                patch.object(runner, "context", return_value=Context()),
+                patch.object(
+                    runner,
+                    "adapter",
+                    side_effect=lambda stage: (
+                        coverage if stage == "coverage" else verify
+                    ),
+                ),
+            ):
+                runner.publish(root, integrated, run_dir, run, result)
+            self.assertEqual(coverage.validated, ([{"name": "A"}], {"A": "a"}))
+            self.assertEqual(verify.validated, {"B", "C"})
 
     def test_downstream_resume_rejects_changed_upstream(self):
         with tempfile.TemporaryDirectory() as tmp:

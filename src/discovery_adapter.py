@@ -8,7 +8,7 @@ from pathlib import Path
 
 import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes, code_proposals
-from migration_runtime import TRIAL_ERRORS
+from migration_runtime import TRIAL_ERRORS, trial_build
 
 VALIDATION = "objdiff matched code; retail hash checks split integrity, not candidate source linkage"
 
@@ -145,7 +145,7 @@ def evaluate(ctx, candidates):
         staged_order = order + [c["name"] for c in batch if c["name"] not in blocks]
         write(staged, staged_order)
         try:
-            tested = ctx.build()
+            tested = trial_build(ctx)
         except TRIAL_ERRORS:
             retry(batch, "build-conflict")
             return

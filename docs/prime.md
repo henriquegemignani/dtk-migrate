@@ -39,6 +39,12 @@ group size; failures are bisected. The old recommendation to keep `--limit` near
 25 concerned the historical loop, whose companion expansion could exceed the
 limit and whose cycle heuristic discarded many proposals.
 
+Keep the default grouped batch size for full runs. `--batch-size 1` is intended
+for narrow diagnostics and was responsible for hundreds of avoidable full-link
+cycles in the 2026-09-10 `_48` migration. Candidate builds have a 120-second
+default timeout; change it with `--build-timeout SECONDS` when measured incremental
+builds need a different bound.
+
 The first command runs coverage, discovery, and verification in isolated workers;
 the latter two are serial
 alternatives using the same validation adapters. See [parallel execution](parallel.md).

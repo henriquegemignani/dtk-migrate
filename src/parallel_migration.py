@@ -30,7 +30,7 @@ from migration_workspace import (
     snapshot_manifest,
 )
 
-SCHEMA = 2
+SCHEMA = 3
 SOURCE_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = SOURCE_ROOT.parent
 EXPECTED_OPERATION_ERRORS = TRIAL_ERRORS + (
@@ -113,6 +113,7 @@ def context(root, run, stage, output, jobs):
         toolchain_root=Path(run["toolchain_root"])
         if run.get("toolchain_root")
         else None,
+        build_timeout=run.get("build_timeout"),
     )
 
 
@@ -149,13 +150,14 @@ def candidate_batches(candidates, size):
     return [candidates[i : i + size] for i in range(0, len(candidates), size)]
 
 
-def job_identity(baseline, candidates, stage, environment):
+def job_identity(baseline, candidates, stage, environment, build_timeout=None):
     return fingerprint(
         {
             "baseline": baseline,
             "candidates": candidates,
             "stage": stage,
             "environment": environment,
+            "build_timeout": build_timeout,
         }
     )
 
@@ -240,7 +242,11 @@ def execute_jobs(
                 "job_id": job_id,
                 "baseline_fingerprint": baseline_hash,
                 "fingerprint": job_identity(
-                    baseline_hash, batch, stage, run["environment"]
+                    baseline_hash,
+                    batch,
+                    stage,
+                    run["environment"],
+                    run.get("build_timeout"),
                 ),
                 "candidates": batch,
                 "output": str(output),
@@ -356,7 +362,9 @@ def integrate(ctx, stage, candidates, outcomes):
         pending = [
             candidate for candidate in candidates if candidate["name"] not in accepted
         ]
-        while pending:
+        # Worker-deferred candidates saw this same baseline. Retry them only
+        # after integration accepted something and therefore changed it.
+        while pending and accepted:
             retry = mod.evaluate(ctx, pending, preferred)
             events.extend(
                 {**event, "phase": "integration"} for event in retry["events"]
@@ -372,7 +380,11 @@ def integrate(ctx, stage, candidates, outcomes):
         accepted_candidates = [
             candidate for candidate in candidates if candidate["name"] in accepted
         ]
-        report = mod.validate(ctx, accepted_candidates, selected)
+        report = (
+            mod.validate(ctx, accepted_candidates, selected)
+            if accepted_candidates
+            else outcome["report"]
+        )
         return {
             "accepted": accepted_candidates,
             "deferred": pending,
@@ -382,26 +394,32 @@ def integrate(ctx, stage, candidates, outcomes):
             "dol_sha1": ctx.dol_sha1(),
             "validation": outcome["validation"],
         }
+    worker_events = [
+        {**event, "phase": "worker", "job_id": outcome.get("job_id")}
+        for outcome in outcomes
+        for event in outcome.get("events", [])
+    ]
     accepted_names = {c["name"] for outcome in outcomes for c in outcome["accepted"]}
     proposed = [c for c in candidates if c["name"] in accepted_names]
     outcome = mod.evaluate(ctx, proposed)
     accepted = {c["name"] for c in outcome["accepted"]}
-    events = list(outcome["events"])
+    events = worker_events + [
+        {**event, "phase": "integration"} for event in outcome["events"]
+    ]
     pending = [c for c in candidates if c["name"] not in accepted]
     # Retry against the integrated state; each new success changes the baseline.
-    while pending:
+    while pending and accepted:
         retry = mod.evaluate(ctx, pending)
-        events.extend(retry["events"])
+        events.extend({**event, "phase": "integration"} for event in retry["events"])
         added = {c["name"] for c in retry["accepted"]}
         outcome = retry
         if not added:
             break
         accepted.update(added)
         pending = [c for c in pending if c["name"] not in added]
-    if stage == "verify":
-        report = mod.validate(ctx, accepted)
-    else:
-        report = ctx.build()
+    # Every adapter's evaluate result already contains a final report for the
+    # exact workspace state. Rebuilding it here was a duplicate full link.
+    report = outcome["report"]
     return {
         "accepted": [c for c in candidates if c["name"] in accepted],
         "deferred": pending,
@@ -575,8 +593,23 @@ def publish(root, integrated, run_dir, run, result):
         report = ctx.build()
         if "coverage" in result:
             coverage = result["coverage"]
+            source_names = {
+                candidate["name"]
+                for candidate in result.get("verify", {}).get("accepted", [])
+            }
+            coverage_candidates = [
+                candidate
+                for candidate in coverage.get("accepted", [])
+                if candidate["name"] not in source_names
+            ]
+            coverage_names = {candidate["name"] for candidate in coverage_candidates}
+            coverage_selected = {
+                name: identity
+                for name, identity in coverage.get("selected", {}).items()
+                if name in coverage_names
+            }
             report = adapter("coverage").validate(
-                ctx, coverage.get("accepted", []), coverage.get("selected", {})
+                ctx, coverage_candidates, coverage_selected
             )
         if "verify" in result:
             names = {c["name"] for c in result["verify"].get("accepted", [])}
@@ -664,6 +697,12 @@ def main(argv=None):
     )
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--build-jobs", type=int, default=4)
+    parser.add_argument(
+        "--build-timeout",
+        type=float,
+        default=120.0,
+        help="maximum seconds for each warmed candidate build (default: 120)",
+    )
     parser.add_argument("--batch-size", type=int, default=40)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
@@ -678,10 +717,12 @@ def main(argv=None):
     if args.worker:
         worker(args.worker)
         return
-    if min(args.workers, args.build_jobs, args.batch_size) < 1 or (
+    if min(args.workers, args.build_jobs, args.batch_size, args.build_timeout) < 1 or (
         args.limit is not None and args.limit < 1
     ):
-        parser.error("workers, build jobs, batch size and limit must be positive")
+        parser.error(
+            "workers, build jobs, batch size, build timeout and limit must be positive"
+        )
     root = args.project_root.resolve()
     if not (root / "configure.py").is_file():
         parser.error("project root must contain configure.py")
@@ -804,6 +845,7 @@ def main(argv=None):
                 "tooling_root": str(run_dir / "tooling"),
                 "workers": args.workers,
                 "build_jobs": args.build_jobs,
+                "build_timeout": args.build_timeout,
                 "batch_size": args.batch_size,
                 "limit": args.limit,
                 "only": args.only or [],

@@ -295,6 +295,27 @@ class CommandTests(unittest.TestCase):
                 )
             self.assertEqual(error.exception.returncode, 7)
 
+    def test_timeout_kills_the_process_tree(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryFile(mode="w+") as log,
+        ):
+            marker = Path(directory) / "pid"
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                workspace.run_command(
+                    self.tree_command(marker),
+                    cwd=directory,
+                    env=os.environ,
+                    log=log,
+                    timeout=1,
+                )
+            self.assertLess(time.monotonic() - started, 5)
+            pid = self.await_marker(marker)
+            self.assert_dead(pid)
+            log.seek(0)
+            self.assertIn("timed out after 1 seconds", log.read())
+
     def tree_command(self, marker):
         child = (
             "import os,time,pathlib; pathlib.Path("

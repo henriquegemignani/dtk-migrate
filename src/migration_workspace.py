@@ -300,7 +300,7 @@ class _WindowsJob:
             self.handle = None
 
 
-def run_command(cmd, *, cwd, env, log, capture=False, cancel_event=None):
+def run_command(cmd, *, cwd, env, log, capture=False, cancel_event=None, timeout=None):
     """Run in a private process tree and kill all descendants on every exit."""
     job = _WindowsJob() if os.name == "nt" else None
     process = None
@@ -335,7 +335,12 @@ def run_command(cmd, *, cwd, env, log, capture=False, cancel_event=None):
             _ACTIVE_COMMANDS[process] = job
             if job:
                 job.assign_and_resume(process)
-        output, _ = process.communicate()
+        try:
+            output, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log.write(f"! timed out after {timeout:g} seconds\n")
+            log.flush()
+            raise
         if capture and output:
             log.write(output)
             log.flush()

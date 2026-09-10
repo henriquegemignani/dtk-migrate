@@ -10,7 +10,7 @@ from pathlib import Path
 
 import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
-from migration_runtime import TRIAL_ERRORS, ValidationError
+from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
 from verify_source_units import legacy_blocks, render_config
 
 
@@ -87,12 +87,12 @@ def configured_names(text, target):
     return names
 
 
-def validate(ctx, names):
+def validate(ctx, names, *, trial=False):
     """Require retail byte equality and actual compiled linker dependencies."""
     names = set(names) | configured_names(
         (ctx.root / "configure.py").read_text(encoding="utf-8"), ctx.target
     )
-    report = ctx.build()
+    report = trial_build(ctx) if trial else ctx.build()
     units = by_path(report)
     inputs = ctx.run(
         [ctx.ninja, "-t", "inputs", f"build/{ctx.target}/main.elf"], capture=True
@@ -189,7 +189,11 @@ def evaluate(ctx, candidates):
         proposed = accepted + batch
         write(proposed)
         try:
-            validate(ctx, baseline_names | {c["name"] for c in proposed})
+            validate(
+                ctx,
+                baseline_names | {c["name"] for c in proposed},
+                trial=True,
+            )
         except TRIAL_ERRORS as error:
             write(accepted)
             if len(batch) > 1:
