@@ -61,7 +61,9 @@ time out after 120 seconds by default; use `--build-timeout SECONDS` to adjust
 that bound without limiting cold baseline builds. See the measured guidance
 in [parallel execution](docs/parallel.md) before choosing a pool size.
 Use `--only UNIT` to evaluate an exact proposed unit name without running other
-candidates; repeat the option to select more than one unit.
+candidates; repeat the option to select more than one unit. Coverage reports list
+all other eligible candidates under `eligible_excluded_by_only`, so a focused run
+does not make an untested proposal look ineligible.
 
 The runner captures current files, including dirty and untracked inputs and
 submodule contents, freezes tool binaries and scripts, and gives each worker a
@@ -70,7 +72,7 @@ batches concurrently, then revalidates their union in deterministic order. Only
 the coordinator publishes validated changes. User input drift stops publication.
 Python's free-threaded runtime does not replace process and filesystem isolation.
 
-Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 6
+Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 8
 accepts strict exact-body intervals, corroborated `this`-layout groups, and
 boundary-constrained function sequences. A layout
 group requires at least two unique functions whose normalized instruction streams
@@ -99,6 +101,24 @@ slots and four slots belonging to the candidate TU. Source and target text sizes
 must be within 3%, function counts within one, and the only unmatched target helper
 must be called entirely from inside the gap and from at least one aligned function.
 The runner revalidates the vtable pairs and helper call graph before trying the range.
+When a stale neighboring split makes the bounded gap too wide, an ownership-transition
+fallback may trim the gap to the candidate's complete aligned function sequence. It
+requires at least eight contiguous primary matches covering every source function,
+two strong matches, a decisive alignment, and source/target sizes within 2%. Every
+excluded function at either edge must contiguously cover that edge and map to the
+stated adjacent source TU; each nonempty edge needs a strong match. At least one edge
+must be nonempty. The runner independently rechecks the sequence, sizes, and both
+ownership transitions before trying the trimmed range.
+If the candidate's complete sequence occupies a prefix or suffix of an adjacent
+explicit target owner, the adjacent-owner transition fallback can shrink that
+owner and assign the recovered interval in one transaction. The candidate needs
+all of its source functions aligned contiguously, at least eight functions, two
+strong matches, two direct exact-body anchors, and no more than 10% size drift.
+The retained owner needs its own complete monotone alignment with at least four
+functions, two strong matches, no more than 10% size drift, and at most one
+caller-local helper between aligned functions. The runner reconstructs both
+sequences and boundary geometry, applies both range changes atomically for every
+trial, and rolls both back together after rejection or failure.
 When functions in an eligible boundary sequence strictly identify data symbols used by
 source-side asset extraction, DTK also proposes equivalent target extraction entries.
 The target symbol and its existing extent stay intact, while `rename` preserves the

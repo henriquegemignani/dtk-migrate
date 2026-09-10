@@ -463,6 +463,7 @@ def run_stage(run_dir, run, stage, source_root):
             ctx, limit=None if run.get("only") else run["limit"]
         )
         requested = set(run.get("only", []))
+        prepared["eligible_excluded_by_only"] = []
         if requested:
             available = {candidate["name"] for candidate in prepared["candidates"]}
             missing = requested - available
@@ -470,6 +471,7 @@ def run_stage(run_dir, run, stage, source_root):
                 raise RuntimeError(
                     f"Requested {stage} candidates were not proposed: {sorted(missing)}"
                 )
+            prepared["eligible_excluded_by_only"] = sorted(available - requested)
             prepared["candidates"] = [
                 candidate
                 for candidate in prepared["candidates"]
@@ -498,6 +500,7 @@ def run_stage(run_dir, run, stage, source_root):
     result.update(
         baseline=prepared["baseline"]["measures"],
         preparation_events=prepared.get("events", []),
+        eligible_excluded_by_only=prepared.get("eligible_excluded_by_only", []),
         seconds=time.monotonic() - started,
         baseline_fingerprint=fingerprint(manifest),
     )

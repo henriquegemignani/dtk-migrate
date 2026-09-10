@@ -58,6 +58,11 @@ is not bounded by the trial limit. Override it with `--build-timeout SECONDS` fo
 unusually large incremental links. A timeout kills the complete compiler/linker
 process tree and enters the normal bisection or deferred-candidate path.
 
+Use the stage and total timings in `result.json` for migration measurements.
+System-wide ETW capture is intentionally excluded from future runs: a full
+GeneralProfile trace consumed 36.3 GB, took several minutes to flush and copy,
+and still lost events.
+
 Replay a prepared stage without publishing:
 
 ```sh
@@ -203,6 +208,60 @@ Run `20260910T123136.416946Z` accepted
 TUs. Objdiff-matched and source-linked code stayed at 1,361,884 and 177,036 bytes,
 respectively, because the source object remains disabled. The final DOL SHA-1 stayed
 `4d3780c77842ae7fddbdd5732b70bed100df5c65`.
+
+### Ownership-transition boundary validation
+
+Policy version 7 can recover a candidate when an adjacent represented TU has a stale
+boundary inside the neighbor-bounded gap. DTK accepts only a complete sequence of at
+least eight source functions mapped to one contiguous target span in strict primary
+order, with at least two strong matches, a 10% alignment margin, and no more than 2%
+text-size drift. The part trimmed from either edge must itself be a contiguous set of
+functions mapped to the stated previous or next source TU, with at least one strong
+match on every nonempty edge. At least one edge must be trimmed.
+
+The runner recomputes all counts, spans, order, size drift, and edge coverage from the
+serialized function evidence. A focused `--only` run retains the names of other
+proposed candidates in `eligible_excluded_by_only` in its JSON and Markdown reports.
+This distinguishes a candidate excluded by the operator's filter from one rejected by
+the evidence policy.
+
+### Adjacent-owner transition validation
+
+Policy version 8 handles the stricter case in which the candidate's complete target
+sequence occupies a prefix or suffix already assigned to its immediate source-order
+neighbor. The candidate must align every source function to one contiguous target
+span, with at least eight functions, two strong matches, two direct exact-body anchors,
+and no more than 10% source/target size drift. The retained portion of the adjacent
+owner must independently align every source function, with at least four functions,
+two strong matches, no more than 10% size drift, and at most one target-only helper
+whose callers all lie in that owner.
+
+The evidence names the owner's exact current and revised ranges. The adapter verifies
+the source adjacency, owner identity, full sequences, counts, anchors, helper callers,
+size bounds, and prefix/suffix geometry from the serialized inventories. Candidate
+insertion and owner revision are one operation in worker trials, integration,
+publication, rollback, and final-state validation.
+
+Masked-name `GM8E01_02` calibration scored all 430 calibration and 463 held-out ranges
+correct, with no unknown or incorrect ranges. PAL calibration scored 3,610 ranges
+correct and 308 unknown, with none incorrect. The all-pending PAL evaluation contained
+34 unrepresented TUs and made only `MetroidPrime/CFluidPlane.cpp` eligible under the
+new rule.
+
+The unfiltered stage-all run `20260910T165851.040686Z` used three workers, four Ninja
+jobs each, batch size 40, and no candidate filter. Coverage accepted `CFluidPlane` as
+`.text 0x80125CC0..0x801263CC` and atomically moved the start of
+`CFluidPlaneManager` from `0x80125CC4` to `0x801263CC`. Discovery accepted none of
+its 29 candidates, and source verification accepted none of its 94 candidates. Split
+representation rose from 789 to 790 of 823 source TUs; matched code rose by 716 bytes
+to 1,363,208 bytes (34.87504%), while source-linked code stayed at 177,036 bytes
+(4.5291233%). The final DOL SHA-1 remained
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`.
+
+The run took 1,390.09 seconds: 365.95 seconds for coverage, 285.15 for discovery,
+and 664.17 for source verification. Its frozen inputs, candidate evidence, job logs,
+publication journal, final report, and ordinary timings are retained under
+`build/parallel-migration/runs/20260910T165851.040686Z/` in the F: checkout.
 
 ### Measured coverage replay
 

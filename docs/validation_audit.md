@@ -398,3 +398,86 @@ retail-byte gates, retaining DOL SHA-1
 `4d3780c77842ae7fddbdd5732b70bed100df5c65`. Representation moved from 787 to 788
 of 823 source TUs; matched and source-linked code stayed at 1,361,884 and 177,036
 bytes. The final suites contain 97 passing Python tests and 72 passing DTK tests.
+
+## Ownership-transition TU boundaries (2026-09-10)
+
+Coverage policy version 7 handles a stale explicit neighbor boundary without
+weakening the ordinary sequence policy. It trims the neighbor-bounded gap only when
+at least eight primary matches cover every source function in strict order and one
+contiguous target span, with two strong matches, a 10% alignment margin, and no more
+than 2% source/target text-size drift. Every function excluded at the left or right
+edge must map uniquely and contiguously to the stated adjacent source TU, and each
+nonempty edge needs a strong match. The adapter independently reconstructs and checks
+the full sequence and both transitions before a build trial. Focused runs now also
+report otherwise eligible candidates excluded by `--only`.
+
+The policy-7 report evaluated all 35 pending PAL splits. Fifteen had boundary-sequence
+evidence; only `MetroidPrime/Enemies/CSeedling.cpp` newly passed the transition rule.
+All 18 source functions mapped in order to the contiguous target span
+`.text 0x80254A80..0x80255B8C` (4,364 target bytes versus 4,356 source bytes). The
+512-byte prefix excluded from the original gap contained three contiguous functions
+mapped to `MetroidPrime/Cameras/CInterpolationCamera.cpp`, including two strong
+matches. The other 34 pending TUs retained their prior dispositions. Evidence is in
+`build/investigations/policy7-all-pending.json` and
+`build/investigations/policy7-all-pending-evaluation.json` in the Prime checkout.
+
+The final unfiltered run `20260910T134932.007168Z` ran coverage, discovery, and source
+verification with three workers and four build jobs. Coverage accepted `CSeedling`
+and moved representation from 788 to 789 of 823 source TUs. Discovery accepted
+`MetroidPrime/CEulerAngles.cpp`, extending its text split to
+`.text 0x8001BF34..0x8001C32C` and adding 572 matched code bytes. Verification accepted
+no source upgrades. The published result has 1,362,492 matched code bytes
+(34.85672%) and 177,036 source-linked code bytes (4.5291233%); the retail DOL SHA-1
+remains `4d3780c77842ae7fddbdd5732b70bed100df5c65`.
+
+The run took 1,987.66 seconds: 328.77 seconds for coverage, 681.20 for discovery, and
+916.66 for verification. Stage timings, environment identity, and build/result
+metrics are retained with the run. The final suites contain 100 passing Python tests
+and 72 passing DTK tests; Ruff and Clippy pass.
+
+## Adjacent-owner transition boundaries (2026-09-10)
+
+Coverage policy version 8 handles a candidate whose complete target sequence lies in
+the prefix or suffix of its immediate explicit neighbor. The candidate must have all
+source functions aligned contiguously and monotonically, at least eight functions,
+two strong matches, two direct exact-body anchors, and at most 10% text-size drift.
+The neighboring owner must retain a complete monotone sequence of at least four
+functions with two strong matches and at most 10% drift. At most one target-only
+helper may interrupt that retained span, and all of its callers must lie within the
+owner. The adapter independently reconstructs both mappings and the boundary geometry,
+then treats the new split and owner revision as one operation through trial, rollback,
+integration, publication, and final validation.
+
+The `GM8E01_02` masked-name calibration scored 430/430 calibration ranges and 463/463
+held-out ranges correct, including 846 and 934 correct anchors, with no unknown or
+incorrect result. PAL calibration scored 1,858 calibration and 1,752 held-out ranges
+correct; another 131 and 177 ranges were unknown because the oracle did not assign
+them, and none were incorrect. Evidence is under each target's
+`build/<target>/policy8-coverage-calibration/` directory.
+
+The fresh all-pending PAL report evaluated 34 missing TUs and emitted the new evidence
+only for `MetroidPrime/CFluidPlane.cpp`. Its eight source functions map contiguously to
+`.text 0x80125CC0..0x801263CC` with six strong matches, five direct anchors, complete
+target coverage, and 6.6% size drift. The retained `CFluidPlaneManager` portion maps
+all ten source functions to `0x801263CC..0x80126ACC`, with seven strong matches, 2.0%
+size drift, and one 172-byte helper called only from inside that owner. The evaluation
+is retained as `build/investigations/policy8-all-pending-evaluation.json`.
+
+The final unfiltered run `20260910T165851.040686Z` used stage `all`, three workers,
+four Ninja jobs per worker, batch size 40, no limit, and no `--only` filter. Coverage
+accepted `CFluidPlane` in both its worker and integration builds and revised
+`CFluidPlaneManager` atomically. Discovery deferred all 29 candidates and verification
+deferred all 94. Publication changed only `config/GM8P01_00/splits.txt`; owner
+validation passed, and the publication journal's final bytes equal the live file.
+
+Representation rose from 789 to 790 of 823 source TUs. Matched code rose from
+1,362,492 to 1,363,208 bytes (34.87504%), while source-linked code stayed at 177,036
+bytes (4.5291233%). The final DOL SHA-1 remained
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. The run took 1,390.09 seconds: 365.95
+for coverage, 285.15 for discovery, and 664.17 for verification. A one-off retained
+GeneralProfile trace is 36,299,603,968 bytes and reports 875,165 lost events, so it is
+not relied on for validation and ETW capture has been removed from the future workflow.
+The final suites contain 104 passing Python tests and 72 passing DTK tests. Ruff,
+the Python formatter and type checker, changed-file Rust formatting, and Clippy on
+all targets and features pass; Clippy retains the repository's existing
+`iter_kv_map` exemption.

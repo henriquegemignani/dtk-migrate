@@ -14,9 +14,9 @@ import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
 
-EVIDENCE_SCHEMA = 6
-POLICY_VERSION = 6
-VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-ownership-required-extracts-and-extracted-link-inputs-and-retail-bytes"
+EVIDENCE_SCHEMA = 8
+POLICY_VERSION = 8
+VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-required-extracts-and-extracted-link-inputs-and-retail-bytes"
 MIN_LAYOUT_BOUNDARY_FUNCTIONS = 4
 MIN_LAYOUT_BOUNDARY_BYTES = 1024
 MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES = 16
@@ -50,6 +50,40 @@ VTABLE_BOUNDARY_POLICY = {
     "maximum_vtable_boundary_function_delta": MAX_VTABLE_BOUNDARY_FUNCTION_DELTA,
     "maximum_vtable_boundary_gap_helpers": MAX_VTABLE_BOUNDARY_GAP_HELPERS,
     "maximum_vtable_size_padding": MAX_VTABLE_SIZE_PADDING,
+}
+MIN_OWNERSHIP_TRANSITION_FUNCTIONS = 8
+MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS = 2
+MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS = 1
+MAX_OWNERSHIP_TRANSITION_SIZE_DELTA = 0.02
+MATCH_TIERS = {"confident", "probable", "candidate"}
+STRONG_MATCH_TIERS = {"confident", "probable"}
+OWNERSHIP_TRANSITION_POLICY = {
+    "infer_ownership_transition_boundaries": True,
+    "minimum_ownership_transition_functions": MIN_OWNERSHIP_TRANSITION_FUNCTIONS,
+    "minimum_ownership_transition_strong_functions": MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS,
+    "minimum_ownership_transition_edge_strong_functions": MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS,
+    "maximum_ownership_transition_size_delta": MAX_OWNERSHIP_TRANSITION_SIZE_DELTA,
+    "require_complete_ownership_transition_sequence": True,
+    "require_nonempty_ownership_transition_correction": True,
+}
+MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS = 8
+MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS = 2
+MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS = 2
+MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS = 4
+MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS = 2
+MAX_ADJACENT_OWNER_SIZE_DELTA = 0.10
+MAX_ADJACENT_OWNER_GAP_HELPERS = 1
+ADJACENT_OWNER_TRANSITION_POLICY = {
+    "infer_adjacent_owner_transition_boundaries": True,
+    "minimum_adjacent_owner_transition_functions": MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS,
+    "minimum_adjacent_owner_transition_strong_functions": MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS,
+    "minimum_adjacent_owner_transition_direct_anchors": MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS,
+    "minimum_adjacent_owner_support_functions": MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS,
+    "minimum_adjacent_owner_support_strong_functions": MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS,
+    "maximum_adjacent_owner_size_delta": MAX_ADJACENT_OWNER_SIZE_DELTA,
+    "maximum_adjacent_owner_gap_helpers": MAX_ADJACENT_OWNER_GAP_HELPERS,
+    "require_complete_adjacent_owner_sequences": True,
+    "require_atomic_adjacent_owner_revision": True,
 }
 
 _EXTRACT_FIELDS = (
@@ -253,8 +287,21 @@ def _overlaps_existing(section, start, end, blocks):
     )
 
 
-def _alternative(section, start, end, anchors, *, evidence="exact-body", group=None):
-    identity = f"{evidence}:{group or ''}:{section}:{start:08X}-{end:08X}"
+def _alternative(
+    section,
+    start,
+    end,
+    anchors,
+    *,
+    evidence="exact-body",
+    group=None,
+    owner_revisions=None,
+):
+    owner_revisions = owner_revisions or []
+    identity = (
+        f"{evidence}:{group or ''}:{section}:{start:08X}-{end:08X}:"
+        f"{json.dumps(owner_revisions, sort_keys=True, separators=(',', ':'))}"
+    )
     return {
         "id": hashlib.sha256(identity.encode()).hexdigest()[:16],
         "evidence": evidence,
@@ -265,10 +312,334 @@ def _alternative(section, start, end, anchors, *, evidence="exact-body", group=N
         "covered_bytes": end - start,
         "lines": [f"\t{section:11} start:0x{start:08X} end:0x{end:08X}"],
         "anchors": anchors,
+        "owner_revisions": owner_revisions,
     }
 
 
-def build_alternatives(unit, target_blocks):
+def _valid_transition_edge(edge, unit, start, end):
+    functions = edge.get("functions", [])
+    ranges = [
+        (int(item["target_address"], 16), int(item["target_end"], 16))
+        for item in functions
+    ]
+    source_addresses = [int(item["source_address"], 16) for item in functions]
+    tiers = [item.get("tier") for item in functions]
+    strong = sum(tier in STRONG_MATCH_TIERS for tier in tiers)
+    if (
+        edge.get("unit") != unit
+        or int(edge.get("start", "0"), 16) != start
+        or int(edge.get("end", "0"), 16) != end
+        or edge.get("bytes") != end - start
+        or edge.get("strong_functions") != strong
+        or any(tier not in MATCH_TIERS for tier in tiers)
+        or any(
+            right <= left or right - left != item.get("size")
+            for item, (left, right) in zip(functions, ranges)
+        )
+        or source_addresses != sorted(source_addresses)
+        or len(set(source_addresses)) != len(source_addresses)
+        or any(
+            left_end != right_start
+            for (_, left_end), (right_start, _) in pairwise(ranges)
+        )
+    ):
+        return False
+    if start == end:
+        return not functions and strong == 0
+    return (
+        bool(functions)
+        and ranges[0][0] == start
+        and ranges[-1][1] == end
+        and strong >= MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS
+    )
+
+
+def _single_section_range(blocks, unit, section):
+    ranges = [
+        value
+        for line in blocks.get(unit, [])
+        if (value := scl.parse_range(line)) and value[0] == section
+    ]
+    return ranges[0] if len(ranges) == 1 else None
+
+
+def _relative_size_delta(source_bytes, target_bytes):
+    base = max(source_bytes, target_bytes)
+    return abs(source_bytes - target_bytes) / base if base else 0.0
+
+
+def _sequence_details(functions):
+    try:
+        source_addresses = [int(item["source_address"], 16) for item in functions]
+        target_ranges = [
+            (int(item["target_address"], 16), int(item["target_end"], 16))
+            for item in functions
+        ]
+        tiers = [item.get("tier") for item in functions]
+    except KeyError, TypeError, ValueError:
+        return None
+    if (
+        any(tier not in MATCH_TIERS for tier in tiers)
+        or any(not item.get("primary") for item in functions)
+        or source_addresses != sorted(source_addresses)
+        or len(set(source_addresses)) != len(source_addresses)
+        or any(
+            right <= left or right - left != item.get("size")
+            for item, (left, right) in zip(functions, target_ranges)
+        )
+        or any(
+            left_end > right_start
+            for (_, left_end), (right_start, _) in pairwise(target_ranges)
+        )
+    ):
+        return None
+    return target_ranges, sum(tier in STRONG_MATCH_TIERS for tier in tiers)
+
+
+def _partition_covers(start, end, function_ranges, helpers):
+    try:
+        helper_ranges = [
+            (int(helper["target_address"], 16), int(helper["target_end"], 16))
+            for helper in helpers
+        ]
+    except KeyError, TypeError, ValueError:
+        return False
+    pieces = sorted(function_ranges + helper_ranges)
+    return (
+        bool(pieces)
+        and pieces[0][0] == start
+        and pieces[-1][1] == end
+        and all(right > left for left, right in pieces)
+        and all(
+            left_end == right_start
+            for (_, left_end), (right_start, _) in pairwise(pieces)
+        )
+        and all(
+            right - left == helper.get("size")
+            for helper, (left, right) in zip(helpers, helper_ranges)
+        )
+    )
+
+
+def _direct_anchor_count(unit, section, start, end, owner):
+    count = 0
+    for anchor in unit.get("anchors", []):
+        try:
+            anchor_start = int(anchor["target_address"], 16)
+            anchor_end = int(anchor["target_end"], 16)
+        except KeyError, TypeError, ValueError:
+            continue
+        existing_owner = anchor.get("existing_target_owner")
+        if (
+            anchor.get("section") == section
+            and start <= anchor_start < anchor_end <= end
+            and anchor_end - anchor_start == anchor.get("size")
+            and anchor.get("size", 0) >= 16
+            and not anchor.get("source_weak")
+            and not anchor.get("target_weak")
+            and anchor.get("source_extent_known") is True
+            and anchor.get("target_extent_known") is True
+            and anchor.get("source_unit_explicit") is True
+            and anchor.get("source_unit_wholly_owned") is True
+            and not anchor.get("template_instantiation")
+            and anchor.get("unique_source") is True
+            and anchor.get("unique_target") is True
+            and anchor.get("normalized_body_equal") is True
+            and anchor.get("relocation_layout_equal") is True
+            and (
+                existing_owner in (None, unit["name"], owner)
+                or anchor.get("existing_owner_autogenerated") is True
+            )
+        ):
+            count += 1
+    return count
+
+
+def _adjacent_owner_alternative(
+    unit, transition, target_blocks, source_units, source_blocks
+):
+    try:
+        section = transition["section"]
+        side = transition["side"]
+        start = int(transition["target_start"], 16)
+        end = int(transition["target_end"], 16)
+        owner = transition["owner"]
+        owner_name = owner["unit"]
+        original_start = int(owner["original_start"], 16)
+        original_end = int(owner["original_end"], 16)
+        revised_start = int(owner["revised_start"], 16)
+        revised_end = int(owner["revised_end"], 16)
+    except KeyError, TypeError, ValueError:
+        return None
+    owner_source = source_units.get(owner_name)
+    candidate_details = _sequence_details(transition.get("functions", []))
+    owner_details = _sequence_details(owner.get("functions", []))
+    current_owner_range = _single_section_range(target_blocks, owner_name, section)
+    previous_range = _single_section_range(
+        target_blocks, transition.get("previous_unit"), section
+    )
+    next_range = _single_section_range(
+        target_blocks, transition.get("next_unit"), section
+    )
+    source_previous = _single_section_range(
+        source_blocks, transition.get("previous_unit"), section
+    )
+    source_candidate = _single_section_range(source_blocks, unit.get("name"), section)
+    source_next = _single_section_range(
+        source_blocks, transition.get("next_unit"), section
+    )
+    if (
+        not transition.get("eligible")
+        or section != ".text"
+        or side not in {"next-prefix", "previous-suffix"}
+        or end <= start
+        or owner_source is None
+        or candidate_details is None
+        or owner_details is None
+        or current_owner_range != (section, original_start, original_end)
+        or owner_name == unit.get("name")
+        or transition.get("previous_unit") not in source_units
+        or transition.get("next_unit") not in source_units
+        or source_previous is None
+        or source_candidate is None
+        or source_next is None
+        or source_previous[2] != source_candidate[1]
+        or source_candidate[2] != source_next[1]
+        or source_candidate[2] - source_candidate[1] != unit["code_bytes"]
+    ):
+        return None
+    candidate_ranges, candidate_strong = candidate_details
+    owner_ranges, owner_strong = owner_details
+    candidate_functions = transition.get("functions", [])
+    owner_functions = owner.get("functions", [])
+    helpers = owner.get("gap_helpers", [])
+    candidate_bytes = end - start
+    owner_bytes = revised_end - revised_start
+    candidate_delta = _relative_size_delta(unit["code_bytes"], candidate_bytes)
+    owner_delta = _relative_size_delta(owner_source["code_bytes"], owner_bytes)
+    direct_anchors = _direct_anchor_count(unit, section, start, end, owner_name)
+    target_addresses = {left for left, _ in owner_ranges}
+    helper_addresses = {
+        int(helper.get("target_address", "0"), 16) for helper in helpers
+    }
+    allowed_callers = target_addresses | helper_addresses
+    if (
+        len(candidate_functions) < MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS
+        or transition.get("source_functions") != len(candidate_functions)
+        or transition.get("aligned_functions") != len(candidate_functions)
+        or transition.get("strong_functions") != candidate_strong
+        or candidate_strong < MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS
+        or transition.get("direct_anchors") != direct_anchors
+        or direct_anchors < MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS
+        or transition.get("source_bytes") != unit["code_bytes"]
+        or transition.get("target_bytes") != candidate_bytes
+        or transition.get("match_ratio") != 1.0
+        or transition.get("target_coverage") != 1.0
+        or transition.get("alignment_margin", 0.0) < 0.1
+        or any(value % 4 for value in (start, end, revised_start, revised_end))
+        or candidate_delta > MAX_ADJACENT_OWNER_SIZE_DELTA
+        or abs(transition.get("size_delta", -1.0) - round(candidate_delta, 3))
+        > 0.000001
+        or not _partition_covers(start, end, candidate_ranges, [])
+        or owner.get("source_functions") != len(owner_functions)
+        or owner.get("aligned_functions") != len(owner_functions)
+        or len(owner_functions) < MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS
+        or owner.get("strong_functions") != owner_strong
+        or owner_strong < MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS
+        or owner.get("target_functions") != len(owner_functions) + len(helpers)
+        or owner.get("source_bytes") != owner_source["code_bytes"]
+        or owner.get("target_bytes") != owner_bytes
+        or owner_delta > MAX_ADJACENT_OWNER_SIZE_DELTA
+        or abs(owner.get("size_delta", -1.0) - round(owner_delta, 3)) > 0.000001
+        or len(helpers) > MAX_ADJACENT_OWNER_GAP_HELPERS
+        or not _partition_covers(revised_start, revised_end, owner_ranges, helpers)
+        or any(
+            not helper.get("callers")
+            or any(
+                int(caller, 16) not in allowed_callers for caller in helper["callers"]
+            )
+            or not any(
+                int(caller, 16) in target_addresses for caller in helper["callers"]
+            )
+            for helper in helpers
+        )
+    ):
+        return None
+    if side == "next-prefix":
+        valid_boundary = (
+            owner_name == transition.get("next_unit")
+            and previous_range is not None
+            and previous_range[2] == start
+            and next_range == current_owner_range
+            and source_next[2] - source_next[1] == owner["source_bytes"]
+            and original_start < end < original_end
+            and revised_start == end
+            and revised_end == original_end
+        )
+    else:
+        valid_boundary = (
+            owner_name == transition.get("previous_unit")
+            and next_range is not None
+            and next_range[1] == end
+            and previous_range == current_owner_range
+            and source_previous[2] - source_previous[1] == owner["source_bytes"]
+            and original_start < start < original_end
+            and revised_start == original_start
+            and revised_end == start
+        )
+    relinquished = (
+        (original_start, revised_start)
+        if side == "next-prefix"
+        else (revised_end, original_end)
+    )
+    overlaps = [
+        (name, other_start, other_end)
+        for name, lines in target_blocks.items()
+        for line in lines
+        if (value := scl.parse_range(line))
+        for other_section, other_start, other_end in [value]
+        if section == other_section and start < other_end and other_start < end
+    ]
+    if (
+        not valid_boundary
+        or relinquished[0] >= relinquished[1]
+        or any(name != owner_name for name, _, _ in overlaps)
+        or not any(
+            name == owner_name
+            and max(start, other_start) == relinquished[0]
+            and min(end, other_end) == relinquished[1]
+            for name, other_start, other_end in overlaps
+        )
+    ):
+        return None
+    revision = {
+        "unit": owner_name,
+        "section": section,
+        "original_start": owner["original_start"],
+        "original_end": owner["original_end"],
+        "revised_start": owner["revised_start"],
+        "revised_end": owner["revised_end"],
+    }
+    anchors = [
+        {**item, "section": section, "target_address": item["target_address"]}
+        for item in candidate_functions
+    ]
+    group = (
+        f"{transition['previous_unit']}|{transition['next_unit']}|{side}|"
+        f"{owner['original_start']}|{owner['original_end']}"
+    )
+    return _alternative(
+        section,
+        start,
+        end,
+        anchors,
+        evidence="adjacent-owner-transition-boundary",
+        group=group,
+        owner_revisions=[revision],
+    )
+
+
+def build_alternatives(unit, target_blocks, source_units=None, source_blocks=None):
     """Create exact, layout-shift, and bounded sequence ranges."""
     eligible = [anchor for anchor in unit["anchors"] if anchor["eligible"]]
     individual = []
@@ -376,7 +747,93 @@ def build_alternatives(unit, target_blocks):
             continue
 
         method = sequence.get("acceptance_method")
-        if method == "layout-corroborated-boundary":
+        if method == "ownership-transition-boundary":
+            functions = sequence.get("functions", [])
+            source_addresses = [int(item["source_address"], 16) for item in functions]
+            target_ranges = [
+                (int(item["target_address"], 16), int(item["target_end"], 16))
+                for item in functions
+            ]
+            support = sequence.get("ownership_transition_support") or {}
+            original_start = int(support.get("original_target_start", "0"), 16)
+            original_end = int(support.get("original_target_end", "0"), 16)
+            aligned_start = int(support.get("aligned_target_start", "0"), 16)
+            aligned_end = int(support.get("aligned_target_end", "0"), 16)
+            size_base = max(unit["code_bytes"], end - start)
+            size_delta = (
+                abs(unit["code_bytes"] - (end - start)) / size_base
+                if size_base
+                else 0.0
+            )
+            tiers = [item.get("tier") for item in functions]
+            strong = sum(tier in STRONG_MATCH_TIERS for tier in tiers)
+            if (
+                len(functions) < MIN_OWNERSHIP_TRANSITION_FUNCTIONS
+                or sequence["aligned_functions"] != len(functions)
+                or sequence["source_functions"] != len(functions)
+                or sequence["target_functions"] != len(functions)
+                or sequence["aligned_bytes"] != end - start
+                or sequence["target_bytes"] != end - start
+                or sequence["match_ratio"] != 1.0
+                or sequence["order_ratio"] != 1.0
+                or sequence["target_coverage"] != 1.0
+                or sequence["alignment_margin"] < 0.1
+                or strong < MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS
+                or sequence["strong_functions"] != strong
+                or any(tier not in MATCH_TIERS for tier in tiers)
+                or not all(item["primary"] for item in functions)
+                or source_addresses != sorted(source_addresses)
+                or len(set(source_addresses)) != len(source_addresses)
+                or any(
+                    right <= left or right - left != item["size"]
+                    for item, (left, right) in zip(functions, target_ranges)
+                )
+                or any(
+                    left_end != right_start
+                    for (_, left_end), (right_start, _) in pairwise(target_ranges)
+                )
+                or not target_ranges
+                or target_ranges[0][0] != start
+                or target_ranges[-1][1] != end
+                or aligned_start != start
+                or aligned_end != end
+                or support.get("source_bytes") != unit["code_bytes"]
+                or support.get("aligned_target_bytes") != end - start
+                or original_start > start
+                or original_end < end
+                or original_start >= original_end
+                or (original_start == start and original_end == end)
+                or size_delta > MAX_OWNERSHIP_TRANSITION_SIZE_DELTA
+                or abs(support.get("size_delta", -1.0) - round(size_delta, 3))
+                > 0.000001
+                or not _valid_transition_edge(
+                    support.get("left", {}),
+                    sequence["previous_unit"],
+                    original_start,
+                    start,
+                )
+                or not _valid_transition_edge(
+                    support.get("right", {}),
+                    sequence["next_unit"],
+                    end,
+                    original_end,
+                )
+            ):
+                continue
+            anchors = [
+                {
+                    **item,
+                    "section": sequence["section"],
+                    "target_address": item["target_address"],
+                }
+                for item in functions
+            ]
+            evidence = "ownership-transition-boundary"
+            group = (
+                f"{sequence['previous_unit']}|{sequence['next_unit']}|"
+                f"{support['original_target_start']}|{support['original_target_end']}"
+            )
+        elif method == "layout-corroborated-boundary":
             support_group = sequence.get("layout_support_group")
             anchors = sorted(
                 (
@@ -598,9 +1055,24 @@ def build_alternatives(unit, target_blocks):
         )
     sequences.sort(key=lambda alt: (-alt["covered_bytes"], int(alt["start"], 16)))
 
+    adjacent = []
+    if source_units is not None and source_blocks is not None:
+        for transition in unit.get("adjacent_owner_transitions", []):
+            alternative = _adjacent_owner_alternative(
+                unit, transition, target_blocks, source_units, source_blocks
+            )
+            if alternative is not None:
+                adjacent.append(alternative)
+    adjacent.sort(key=lambda alt: (-alt["covered_bytes"], int(alt["start"], 16)))
+
     result, seen = [], set()
-    for alternative in sequences + shifted + individual + combined:
-        key = (alternative["section"], alternative["start"], alternative["end"])
+    for alternative in adjacent + sequences + shifted + individual + combined:
+        key = (
+            alternative["section"],
+            alternative["start"],
+            alternative["end"],
+            json.dumps(alternative["owner_revisions"], sort_keys=True),
+        )
         if key not in seen:
             seen.add(key)
             result.append(alternative)
@@ -665,20 +1137,30 @@ def prepare(ctx, limit=None):
         or policy.get("version") != POLICY_VERSION
         or any(
             policy.get(key) != value
-            for key, value in (LAYOUT_BOUNDARY_POLICY | VTABLE_BOUNDARY_POLICY).items()
+            for key, value in (
+                LAYOUT_BOUNDARY_POLICY
+                | VTABLE_BOUNDARY_POLICY
+                | OWNERSHIP_TRANSITION_POLICY
+                | ADJACENT_OWNER_TRANSITION_POLICY
+            ).items()
         )
     ):
         raise RuntimeError("Unsupported DTK coverage evidence schema or policy")
 
     splits = ctx.root / "config" / ctx.target / "splits.txt"
     _, target_blocks, _ = scl.parse_splits(splits.read_text(encoding="utf-8"))
+    source_splits = ctx.root / "config" / ctx.source / "splits.txt"
+    _, source_blocks, _ = scl.parse_splits(source_splits.read_text(encoding="utf-8"))
     source_units = [
         unit for unit in evidence["source_units"] if not unit.get("autogenerated")
     ]
+    source_units_by_name = {unit["name"]: unit for unit in source_units}
     missing = [unit for unit in source_units if unit["name"] not in target_blocks]
     dispositions, candidates = {}, []
     for unit in missing:
-        alternatives = build_alternatives(unit, target_blocks)
+        alternatives = build_alternatives(
+            unit, target_blocks, source_units_by_name, source_blocks
+        )
         dispositions[unit["name"]] = _disposition(unit, alternatives)
         if alternatives:
             candidates.append(
@@ -819,6 +1301,81 @@ def _failure_category(error, log):
     return "unknown-failure"
 
 
+def _apply_owner_revisions(blocks, revisions):
+    plans = []
+    seen = set()
+    for revision in revisions:
+        try:
+            name = revision["unit"]
+            section = revision["section"]
+            original_start = int(revision["original_start"], 16)
+            original_end = int(revision["original_end"], 16)
+            revised_start = int(revision["revised_start"], 16)
+            revised_end = int(revision["revised_end"], 16)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValidationError("Malformed adjacent-owner revision") from error
+        key = (name, section)
+        if key in seen:
+            raise ValidationError(
+                f"Duplicate adjacent-owner revision for {name} {section}"
+            )
+        seen.add(key)
+        if (
+            revised_end <= revised_start
+            or original_end <= original_start
+            or revised_start < original_start
+            or revised_end > original_end
+            or (revised_start == original_start and revised_end == original_end)
+            or _single_section_range(blocks, name, section)
+            != (section, original_start, original_end)
+        ):
+            raise ValidationError(
+                f"Adjacent owner {name} no longer has its exact evidenced {section} range"
+            )
+        matching = [
+            index
+            for index, line in enumerate(blocks[name])
+            if scl.parse_range(line) == (section, original_start, original_end)
+        ]
+        if len(matching) != 1:
+            raise ValidationError(
+                f"Adjacent owner {name} range is not uniquely revisable"
+            )
+        plans.append((name, matching[0], section, revised_start, revised_end))
+    for name, index, section, revised_start, revised_end in plans:
+        updated = list(blocks[name])
+        updated[index] = (
+            f"\t{section:11} start:0x{revised_start:08X} end:0x{revised_end:08X}"
+        )
+        blocks[name] = updated
+
+
+def _validate_selected_splits(ctx, expected, selected):
+    splits = ctx.root / "config" / ctx.target / "splits.txt"
+    _, blocks, _ = scl.parse_splits(splits.read_text(encoding="utf-8"))
+    for name, alternative_id in selected.items():
+        alternative = next(
+            item
+            for item in expected[name]["alternatives"]
+            if item["id"] == alternative_id
+        )
+        if blocks.get(name) != alternative["lines"]:
+            raise ValidationError(f"Coverage split for {name} changed after selection")
+        for revision in alternative.get("owner_revisions", []):
+            revised = (
+                revision["section"],
+                int(revision["revised_start"], 16),
+                int(revision["revised_end"], 16),
+            )
+            if (
+                _single_section_range(blocks, revision["unit"], revision["section"])
+                != revised
+            ):
+                raise ValidationError(
+                    f"Adjacent owner {revision['unit']} revision changed after selection"
+                )
+
+
 def validate(ctx, candidates, selected):
     expected = {candidate["name"]: candidate for candidate in candidates}
     if set(selected) != set(expected):
@@ -828,6 +1385,7 @@ def validate(ctx, candidates, selected):
             alternative["id"] for alternative in expected[name]["alternatives"]
         }:
             raise ValidationError(f"Unknown coverage alternative for {name}")
+    _validate_selected_splits(ctx, expected, selected)
     report = ctx.build()
     _validate_extracted_inputs(ctx, set(expected), report)
     _validate_required_extracts(
@@ -881,14 +1439,19 @@ def evaluate(ctx, candidates, preferred=None):
                     if (ctx.output / "build.log").exists()
                     else 0
                 )
-                is_new = candidate["name"] not in blocks
-                blocks[candidate["name"]] = alternative["lines"]
-                if is_new:
-                    order[:] = scl.order_new_code_units(
-                        order, blocks, [candidate["name"]]
-                    )
-                write()
+                trial_blocks = {name: list(lines) for name, lines in blocks.items()}
+                trial_order = list(order)
                 try:
+                    _apply_owner_revisions(
+                        blocks, alternative.get("owner_revisions", [])
+                    )
+                    is_new = candidate["name"] not in blocks
+                    blocks[candidate["name"]] = alternative["lines"]
+                    if is_new:
+                        order[:] = scl.order_new_code_units(
+                            order, blocks, [candidate["name"]]
+                        )
+                    write()
                     tested = trial_build(ctx)
                     _validate_extracted_inputs(ctx, {candidate["name"]}, tested)
                     _validate_required_extracts(ctx, required_extracts)
@@ -901,9 +1464,9 @@ def evaluate(ctx, candidates, preferred=None):
                             "coverage candidate reduces source-linked code"
                         )
                 except TRIAL_ERRORS as error:
-                    blocks.pop(candidate["name"], None)
-                    if candidate["name"] in order:
-                        order.remove(candidate["name"])
+                    blocks.clear()
+                    blocks.update(trial_blocks)
+                    order[:] = trial_order
                     write()
                     log_path = ctx.output / "build.log"
                     log = (
@@ -1002,6 +1565,7 @@ def summary(prepared, result):
             alt["covered_bytes"] for alt in selected.values()
         ),
         "candidate_evidence": prepared["candidates"],
+        "eligible_excluded_by_only": prepared.get("eligible_excluded_by_only", []),
         "selected": selected,
         "dispositions": dispositions,
         "events": result["events"],
@@ -1067,6 +1631,16 @@ def markdown_summary(value):
             )
     else:
         lines.append("No range passed the coverage gates.")
+    excluded = value.get("eligible_excluded_by_only", [])
+    if excluded:
+        lines.extend(
+            [
+                "",
+                "## Eligible candidates excluded by `--only`",
+                "",
+                *[f"- `{name}`" for name in excluded],
+            ]
+        )
     lines.extend(["", "## Remaining dispositions", ""])
     counts = {}
     for disposition in value["dispositions"].values():

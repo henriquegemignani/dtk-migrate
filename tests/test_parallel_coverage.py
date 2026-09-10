@@ -141,6 +141,7 @@ def boundary_sequence(start=0x200, end=0x800, *, eligible=True):
         "layout_support_group": None,
         "vtable_support": None,
         "gap_helpers": [],
+        "ownership_transition_support": None,
         "functions": functions,
         "eligible": eligible,
         "reasons": [] if eligible else ["test rejection"],
@@ -202,6 +203,231 @@ def vtable_boundary_sequence(start=0x200, end=0xA00):
         }
     )
     return value
+
+
+def ownership_transition_boundary_sequence(start=0x400, end=0x800):
+    value = boundary_sequence(start, end)
+    functions = [
+        {
+            "source_name": f"function_{index}",
+            "source_address": f"0x{0x1000 + index * 0x80:08X}",
+            "target_address": f"0x{start + index * 0x80:08X}",
+            "target_end": f"0x{start + (index + 1) * 0x80:08X}",
+            "size": 0x80,
+            "tier": "probable" if index < 2 else "candidate",
+            "method": "call-graph",
+            "confidence": 0.8 if index < 2 else 0.6,
+            "primary": True,
+        }
+        for index in range(8)
+    ]
+    edge_functions = [
+        {
+            "source_name": f"previous_{index}",
+            "source_address": f"0x{0x0800 + index * 0x100:08X}",
+            "target_address": f"0x{0x0200 + index * 0x100:08X}",
+            "target_end": f"0x{0x0300 + index * 0x100:08X}",
+            "size": 0x100,
+            "tier": "confident",
+            "confidence": 1.0,
+        }
+        for index in range(2)
+    ]
+    value.update(
+        {
+            "target_functions": 8,
+            "source_functions": 8,
+            "aligned_functions": 8,
+            "aligned_bytes": end - start,
+            "strong_functions": 2,
+            "direct_anchors": 0,
+            "match_ratio": 1.0,
+            "order_ratio": 1.0,
+            "target_coverage": 1.0,
+            "acceptance_method": "ownership-transition-boundary",
+            "ownership_transition_support": {
+                "original_target_start": "0x00000200",
+                "original_target_end": f"0x{end:08X}",
+                "aligned_target_start": f"0x{start:08X}",
+                "aligned_target_end": f"0x{end:08X}",
+                "source_bytes": end - start,
+                "aligned_target_bytes": end - start,
+                "size_delta": 0.0,
+                "left": {
+                    "unit": "Previous.cpp",
+                    "start": "0x00000200",
+                    "end": f"0x{start:08X}",
+                    "bytes": start - 0x200,
+                    "functions": edge_functions,
+                    "strong_functions": 2,
+                },
+                "right": {
+                    "unit": "Next.cpp",
+                    "start": f"0x{end:08X}",
+                    "end": f"0x{end:08X}",
+                    "bytes": 0,
+                    "functions": [],
+                    "strong_functions": 0,
+                },
+            },
+            "functions": functions,
+        }
+    )
+    return value
+
+
+def adjacent_owner_fixture():
+    start, end = 0x200, 0x600
+    owner_start, owner_end = 0x200, 0xA00
+    functions = [
+        {
+            "source_name": f"candidate_{index}",
+            "source_address": f"0x{0x1000 + index * 0x80:08X}",
+            "target_address": f"0x{start + index * 0x80:08X}",
+            "target_end": f"0x{start + (index + 1) * 0x80:08X}",
+            "size": 0x80,
+            "tier": "probable" if index < 2 else "candidate",
+            "method": "call-graph",
+            "confidence": 0.8 if index < 2 else 0.6,
+            "primary": True,
+        }
+        for index in range(8)
+    ]
+    owner_functions = [
+        {
+            "source_name": f"owner_{index}",
+            "source_address": f"0x{0x2000 + index * 0x100:08X}",
+            "target_address": f"0x{end + index * 0x100:08X}",
+            "target_end": f"0x{end + (index + 1) * 0x100:08X}",
+            "size": 0x100,
+            "tier": "probable" if index < 2 else "candidate",
+            "method": "call-graph",
+            "confidence": 0.8 if index < 2 else 0.6,
+            "primary": True,
+        }
+        for index in range(4)
+    ]
+    anchors = [
+        anchor(start + index * 0x80, start + (index + 1) * 0x80) for index in range(2)
+    ]
+    for value in anchors:
+        value.update(
+            {
+                "source_extent_known": True,
+                "target_extent_known": True,
+                "source_unit_explicit": True,
+                "source_unit_wholly_owned": True,
+                "existing_target_owner": "Owner.cpp",
+                "eligible": False,
+                "reasons": ["target range is owned by another explicit unit"],
+            }
+        )
+    transition = {
+        "section": ".text",
+        "side": "next-prefix",
+        "target_start": f"0x{start:08X}",
+        "target_end": f"0x{end:08X}",
+        "target_bytes": end - start,
+        "source_bytes": end - start,
+        "previous_unit": "Previous.cpp",
+        "next_unit": "Owner.cpp",
+        "source_functions": 8,
+        "aligned_functions": 8,
+        "strong_functions": 2,
+        "direct_anchors": 2,
+        "match_ratio": 1.0,
+        "target_coverage": 1.0,
+        "best_alignment_score": 1024.0,
+        "second_alignment_score": 0.0,
+        "alignment_margin": 1.0,
+        "size_delta": 0.0,
+        "owner": {
+            "unit": "Owner.cpp",
+            "original_start": f"0x{owner_start:08X}",
+            "original_end": f"0x{owner_end:08X}",
+            "revised_start": f"0x{end:08X}",
+            "revised_end": f"0x{owner_end:08X}",
+            "source_bytes": owner_end - end,
+            "target_bytes": owner_end - end,
+            "size_delta": 0.0,
+            "source_functions": 4,
+            "aligned_functions": 4,
+            "target_functions": 4,
+            "strong_functions": 2,
+            "functions": owner_functions,
+            "gap_helpers": [],
+        },
+        "functions": functions,
+        "eligible": True,
+        "reasons": [],
+    }
+    unit = {
+        "name": "A.cpp",
+        "code_bytes": end - start,
+        "anchors": anchors,
+        "adjacent_owner_transitions": [transition],
+    }
+    source_units = {
+        "A.cpp": unit,
+        "Previous.cpp": {"name": "Previous.cpp", "code_bytes": 0x100},
+        "Owner.cpp": {"name": "Owner.cpp", "code_bytes": owner_end - end},
+    }
+    target_blocks = {
+        "Previous.cpp": ["\t.text       start:0x00000100 end:0x00000200"],
+        "Owner.cpp": ["\t.text       start:0x00000200 end:0x00000A00"],
+    }
+    source_blocks = {
+        "Previous.cpp": ["\t.text start:0x00000000 end:0x00000100"],
+        "A.cpp": ["\t.text start:0x00000100 end:0x00000500"],
+        "Owner.cpp": ["\t.text start:0x00000500 end:0x00000900"],
+    }
+    return unit, source_units, target_blocks, source_blocks
+
+
+def previous_suffix_fixture():
+    unit, source_units, _, _ = adjacent_owner_fixture()
+    transition = unit["adjacent_owner_transitions"][0]
+    transition.update(
+        {
+            "side": "previous-suffix",
+            "target_start": "0x00000600",
+            "target_end": "0x00000A00",
+            "previous_unit": "Owner.cpp",
+            "next_unit": "Next.cpp",
+        }
+    )
+    owner = transition["owner"]
+    owner.update(
+        {
+            "revised_start": "0x00000200",
+            "revised_end": "0x00000600",
+        }
+    )
+    for function in transition["functions"]:
+        function["target_address"] = (
+            f"0x{int(function['target_address'], 16) + 0x400:08X}"
+        )
+        function["target_end"] = f"0x{int(function['target_end'], 16) + 0x400:08X}"
+    for function in owner["functions"]:
+        function["target_address"] = (
+            f"0x{int(function['target_address'], 16) - 0x400:08X}"
+        )
+        function["target_end"] = f"0x{int(function['target_end'], 16) - 0x400:08X}"
+    for value in unit["anchors"]:
+        value["target_address"] = f"0x{int(value['target_address'], 16) + 0x400:08X}"
+        value["target_end"] = f"0x{int(value['target_end'], 16) + 0x400:08X}"
+    source_units.pop("Previous.cpp")
+    source_units["Next.cpp"] = {"name": "Next.cpp", "code_bytes": 0x100}
+    target_blocks = {
+        "Owner.cpp": ["\t.text start:0x00000200 end:0x00000A00"],
+        "Next.cpp": ["\t.text start:0x00000A00 end:0x00000B00"],
+    }
+    source_blocks = {
+        "Owner.cpp": ["\t.text start:0x00000000 end:0x00000400"],
+        "A.cpp": ["\t.text start:0x00000400 end:0x00000800"],
+        "Next.cpp": ["\t.text start:0x00000800 end:0x00000900"],
+    }
+    return unit, source_units, target_blocks, source_blocks
 
 
 class FakeContext:
@@ -485,6 +711,195 @@ class CoverageTests(unittest.TestCase):
         sequence["vtable_support"]["agreeing_slots"] = 7
         self.assertEqual(adapter.build_alternatives(unit, {}), [])
 
+    def test_ownership_transition_trims_a_stale_neighbor_boundary(self):
+        sequence = ownership_transition_boundary_sequence()
+        unit = {
+            "code_bytes": 0x400,
+            "anchors": [],
+            "boundary_sequences": [sequence],
+        }
+
+        alternatives = adapter.build_alternatives(unit, {})
+
+        self.assertEqual(len(alternatives), 1)
+        self.assertEqual(alternatives[0]["evidence"], "ownership-transition-boundary")
+        self.assertEqual(
+            (alternatives[0]["start"], alternatives[0]["end"]),
+            ("0x00000400", "0x00000800"),
+        )
+        self.assertEqual(len(alternatives[0]["anchors"]), 8)
+
+    def test_ownership_transition_revalidates_both_units_and_complete_ranges(self):
+        def rejected(mutator, *, code_bytes=0x400):
+            sequence = ownership_transition_boundary_sequence()
+            mutator(sequence)
+            unit = {
+                "code_bytes": code_bytes,
+                "anchors": [],
+                "boundary_sequences": [sequence],
+            }
+            self.assertEqual(adapter.build_alternatives(unit, {}), [])
+
+        rejected(
+            lambda sequence: sequence["ownership_transition_support"]["left"].update(
+                unit="Wrong.cpp"
+            )
+        )
+        rejected(
+            lambda sequence: sequence["ownership_transition_support"]["left"][
+                "functions"
+            ][0].update(target_end="0x000002F0")
+        )
+        rejected(
+            lambda sequence: [
+                function.update(tier="candidate")
+                for function in sequence["ownership_transition_support"]["left"][
+                    "functions"
+                ]
+            ]
+        )
+        rejected(lambda sequence: None, code_bytes=0x420)
+        rejected(lambda sequence: sequence.update(source_functions=9))
+
+    def test_adjacent_owner_transition_revises_only_the_evidenced_owner_range(self):
+        unit, source_units, target_blocks, source_blocks = adjacent_owner_fixture()
+
+        alternatives = adapter.build_alternatives(
+            unit, target_blocks, source_units, source_blocks
+        )
+
+        self.assertEqual(len(alternatives), 1)
+        self.assertEqual(
+            alternatives[0]["evidence"], "adjacent-owner-transition-boundary"
+        )
+        self.assertEqual(
+            (alternatives[0]["start"], alternatives[0]["end"]),
+            ("0x00000200", "0x00000600"),
+        )
+        self.assertEqual(
+            alternatives[0]["owner_revisions"],
+            [
+                {
+                    "unit": "Owner.cpp",
+                    "section": ".text",
+                    "original_start": "0x00000200",
+                    "original_end": "0x00000A00",
+                    "revised_start": "0x00000600",
+                    "revised_end": "0x00000A00",
+                }
+            ],
+        )
+
+    def test_adjacent_owner_transition_supports_previous_owner_suffixes(self):
+        unit, source_units, target_blocks, source_blocks = previous_suffix_fixture()
+
+        alternatives = adapter.build_alternatives(
+            unit, target_blocks, source_units, source_blocks
+        )
+
+        self.assertEqual(len(alternatives), 1)
+        self.assertEqual(
+            (alternatives[0]["start"], alternatives[0]["end"]),
+            ("0x00000600", "0x00000A00"),
+        )
+        self.assertEqual(
+            alternatives[0]["owner_revisions"][0]["revised_end"], "0x00000600"
+        )
+
+    def test_adjacent_owner_transition_rejects_stale_or_incomplete_evidence(self):
+        def rejected(mutator):
+            unit, source_units, target_blocks, source_blocks = adjacent_owner_fixture()
+            mutator(unit, source_units, target_blocks)
+            self.assertEqual(
+                adapter.build_alternatives(
+                    unit, target_blocks, source_units, source_blocks
+                ),
+                [],
+            )
+
+        rejected(
+            lambda unit, _source, _target: unit["adjacent_owner_transitions"][0].update(
+                next_unit="Wrong.cpp"
+            )
+        )
+        rejected(
+            lambda unit, _source, _target: unit["adjacent_owner_transitions"][0][
+                "owner"
+            ]["functions"].pop()
+        )
+        rejected(lambda unit, _source, _target: unit["anchors"].pop())
+        rejected(
+            lambda _unit, _source, target: target["Owner.cpp"].__setitem__(
+                0, "\t.text start:0x00000200 end:0x00000B00"
+            )
+        )
+        rejected(
+            lambda unit, _source, _target: unit["adjacent_owner_transitions"][0][
+                "owner"
+            ].update(
+                target_functions=5,
+                gap_helpers=[
+                    {
+                        "target_address": "0x00000640",
+                        "target_end": "0x00000680",
+                        "size": 0x40,
+                        "callers": ["0x00000000"],
+                    }
+                ],
+            )
+        )
+
+    def test_adjacent_owner_revision_is_atomic_in_evaluation(self):
+        for reject in (False, True):
+            with (
+                self.subTest(reject=reject),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                ctx = FakeContext(Path(temporary), reject_first=reject)
+                unit, source_units, target_blocks, source_blocks = (
+                    adjacent_owner_fixture()
+                )
+                splits = ctx.root / "config/T/splits.txt"
+                splits.write_text(
+                    "Sections:\n\t.text type:code\n\n"
+                    "Previous.cpp:\n\t.text start:0x00000100 end:0x00000200\n\n"
+                    "Owner.cpp:\n\t.text start:0x00000200 end:0x00000A00\n",
+                    encoding="utf-8",
+                )
+                alternative = adapter.build_alternatives(
+                    unit, target_blocks, source_units, source_blocks
+                )[0]
+                value = {
+                    "name": "A.cpp",
+                    "policy_version": adapter.POLICY_VERSION,
+                    "source_code_bytes": unit["code_bytes"],
+                    "required_extracts": [],
+                    "alternatives": [alternative],
+                }
+
+                result = adapter.evaluate(ctx, [value])
+                _, final_blocks, _ = scl.parse_splits(
+                    splits.read_text(encoding="utf-8")
+                )
+
+                if reject:
+                    self.assertEqual(result["accepted"], [])
+                    self.assertNotIn("A.cpp", final_blocks)
+                    self.assertEqual(
+                        scl.parse_range(final_blocks["Owner.cpp"][0]),
+                        (".text", 0x200, 0xA00),
+                    )
+                else:
+                    self.assertEqual(result["accepted"], [value])
+                    self.assertEqual(
+                        scl.parse_range(final_blocks["A.cpp"][0]),
+                        (".text", 0x200, 0x600),
+                    )
+                    self.assertEqual(
+                        scl.parse_range(final_blocks["Owner.cpp"][0]),
+                        (".text", 0x600, 0xA00),
+                    )
+
     def test_distant_anchors_stay_separate_and_contiguous_anchors_add_a_run(self):
         unit = {
             "anchors": [
@@ -645,6 +1060,7 @@ class CoverageTests(unittest.TestCase):
         value = candidate()
         prepared = {
             "candidates": [value],
+            "eligible_excluded_by_only": ["B.cpp"],
             "inventory": {
                 "policy": {"version": 1},
                 "source": "S",
@@ -672,6 +1088,10 @@ class CoverageTests(unittest.TestCase):
             {"baseline_code_bytes": 10, "final_code_bytes": 10},
         )
         self.assertEqual(report["source"], "S")
+        self.assertEqual(report["eligible_excluded_by_only"], ["B.cpp"])
+        self.assertIn(
+            "Eligible candidates excluded by `--only`", adapter.markdown_summary(report)
+        )
 
     def test_toolchain_path_alone_is_not_a_compilation_diagnostic(self):
         error = subprocess.CalledProcessError(1, ["configure", "--compilers", "tools"])
