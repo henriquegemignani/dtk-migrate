@@ -80,7 +80,26 @@ def candidate(name="A.cpp"):
         "name": name,
         "policy_version": adapter.POLICY_VERSION,
         "source_code_bytes": 1024,
+        "required_extracts": [],
         "alternatives": alternatives,
+    }
+
+
+def required_extract():
+    return {
+        "source_symbol": "sDefaultFontData",
+        "target_symbol": "lbl_00002000",
+        "target_address": "0x00002000",
+        "target_size": 0x904,
+        "rename": "sDefaultFontData",
+        "binary": "MetroidPrime/DefaultFontData.bin",
+        "header": "MetroidPrime/DefaultFontData.inc",
+        "relocations": None,
+        "header_type": None,
+        "custom_type": None,
+        "custom_data": None,
+        "reference_evidence": 2,
+        "evidence": "boundary-sequence-data-reference",
     }
 
 
@@ -131,6 +150,9 @@ class FakeContext:
         path = root / "config/T/splits.txt"
         path.parent.mkdir(parents=True)
         path.write_text("Sections:\n\t.text type:code\n\n", encoding="utf-8")
+        (root / "config/T/config.yml").write_text(
+            "object: orig/T/main.dol\n\nmodules:\n", encoding="utf-8"
+        )
         self.reject_first, self.regress, self.source_enabled = (
             reject_first,
             regress,
@@ -139,6 +161,14 @@ class FakeContext:
 
     def build(self):
         blocks = scl.parse_splits((self.root / "config/T/splits.txt").read_text())[1]
+        config = (self.root / "config/T/config.yml").read_text(encoding="utf-8")
+        if "lbl_00002000" in config:
+            header = self.root / "build/T/include/MetroidPrime/DefaultFontData.inc"
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_text("unsigned char sDefaultFontData[] = {};\n")
+            binary = self.root / "build/T/bin/MetroidPrime/DefaultFontData.bin"
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            binary.write_bytes(b"font")
         if self.reject_first and any(
             "0x00000200" in line for line in blocks.get("A.cpp", [])
         ):
@@ -200,6 +230,55 @@ class FakeContext:
 
 
 class CoverageTests(unittest.TestCase):
+    def test_required_extract_renderer_is_idempotent_and_preserves_indentation(self):
+        original = b'object: main.dol\nextract:\n  - symbol: "existing"\nmodules:\n'
+        value = required_extract()
+        value.update(
+            {
+                "relocations": "MetroidPrime/DefaultFontData.json",
+                "header_type": "raw",
+                "custom_type": "font",
+                "custom_data": {"stride": 16},
+            }
+        )
+        first = adapter.render_required_extracts(original, [value])
+        second = adapter.render_required_extracts(first, [value])
+        self.assertEqual(first, second)
+        text = first.decode("utf-8")
+        self.assertIn('  - symbol: "lbl_00002000"\n', text)
+        self.assertIn('    rename: "sDefaultFontData"\n', text)
+        self.assertIn('    relocations: "MetroidPrime/DefaultFontData.json"\n', text)
+        self.assertIn('    custom_data: {"stride":16}\n', text)
+        self.assertEqual(text.count('symbol: "lbl_00002000"'), 1)
+
+    def test_required_extract_renderer_rejects_escaping_paths(self):
+        value = required_extract()
+        value["header"] = "../outside.inc"
+        with self.assertRaisesRegex(ValueError, "Unsafe required extract path"):
+            adapter.render_required_extracts(b"modules:\n", [value])
+
+    def test_required_extract_is_accepted_with_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ctx = FakeContext(Path(temporary))
+            value = candidate()
+            value["required_extracts"] = [required_extract()]
+            result = adapter.evaluate(ctx, [value])
+            config = (ctx.root / "config/T/config.yml").read_text(encoding="utf-8")
+            self.assertEqual(result["accepted"], [value])
+            self.assertIn('symbol: "lbl_00002000"', config)
+            self.assertIn('rename: "sDefaultFontData"', config)
+
+    def test_required_extract_rolls_back_when_candidate_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ctx = FakeContext(Path(temporary), regress=True)
+            path = ctx.root / "config/T/config.yml"
+            original = path.read_bytes()
+            value = candidate()
+            value["required_extracts"] = [required_extract()]
+            result = adapter.evaluate(ctx, [value])
+            self.assertEqual(result["accepted"], [])
+            self.assertEqual(path.read_bytes(), original)
+
     def test_boundary_sequence_is_preferred_as_one_bounded_range(self):
         unit = {
             "code_bytes": 0x800,

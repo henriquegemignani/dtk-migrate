@@ -70,7 +70,7 @@ batches concurrently, then revalidates their union in deterministic order. Only
 the coordinator publishes validated changes. User input drift stops publication.
 Python's free-threaded runtime does not replace process and filesystem isolation.
 
-Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 3
+Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 4
 accepts strict exact-body intervals, corroborated `this`-layout groups, and
 boundary-constrained function sequences. A layout
 group requires at least two unique functions whose normalized instruction streams
@@ -85,6 +85,12 @@ anchors, strong matches, functions, and bytes. The complete gap is tried as one 
 does not widen from the first or last matched function. A passing range
 therefore establishes partial split representation; it does not establish source
 equivalence.
+When functions in an eligible boundary sequence strictly identify data symbols used by
+source-side asset extraction, DTK also proposes equivalent target extraction entries.
+The target symbol and its existing extent stay intact, while `rename` preserves the
+source include's output name. The runner applies these entries with the split trial,
+checks the generated files and renamed header declaration, and rolls both files back
+when the candidate fails.
 The run's `coverage/coverage.json` and `coverage/coverage.md` separate represented
 TUs, objdiff matching, configured source linkage, and verified source linkage.
 

@@ -134,7 +134,7 @@ run retained retail DOL SHA-1
 
 ### Boundary-sequence coverage validation
 
-Policy version 3 can fill a single target `.text` gap between the same two explicit
+Policy version 4 can fill a single target `.text` gap between the same two explicit
 neighboring TUs found around a source TU. DTK solves a maximum-cardinality monotone
 alignment inside that gap using its selected function matches and their reported
 runner-ups. Automatic eligibility requires at least four aligned functions, 75%
@@ -143,6 +143,12 @@ coverage, two strong matches, two unique exact-body anchors, and a 10% margin
 over a same-cardinality competing alignment. A range is rejected if the best chain
 uses a runner-up, overlaps another explicit unit, is misaligned, or differs from the
 source text size by more than the bounded ratio.
+
+An eligible sequence can also carry required top-level asset extraction entries. DTK
+derives them from strict, positionally aligned data references in the selected function
+pairs. The runner preserves the target symbol extent, uses `rename` for the source output
+symbol, and treats `config.yml` and `splits.txt` as one transaction. Generated binary,
+header, and relocation outputs are checked before acceptance.
 
 The `GM8E01_00` to `GM8E01_02` leave-one-out calibration produced 42 calibration
 and 38 held-out boundary ranges. All 80 stayed inside the correct target TU; their

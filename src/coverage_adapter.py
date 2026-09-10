@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
@@ -13,9 +14,20 @@ import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
 
-EVIDENCE_SCHEMA = 3
-POLICY_VERSION = 3
-VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-ownership-and-extracted-link-inputs-and-retail-bytes"
+EVIDENCE_SCHEMA = 4
+POLICY_VERSION = 4
+VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-ownership-required-extracts-and-extracted-link-inputs-and-retail-bytes"
+
+_EXTRACT_FIELDS = (
+    "symbol",
+    "rename",
+    "binary",
+    "header",
+    "relocations",
+    "header_type",
+    "custom_type",
+    "custom_data",
+)
 
 
 def _replace(path, data, expected):
@@ -44,6 +56,144 @@ def _write_splits(path, header, blocks, order, expected):
         return data
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _yaml_value(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _validate_extract_path(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Unsafe required extract path: {value!r}")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(
+        part in {".", ".."} or ":" in part or "\\" in part for part in path.parts
+    ):
+        raise ValueError(f"Unsafe required extract path: {value!r}")
+
+
+def _extract_block(lines):
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if re.match(r"^extract:\s*(?:#.*)?(?:\r?\n)?$", line)
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if (
+            line.strip()
+            and not line.lstrip().startswith("#")
+            and re.match(r"^[A-Za-z_][^:]*:", line)
+        ):
+            break
+        end += 1
+    return start, end
+
+
+def _configured_extract_symbols(lines, start, end):
+    symbols = set()
+    for line in lines[start + 1 : end]:
+        match = re.match(r"^\s*-\s+symbol:\s*(.*?)\s*(?:\r?\n)?$", line)
+        if not match:
+            continue
+        value = match.group(1)
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = value.split(" #", 1)[0].strip().strip("'\"")
+        if isinstance(value, str):
+            symbols.add(value)
+    return symbols
+
+
+def render_required_extracts(data, extracts):
+    """Add active top-level extracts while preserving all unrelated YAML bytes."""
+    if not extracts:
+        return data
+    text = data.decode("utf-8")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    block = _extract_block(lines)
+    created = block is None
+    if block is None:
+        insert = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if re.match(r"^modules:\s*", line)
+            ),
+            len(lines),
+        )
+        lines[insert:insert] = [f"extract:{newline}"]
+        block = (insert, insert + 1)
+    start, end = block
+    configured = _configured_extract_symbols(lines, start, end)
+    pending = []
+    for extract in extracts:
+        symbol = extract.get("target_symbol")
+        if not isinstance(symbol, str) or not symbol:
+            raise ValueError("Required extract has no target symbol")
+        for field in ("binary", "header", "relocations"):
+            if value := extract.get(field):
+                _validate_extract_path(value)
+        if symbol in configured:
+            continue
+        pending.append(extract)
+        configured.add(symbol)
+    if not pending:
+        return data
+
+    list_indent = next(
+        (
+            match.group(1)
+            for line in lines[start + 1 : end]
+            if (match := re.match(r"^(\s*)-\s+", line))
+        ),
+        "",
+    )
+    item_lines = []
+    for extract in pending:
+        values = {
+            "symbol": extract["target_symbol"],
+            "rename": extract.get("rename"),
+            "binary": extract.get("binary"),
+            "header": extract.get("header"),
+            "relocations": extract.get("relocations"),
+            "header_type": extract.get("header_type"),
+            "custom_type": extract.get("custom_type"),
+            "custom_data": extract.get("custom_data"),
+        }
+        item_lines.append(
+            f"{list_indent}- symbol: {_yaml_value(values['symbol'])}{newline}"
+        )
+        for field in _EXTRACT_FIELDS[1:]:
+            if values[field] is not None:
+                item_lines.append(
+                    f"{list_indent}  {field}: {_yaml_value(values[field])}{newline}"
+                )
+    if created and end < len(lines) and lines[end].strip():
+        item_lines.append(newline)
+
+    insert = end
+    while insert > start + 1 and not lines[insert - 1].strip():
+        insert -= 1
+    if insert > 0 and not lines[insert - 1].endswith(("\n", "\r")):
+        lines[insert - 1] += newline
+    lines[insert:insert] = item_lines
+    return "".join(lines).encode("utf-8")
+
+
+def _write_required_extracts(path, extracts, expected):
+    data = render_required_extracts(expected, extracts)
+    if data != expected:
+        _replace(path, data, expected)
+    return data
 
 
 def _int_measure(report, name):
@@ -309,6 +459,7 @@ def prepare(ctx, limit=None):
                     "name": unit["name"],
                     "policy_version": POLICY_VERSION,
                     "source_code_bytes": unit["code_bytes"],
+                    "required_extracts": unit.get("required_extracts", []),
                     "alternatives": alternatives,
                 }
             )
@@ -376,6 +527,35 @@ def _validate_extracted_inputs(ctx, names, report):
             raise ValidationError(f"{name} was marked complete during coverage")
 
 
+def _validate_required_extracts(ctx, extracts):
+    for extract in extracts:
+        for field, directory in (
+            ("binary", "bin"),
+            ("header", "include"),
+            ("relocations", "bin"),
+        ):
+            relative = extract.get(field)
+            if relative:
+                _validate_extract_path(relative)
+            if (
+                relative
+                and not (
+                    ctx.root / "build" / ctx.target / directory / relative
+                ).is_file()
+            ):
+                raise ValidationError(
+                    f"required extract did not generate {field} output: {relative}"
+                )
+        header = extract.get("header")
+        rename = extract.get("rename")
+        if header and rename and extract.get("header_type") != "none":
+            generated = ctx.root / "build" / ctx.target / "include" / header
+            if rename not in generated.read_text(encoding="utf-8", errors="replace"):
+                raise ValidationError(
+                    f"required extract header {header} does not declare {rename}"
+                )
+
+
 def _failure_category(error, log):
     text = f"{error}\n{log}".lower()
     if "timed out after" in text:
@@ -423,13 +603,24 @@ def validate(ctx, candidates, selected):
             raise ValidationError(f"Unknown coverage alternative for {name}")
     report = ctx.build()
     _validate_extracted_inputs(ctx, set(expected), report)
+    _validate_required_extracts(
+        ctx,
+        [
+            extract
+            for candidate in candidates
+            for extract in candidate.get("required_extracts", [])
+        ],
+    )
     return report
 
 
 def evaluate(ctx, candidates, preferred=None):
     splits = ctx.root / "config" / ctx.target / "splits.txt"
+    config = ctx.root / "config" / ctx.target / "config.yml"
     original = splits.read_bytes()
     owned = original
+    original_config = config.read_bytes()
+    owned_config = original_config
     header, blocks, order = scl.parse_splits(original.decode("utf-8"))
     report = ctx.build()
     starting_complete = _int_measure(report, "complete_code")
@@ -440,10 +631,17 @@ def evaluate(ctx, candidates, preferred=None):
         nonlocal owned
         owned = _write_splits(splits, header, blocks, order, owned)
 
+    def write_extracts(extracts):
+        nonlocal owned_config
+        owned_config = _write_required_extracts(config, extracts, owned_config)
+
     try:
         if len({candidate["name"] for candidate in candidates}) != len(candidates):
             raise ValueError("Duplicate coverage candidate names")
         for candidate in candidates:
+            candidate_config = owned_config
+            required_extracts = candidate.get("required_extracts", [])
+            write_extracts(required_extracts)
             alternatives = list(candidate["alternatives"])
             wanted = preferred.get(candidate["name"])
             alternatives.sort(
@@ -463,6 +661,7 @@ def evaluate(ctx, candidates, preferred=None):
                 try:
                     tested = trial_build(ctx)
                     _validate_extracted_inputs(ctx, {candidate["name"]}, tested)
+                    _validate_required_extracts(ctx, required_extracts)
                     if _regresses(report, tested):
                         raise ValidationError(
                             "coverage candidate regresses an existing unit"
@@ -499,6 +698,12 @@ def evaluate(ctx, candidates, preferred=None):
                 chosen, report = alternative, tested
                 break
             if chosen is None:
+                if (
+                    config.read_bytes() == owned_config
+                    and owned_config != candidate_config
+                ):
+                    _replace(config, candidate_config, owned_config)
+                    owned_config = candidate_config
                 deferred.append(candidate)
                 continue
             accepted.append(candidate)
@@ -527,6 +732,8 @@ def evaluate(ctx, candidates, preferred=None):
     except BaseException:
         if splits.read_bytes() == owned:
             _replace(splits, original, owned)
+        if config.read_bytes() == owned_config:
+            _replace(config, original_config, owned_config)
         raise
 
 

@@ -558,6 +558,7 @@ def publish(root, integrated, run_dir, run, result):
     }
     allowed = {
         "configure.py",
+        f"config/{run['target']}/config.yml",
         f"config/{run['target']}/splits.txt",
         f"config/{run['target']}/symbols.txt",
     }
