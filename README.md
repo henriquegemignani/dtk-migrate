@@ -70,12 +70,13 @@ batches concurrently, then revalidates their union in deterministic order. Only
 the coordinator publishes validated changes. User input drift stops publication.
 Python's free-threaded runtime does not replace process and filesystem isolation.
 
-Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 4
+Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 5
 accepts strict exact-body intervals, corroborated `this`-layout groups, and
 boundary-constrained function sequences. A layout
 group requires at least two unique functions whose normalized instruction streams
 and relocation layouts agree after masking only proven object-relative offsets;
-all functions must infer the same one-breakpoint offset transformation. The runner
+all functions must infer the same transformation with at most two constant deltas
+separated by one breakpoint. The runner
 proposes the group span, never an individual layout function, then checks ownership,
 linker inputs, existing-unit regressions, and retail bytes. It deliberately allows
 zero objdiff gain and keeps the candidate source object disabled. A boundary
@@ -85,6 +86,11 @@ anchors, strong matches, functions, and bytes. The complete gap is tried as one 
 does not widen from the first or last matched function. A passing range
 therefore establishes partial split representation; it does not establish source
 equivalence.
+When normal function matching is inconclusive, four unique layout-shift functions
+covering at least 1,024 bytes and 16 changed member accesses can corroborate the
+complete neighbor-bounded gap. This fallback additionally requires source and target
+function counts to differ by at most one and text sizes by at most 2%. It assigns
+ownership without treating the weaker function alignment as rename evidence.
 When functions in an eligible boundary sequence strictly identify data symbols used by
 source-side asset extraction, DTK also proposes equivalent target extraction entries.
 The target symbol and its existing extent stay intact, while `rename` preserves the

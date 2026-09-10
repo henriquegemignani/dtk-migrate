@@ -173,6 +173,7 @@ def summarize(records):
                     "exact-body",
                     "this-layout-shift",
                     "boundary-sequence",
+                    "layout-corroborated-boundary",
                 )
             },
         }

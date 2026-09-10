@@ -340,3 +340,32 @@ The 11,428-byte split passed the no-regression, extracted-input, and retail-byte
 gates. Representation moved from 781 to 782 of 822 TUs and matched code from
 1,306,876 to 1,307,156 bytes (33.441055%); source-linked code remained 176,844
 bytes because coverage candidates stay disabled.
+
+## Layout-corroborated TU boundaries (2026-09-10)
+
+Coverage policy version 5 permits a strong object-layout group to corroborate the
+complete code gap between two already represented neighboring TUs. The layout
+transform may contain two constant nonzero deltas separated by one breakpoint.
+The fallback requires at least four uniquely paired functions, 1,024 source bytes,
+16 changed `this` accesses, target/source sizes within 2%, and function counts
+within one. The runner independently checks the serialized target-function order,
+neighbor bounds, aggregate support, transform consistency, and thresholds before
+testing the complete gap. This evidence path does not infer data extracts from its
+weaker function correspondence.
+
+Masked-name calibration from `GM8E01_00` to `GM8E01_02` yielded 430/430 correct
+ranges in the calibration partition and 463/463 in the held-out partition, with
+zero incorrect ranges or anchors. PAL calibration yielded no known incorrect
+range or anchor. Its three new complete-gap alternatives remained unlabeled by
+the pre-feature oracle because that oracle assigns only already represented TUs.
+
+The isolated PAL run `20260910T112508.309527Z` accepted
+`MetroidPrime/Weapons/CPlasmaProjectile.cpp` as
+`.text 0x8016C604..0x8016EE54` (10,320 bytes). Four layout-paired functions covering
+1,964 source bytes and 45 changed object accesses agreed on deltas `+0x28` and
+`+0x2C`, separated at object offset `0x4C4`. The source and target blocks contain
+24 functions each and differ in size by only 16 bytes. The worker trial and final
+integration both passed the no-regression and retail-byte gates; the final DOL
+SHA-1 remained `4d3780c77842ae7fddbdd5732b70bed100df5c65`. Representation moved
+from 786 to 787 of 823 source TUs. Matched and source-linked code were unchanged,
+as expected for a comparison split whose source object remains disabled.

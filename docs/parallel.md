@@ -163,6 +163,22 @@ to 782 of 822 source TUs, objdiff-matched code rose from 1,306,876 to 1,307,156
 bytes (33.441055%), source-linked code remained 176,844 bytes, and the retail DOL
 SHA-1 remained `4d3780c77842ae7fddbdd5732b70bed100df5c65`.
 
+### Layout-corroborated boundary validation
+
+Policy version 5 generalizes the layout transform to two arbitrary constant deltas
+separated by at most one member-offset breakpoint. A group can corroborate the
+complete gap between the same two explicit neighboring TUs when it contains at
+least four unique functions, 1,024 instruction bytes, and 16 changed `this` accesses.
+The bounded source and target text sizes must be within 2%, their function counts
+must differ by at most one, and every layout anchor must preserve source and target
+order. This path assigns the target range but does not use the weaker function
+alignment for symbol renames or data extraction.
+
+The porting adapter independently rechecks the group totals, transform, ordering,
+gap bounds, size and function-count limits, existing ownership, and alignment before
+starting the normal isolated build, no-regression, extracted-input, and retail-byte
+validation.
+
 ### Measured coverage replay
 
 The first complete PAL coverage run prepared 30 candidate TUs with batch size one.

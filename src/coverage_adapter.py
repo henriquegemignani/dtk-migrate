@@ -14,9 +14,22 @@ import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
 
-EVIDENCE_SCHEMA = 4
-POLICY_VERSION = 4
-VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-ownership-required-extracts-and-extracted-link-inputs-and-retail-bytes"
+EVIDENCE_SCHEMA = 5
+POLICY_VERSION = 5
+VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-ownership-required-extracts-and-extracted-link-inputs-and-retail-bytes"
+MIN_LAYOUT_BOUNDARY_FUNCTIONS = 4
+MIN_LAYOUT_BOUNDARY_BYTES = 1024
+MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES = 16
+MAX_LAYOUT_BOUNDARY_SIZE_DELTA = 0.02
+MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA = 1
+LAYOUT_BOUNDARY_POLICY = {
+    "infer_layout_corroborated_boundaries": True,
+    "minimum_layout_boundary_functions": MIN_LAYOUT_BOUNDARY_FUNCTIONS,
+    "minimum_layout_boundary_bytes": MIN_LAYOUT_BOUNDARY_BYTES,
+    "minimum_layout_boundary_changed_accesses": MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES,
+    "maximum_layout_boundary_size_delta": MAX_LAYOUT_BOUNDARY_SIZE_DELTA,
+    "maximum_layout_boundary_function_delta": MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA,
+}
 
 _EXTRACT_FIELDS = (
     "symbol",
@@ -279,7 +292,7 @@ def build_alternatives(unit, target_blocks):
     for group, anchors in layout_groups.items():
         anchors.sort(key=lambda anchor: int(anchor["target_address"], 16))
         sections = {anchor["section"] for anchor in anchors}
-        deltas = {anchor["offset_delta"] for anchor in anchors}
+        deltas = {tuple(anchor["offset_deltas"]) for anchor in anchors}
         breakpoints = {anchor["inferred_breakpoint"] for anchor in anchors}
         source_addresses = [int(anchor["source_address"], 16) for anchor in anchors]
         target_ranges = [
@@ -327,50 +340,117 @@ def build_alternatives(unit, target_blocks):
 
     sequences = []
     for sequence in unit.get("boundary_sequences", []):
-        functions = sequence.get("functions", [])
-        source_addresses = [int(item["source_address"], 16) for item in functions]
-        target_ranges = [
-            (int(item["target_address"], 16), int(item["target_end"], 16))
-            for item in functions
-        ]
         start, end = (
             int(sequence["target_start"], 16),
             int(sequence["target_end"], 16),
         )
-        if (
+        common_invalid = (
             not sequence["eligible"]
             or sequence["section"] != ".text"
             or end <= start
             or sequence["target_bytes"] != end - start
-            or sequence["aligned_functions"] != len(functions)
-            or sequence["aligned_bytes"] != sum(item["size"] for item in functions)
-            or not all(item["primary"] for item in functions)
-            or source_addresses != sorted(source_addresses)
-            or len(set(source_addresses)) != len(source_addresses)
-            or any(
-                left < previous_end
-                for (_, previous_end), (left, _) in pairwise(target_ranges)
-            )
-            or any(left < start or right > end for left, right in target_ranges)
             or _overlaps_existing(sequence["section"], start, end, target_blocks)
-        ):
+        )
+        if common_invalid:
             continue
-        anchors = [
-            {
-                **item,
-                "section": sequence["section"],
-                "target_address": item["target_address"],
-            }
-            for item in functions
-        ]
-        group = f"{sequence['previous_unit']}|{sequence['next_unit']}"
+
+        method = sequence.get("acceptance_method")
+        if method == "layout-corroborated-boundary":
+            support_group = sequence.get("layout_support_group")
+            anchors = sorted(
+                (
+                    anchor
+                    for anchor in unit.get("layout_shift_anchors", [])
+                    if anchor["eligible"] and anchor["support_group"] == support_group
+                ),
+                key=lambda anchor: int(anchor["source_address"], 16),
+            )
+            source_addresses = [int(anchor["source_address"], 16) for anchor in anchors]
+            target_ranges = [
+                (int(anchor["target_address"], 16), int(anchor["target_end"], 16))
+                for anchor in anchors
+            ]
+            support_functions = {anchor["support_functions"] for anchor in anchors}
+            support_bytes = {anchor["support_bytes"] for anchor in anchors}
+            support_changed = {anchor["support_changed_accesses"] for anchor in anchors}
+            deltas = {tuple(anchor["offset_deltas"]) for anchor in anchors}
+            breakpoints = {anchor["inferred_breakpoint"] for anchor in anchors}
+            size_base = max(unit["code_bytes"], sequence["target_bytes"])
+            size_delta = (
+                abs(unit["code_bytes"] - sequence["target_bytes"]) / size_base
+                if size_base
+                else 0.0
+            )
+            if (
+                not support_group
+                or not anchors
+                or support_functions != {len(anchors)}
+                or support_bytes != {sum(anchor["size"] for anchor in anchors)}
+                or support_changed
+                != {sum(anchor["changed_this_accesses"] for anchor in anchors)}
+                or len(deltas) != 1
+                or not 1 <= len(next(iter(deltas), ())) <= 2
+                or len(breakpoints) != 1
+                or len(anchors) < MIN_LAYOUT_BOUNDARY_FUNCTIONS
+                or sum(anchor["size"] for anchor in anchors) < MIN_LAYOUT_BOUNDARY_BYTES
+                or sum(anchor["changed_this_accesses"] for anchor in anchors)
+                < MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES
+                or size_delta > MAX_LAYOUT_BOUNDARY_SIZE_DELTA
+                or abs(sequence["source_functions"] - sequence["target_functions"])
+                > MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA
+                or source_addresses != sorted(source_addresses)
+                or len(set(source_addresses)) != len(source_addresses)
+                or any(
+                    left < previous_end
+                    for (_, previous_end), (left, _) in pairwise(target_ranges)
+                )
+                or any(left < start or right > end for left, right in target_ranges)
+            ):
+                continue
+            evidence = "layout-corroborated-boundary"
+            group = (
+                f"{sequence['previous_unit']}|{sequence['next_unit']}|{support_group}"
+            )
+        elif method == "matched-sequence":
+            functions = sequence.get("functions", [])
+            source_addresses = [int(item["source_address"], 16) for item in functions]
+            target_ranges = [
+                (int(item["target_address"], 16), int(item["target_end"], 16))
+                for item in functions
+            ]
+            if (
+                sequence["aligned_functions"] != len(functions)
+                or sequence["aligned_bytes"] != sum(item["size"] for item in functions)
+                or not all(item["primary"] for item in functions)
+                or source_addresses != sorted(source_addresses)
+                or len(set(source_addresses)) != len(source_addresses)
+                or any(
+                    left < previous_end
+                    for (_, previous_end), (left, _) in pairwise(target_ranges)
+                )
+                or any(left < start or right > end for left, right in target_ranges)
+            ):
+                continue
+            anchors = [
+                {
+                    **item,
+                    "section": sequence["section"],
+                    "target_address": item["target_address"],
+                }
+                for item in functions
+            ]
+            evidence = "boundary-sequence"
+            group = f"{sequence['previous_unit']}|{sequence['next_unit']}"
+        else:
+            continue
+
         sequences.append(
             _alternative(
                 sequence["section"],
                 start,
                 end,
                 anchors,
-                evidence="boundary-sequence",
+                evidence=evidence,
                 group=group,
             )
         )
@@ -437,9 +517,13 @@ def prepare(ctx, limit=None):
     if not evidence_path.is_file():
         raise RuntimeError("DTK completed without writing coverage evidence")
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    policy = evidence.get("policy", {})
     if (
         evidence.get("schema") != EVIDENCE_SCHEMA
-        or evidence.get("policy", {}).get("version") != POLICY_VERSION
+        or policy.get("version") != POLICY_VERSION
+        or any(
+            policy.get(key) != value for key, value in LAYOUT_BOUNDARY_POLICY.items()
+        )
     ):
         raise RuntimeError("Unsupported DTK coverage evidence schema or policy")
 

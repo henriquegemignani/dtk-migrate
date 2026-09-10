@@ -63,7 +63,7 @@ def layout_anchor(
             "support_changed_accesses": 8,
             "this_accesses": 5,
             "changed_this_accesses": 4,
-            "offset_delta": 16,
+            "offset_deltas": [0, 16],
             "inferred_breakpoint": breakpoint,
             "source_address": f"0x{source_address or start + 0x1000:08X}",
         }
@@ -123,6 +123,7 @@ def boundary_sequence(start=0x200, end=0x800, *, eligible=True):
         "target_start": f"0x{start:08X}",
         "target_end": f"0x{end:08X}",
         "target_bytes": end - start,
+        "target_functions": 4,
         "previous_unit": "Previous.cpp",
         "next_unit": "Next.cpp",
         "source_functions": 4,
@@ -136,6 +137,8 @@ def boundary_sequence(start=0x200, end=0x800, *, eligible=True):
         "best_alignment_score": 512.0,
         "second_alignment_score": 0.0,
         "alignment_margin": 1.0,
+        "acceptance_method": "matched-sequence",
+        "layout_support_group": None,
         "functions": functions,
         "eligible": eligible,
         "reasons": [] if eligible else ["test rejection"],
@@ -302,6 +305,68 @@ class CoverageTests(unittest.TestCase):
         unit["boundary_sequences"] = [value]
         occupied = {"Other.cpp": ["\t.text start:0x00000400 end:0x00000500"]}
         self.assertEqual(adapter.build_alternatives(unit, occupied), [])
+
+    def test_layout_group_corroborates_the_complete_bounded_gap(self):
+        group = "layout-boundary"
+        anchors = [
+            layout_anchor(
+                0x280 + index * 0x140,
+                0x380 + index * 0x140,
+                group=group,
+                source_address=0x1280 + index * 0x140,
+                breakpoint=0x4C4,
+            )
+            for index in range(4)
+        ]
+        for value in anchors:
+            value.update(
+                {
+                    "support_functions": 4,
+                    "support_bytes": 0x400,
+                    "support_changed_accesses": 16,
+                    "changed_this_accesses": 4,
+                    "offset_deltas": [0x28, 0x2C],
+                }
+            )
+        sequence = boundary_sequence(0x200, 0x800)
+        sequence.update(
+            {
+                "acceptance_method": "layout-corroborated-boundary",
+                "layout_support_group": group,
+            }
+        )
+        unit = {
+            "code_bytes": 0x610,
+            "anchors": [],
+            "layout_shift_anchors": anchors,
+            "boundary_sequences": [sequence],
+        }
+        alternatives = adapter.build_alternatives(unit, {})
+        self.assertEqual(alternatives[0]["evidence"], "layout-corroborated-boundary")
+        self.assertEqual(
+            (alternatives[0]["start"], alternatives[0]["end"]),
+            ("0x00000200", "0x00000800"),
+        )
+        self.assertEqual(len(alternatives[0]["anchors"]), 4)
+
+        sequence["target_functions"] = 7
+        alternatives = adapter.build_alternatives(unit, {})
+        self.assertFalse(
+            any(
+                alternative["evidence"] == "layout-corroborated-boundary"
+                for alternative in alternatives
+            )
+        )
+
+        sequence["target_functions"] = 4
+        anchors[0]["offset_deltas"] = [0x28, 0x2C, 0x30]
+        alternatives = adapter.build_alternatives(unit, {})
+        self.assertFalse(
+            any(
+                alternative["evidence"] == "layout-corroborated-boundary"
+                for alternative in alternatives
+            )
+        )
 
     def test_distant_anchors_stay_separate_and_contiguous_anchors_add_a_run(self):
         unit = {
