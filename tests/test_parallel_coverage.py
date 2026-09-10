@@ -139,10 +139,69 @@ def boundary_sequence(start=0x200, end=0x800, *, eligible=True):
         "alignment_margin": 1.0,
         "acceptance_method": "matched-sequence",
         "layout_support_group": None,
+        "vtable_support": None,
+        "gap_helpers": [],
         "functions": functions,
         "eligible": eligible,
         "reasons": [] if eligible else ["test rejection"],
     }
+
+
+def vtable_boundary_sequence(start=0x200, end=0xA00):
+    value = boundary_sequence(start, end)
+    functions = [
+        {
+            "source_name": f"function_{index}",
+            "source_address": f"0x{0x1000 + index * 0xE0:08X}",
+            "target_address": f"0x{start + index * 0xE0:08X}",
+            "target_end": f"0x{start + (index + 1) * 0xE0:08X}",
+            "size": 0xE0,
+            "tier": "probable",
+            "method": "call-graph",
+            "confidence": 0.8,
+            "primary": True,
+        }
+        for index in range(8)
+    ]
+    value.update(
+        {
+            "target_functions": 9,
+            "source_functions": 9,
+            "aligned_functions": 8,
+            "aligned_bytes": 0x700,
+            "strong_functions": 1,
+            "direct_anchors": 0,
+            "match_ratio": 8 / 9,
+            "target_coverage": 0.875,
+            "acceptance_method": "vtable-corroborated-boundary",
+            "vtable_support": {
+                "source_address": "0x00004000",
+                "target_address": "0x00005000",
+                "source_size": 0x28,
+                "target_size": 0x2C,
+                "matched_slots": 8,
+                "agreeing_slots": 8,
+                "unit_slots": [
+                    {
+                        "slot_offset": 8 + index * 4,
+                        "source_address": function["source_address"],
+                        "target_address": function["target_address"],
+                    }
+                    for index, function in enumerate(functions)
+                ],
+            },
+            "gap_helpers": [
+                {
+                    "target_address": "0x00000900",
+                    "target_end": "0x00000A00",
+                    "size": 0x100,
+                    "callers": [functions[0]["target_address"]],
+                }
+            ],
+            "functions": functions,
+        }
+    )
+    return value
 
 
 class FakeContext:
@@ -271,6 +330,27 @@ class CoverageTests(unittest.TestCase):
             self.assertIn('symbol: "lbl_00002000"', config)
             self.assertIn('rename: "sDefaultFontData"', config)
 
+    def test_accepted_code_split_is_written_between_its_address_neighbors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ctx = FakeContext(Path(temporary))
+            splits = ctx.root / "config/T/splits.txt"
+            splits.write_text(
+                "Sections:\n"
+                "\t.text type:code\n\n"
+                "Before.cpp:\n"
+                "\t.text start:0x00000100 end:0x00000200\n\n"
+                "After.cpp:\n"
+                "\t.text start:0x00000800 end:0x00000900\n",
+                encoding="utf-8",
+            )
+
+            result = adapter.evaluate(ctx, [candidate()])
+
+            self.assertEqual(len(result["accepted"]), 1)
+            written = splits.read_text(encoding="utf-8")
+            self.assertLess(written.index("Before.cpp:"), written.index("A.cpp:"))
+            self.assertLess(written.index("A.cpp:"), written.index("After.cpp:"))
+
     def test_required_extract_rolls_back_when_candidate_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             ctx = FakeContext(Path(temporary), regress=True)
@@ -367,6 +447,43 @@ class CoverageTests(unittest.TestCase):
                 for alternative in alternatives
             )
         )
+
+    def test_vtable_and_gap_local_helper_corroborate_the_complete_gap(self):
+        sequence = vtable_boundary_sequence()
+        unit = {
+            "code_bytes": 0x810,
+            "anchors": [],
+            "boundary_sequences": [sequence],
+        }
+        alternatives = adapter.build_alternatives(unit, {})
+        self.assertEqual(len(alternatives), 1)
+        self.assertEqual(alternatives[0]["evidence"], "vtable-corroborated-boundary")
+        self.assertEqual(
+            (alternatives[0]["start"], alternatives[0]["end"]),
+            ("0x00000200", "0x00000A00"),
+        )
+        self.assertEqual(len(alternatives[0]["anchors"]), 8)
+
+    def test_vtable_boundary_revalidates_slots_and_helper_callers(self):
+        sequence = vtable_boundary_sequence()
+        unit = {
+            "code_bytes": 0x810,
+            "anchors": [],
+            "boundary_sequences": [sequence],
+        }
+
+        sequence["vtable_support"]["unit_slots"][0]["target_address"] = "0x00000204"
+        self.assertEqual(adapter.build_alternatives(unit, {}), [])
+
+        sequence = vtable_boundary_sequence()
+        unit["boundary_sequences"] = [sequence]
+        sequence["gap_helpers"][0]["callers"] = ["0x00000100"]
+        self.assertEqual(adapter.build_alternatives(unit, {}), [])
+
+        sequence = vtable_boundary_sequence()
+        unit["boundary_sequences"] = [sequence]
+        sequence["vtable_support"]["agreeing_slots"] = 7
+        self.assertEqual(adapter.build_alternatives(unit, {}), [])
 
     def test_distant_anchors_stay_separate_and_contiguous_anchors_add_a_run(self):
         unit = {

@@ -14,9 +14,9 @@ import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
 
-EVIDENCE_SCHEMA = 5
-POLICY_VERSION = 5
-VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-ownership-required-extracts-and-extracted-link-inputs-and-retail-bytes"
+EVIDENCE_SCHEMA = 6
+POLICY_VERSION = 6
+VALIDATION = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-ownership-required-extracts-and-extracted-link-inputs-and-retail-bytes"
 MIN_LAYOUT_BOUNDARY_FUNCTIONS = 4
 MIN_LAYOUT_BOUNDARY_BYTES = 1024
 MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES = 16
@@ -29,6 +29,27 @@ LAYOUT_BOUNDARY_POLICY = {
     "minimum_layout_boundary_changed_accesses": MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES,
     "maximum_layout_boundary_size_delta": MAX_LAYOUT_BOUNDARY_SIZE_DELTA,
     "maximum_layout_boundary_function_delta": MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA,
+}
+MIN_VTABLE_BOUNDARY_FUNCTIONS = 8
+MIN_VTABLE_BOUNDARY_MATCH_RATIO = 0.85
+MIN_VTABLE_BOUNDARY_TARGET_COVERAGE = 0.85
+MIN_VTABLE_BOUNDARY_MATCHED_SLOTS = 8
+MIN_VTABLE_BOUNDARY_UNIT_SLOTS = 4
+MAX_VTABLE_BOUNDARY_SIZE_DELTA = 0.03
+MAX_VTABLE_BOUNDARY_FUNCTION_DELTA = 1
+MAX_VTABLE_BOUNDARY_GAP_HELPERS = 1
+MAX_VTABLE_SIZE_PADDING = 16
+VTABLE_BOUNDARY_POLICY = {
+    "infer_vtable_corroborated_boundaries": True,
+    "minimum_vtable_boundary_functions": MIN_VTABLE_BOUNDARY_FUNCTIONS,
+    "minimum_vtable_boundary_match_ratio": MIN_VTABLE_BOUNDARY_MATCH_RATIO,
+    "minimum_vtable_boundary_target_coverage": MIN_VTABLE_BOUNDARY_TARGET_COVERAGE,
+    "minimum_vtable_boundary_matched_slots": MIN_VTABLE_BOUNDARY_MATCHED_SLOTS,
+    "minimum_vtable_boundary_unit_slots": MIN_VTABLE_BOUNDARY_UNIT_SLOTS,
+    "maximum_vtable_boundary_size_delta": MAX_VTABLE_BOUNDARY_SIZE_DELTA,
+    "maximum_vtable_boundary_function_delta": MAX_VTABLE_BOUNDARY_FUNCTION_DELTA,
+    "maximum_vtable_boundary_gap_helpers": MAX_VTABLE_BOUNDARY_GAP_HELPERS,
+    "maximum_vtable_size_padding": MAX_VTABLE_SIZE_PADDING,
 }
 
 _EXTRACT_FIELDS = (
@@ -411,6 +432,127 @@ def build_alternatives(unit, target_blocks):
             group = (
                 f"{sequence['previous_unit']}|{sequence['next_unit']}|{support_group}"
             )
+        elif method == "vtable-corroborated-boundary":
+            functions = sequence.get("functions", [])
+            source_addresses = [int(item["source_address"], 16) for item in functions]
+            target_ranges = [
+                (int(item["target_address"], 16), int(item["target_end"], 16))
+                for item in functions
+            ]
+            target_addresses = {left for left, _ in target_ranges}
+            function_pairs = {
+                (item["source_address"], item["target_address"]) for item in functions
+            }
+            support = sequence.get("vtable_support") or {}
+            unit_slots = support.get("unit_slots", [])
+            slot_pairs = {
+                (slot.get("source_address"), slot.get("target_address"))
+                for slot in unit_slots
+            }
+            slot_offsets = [slot.get("slot_offset") for slot in unit_slots]
+            helpers = sequence.get("gap_helpers", [])
+            helper_ranges = [
+                (int(helper["target_address"], 16), int(helper["target_end"], 16))
+                for helper in helpers
+            ]
+            helper_addresses = {left for left, _ in helper_ranges}
+            allowed_callers = target_addresses | helper_addresses
+            size_base = max(unit["code_bytes"], sequence["target_bytes"])
+            size_delta = (
+                abs(unit["code_bytes"] - sequence["target_bytes"]) / size_base
+                if size_base
+                else 0.0
+            )
+            source_functions = sequence["source_functions"]
+            target_functions = sequence["target_functions"]
+            source_vtable_size = support.get("source_size", 0)
+            target_vtable_size = support.get("target_size", 0)
+            if (
+                sequence["aligned_functions"] != len(functions)
+                or sequence["aligned_bytes"] != sum(item["size"] for item in functions)
+                or any(
+                    right <= left or right - left != item["size"]
+                    for item, (left, right) in zip(functions, target_ranges)
+                )
+                or len(functions) < MIN_VTABLE_BOUNDARY_FUNCTIONS
+                or source_functions <= 0
+                or len(functions) / source_functions < MIN_VTABLE_BOUNDARY_MATCH_RATIO
+                or sum(item["size"] for item in functions) / sequence["target_bytes"]
+                < MIN_VTABLE_BOUNDARY_TARGET_COVERAGE
+                or source_functions - len(functions) not in (0, 1)
+                or abs(source_functions - target_functions)
+                > MAX_VTABLE_BOUNDARY_FUNCTION_DELTA
+                or size_delta > MAX_VTABLE_BOUNDARY_SIZE_DELTA
+                or not all(item["primary"] for item in functions)
+                or source_addresses != sorted(source_addresses)
+                or len(set(source_addresses)) != len(source_addresses)
+                or any(
+                    left < previous_end
+                    for (_, previous_end), (left, _) in pairwise(target_ranges)
+                )
+                or any(left < start or right > end for left, right in target_ranges)
+                or not support.get("source_address")
+                or not support.get("target_address")
+                or support.get("matched_slots", 0) < MIN_VTABLE_BOUNDARY_MATCHED_SLOTS
+                or support.get("agreeing_slots") != support.get("matched_slots")
+                or len(unit_slots) < MIN_VTABLE_BOUNDARY_UNIT_SLOTS
+                or len(unit_slots) > support.get("agreeing_slots", 0)
+                or len(set(slot_offsets)) != len(unit_slots)
+                or any(
+                    not isinstance(offset, int)
+                    or offset < 0
+                    or offset % 4
+                    or offset >= source_vtable_size
+                    for offset in slot_offsets
+                )
+                or not slot_pairs <= function_pairs
+                or source_vtable_size <= 0
+                or target_vtable_size <= 0
+                or abs(source_vtable_size - target_vtable_size)
+                > MAX_VTABLE_SIZE_PADDING
+                or not 1 <= len(helpers) <= MAX_VTABLE_BOUNDARY_GAP_HELPERS
+                or len(helpers) != target_functions - len(functions)
+                or any(
+                    right <= left
+                    or right - left != helper["size"]
+                    or left < start
+                    or right > end
+                    or not helper.get("callers")
+                    or any(
+                        int(caller, 16) not in allowed_callers
+                        for caller in helper["callers"]
+                    )
+                    or not any(
+                        int(caller, 16) in target_addresses
+                        for caller in helper["callers"]
+                    )
+                    for helper, (left, right) in zip(helpers, helper_ranges)
+                )
+                or any(
+                    left < other_end and other_start < right
+                    for left, right in helper_ranges
+                    for other_start, other_end in target_ranges
+                )
+                or any(
+                    left < other_end and other_start < right
+                    for index, (left, right) in enumerate(helper_ranges)
+                    for other_start, other_end in helper_ranges[index + 1 :]
+                )
+            ):
+                continue
+            anchors = [
+                {
+                    **item,
+                    "section": sequence["section"],
+                    "target_address": item["target_address"],
+                }
+                for item in functions
+            ]
+            evidence = "vtable-corroborated-boundary"
+            group = (
+                f"{sequence['previous_unit']}|{sequence['next_unit']}|"
+                f"{support['source_address']}|{support['target_address']}"
+            )
         elif method == "matched-sequence":
             functions = sequence.get("functions", [])
             source_addresses = [int(item["source_address"], 16) for item in functions]
@@ -522,7 +664,8 @@ def prepare(ctx, limit=None):
         evidence.get("schema") != EVIDENCE_SCHEMA
         or policy.get("version") != POLICY_VERSION
         or any(
-            policy.get(key) != value for key, value in LAYOUT_BOUNDARY_POLICY.items()
+            policy.get(key) != value
+            for key, value in (LAYOUT_BOUNDARY_POLICY | VTABLE_BOUNDARY_POLICY).items()
         )
     ):
         raise RuntimeError("Unsupported DTK coverage evidence schema or policy")
@@ -738,9 +881,12 @@ def evaluate(ctx, candidates, preferred=None):
                     if (ctx.output / "build.log").exists()
                     else 0
                 )
+                is_new = candidate["name"] not in blocks
                 blocks[candidate["name"]] = alternative["lines"]
-                if candidate["name"] not in order:
-                    order.append(candidate["name"])
+                if is_new:
+                    order[:] = scl.order_new_code_units(
+                        order, blocks, [candidate["name"]]
+                    )
                 write()
                 try:
                     tested = trial_build(ctx)

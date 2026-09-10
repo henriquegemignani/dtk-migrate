@@ -142,7 +142,8 @@ def evaluate(ctx, candidates):
         nonlocal report
         staged = dict(blocks)
         staged.update((c["name"], c["lines"]) for c in batch)
-        staged_order = order + [c["name"] for c in batch if c["name"] not in blocks]
+        new_names = [c["name"] for c in batch if c["name"] not in blocks]
+        staged_order = scl.order_new_code_units(order, staged, new_names)
         write(staged, staged_order)
         try:
             tested = trial_build(ctx)
@@ -179,9 +180,10 @@ def evaluate(ctx, candidates):
                     "gain": code_bytes(after[name]) - code_bytes(before.get(name, {})),
                 }
             )
-            if name not in blocks:
-                order.append(name)
+            is_new = name not in blocks
             blocks[name] = c["lines"]
+            if is_new:
+                order[:] = scl.order_new_code_units(order, blocks, [name])
             accepted_names.add(name)
         report = tested
 

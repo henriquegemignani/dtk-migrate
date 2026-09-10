@@ -179,6 +179,31 @@ gap bounds, size and function-count limits, existing ownership, and alignment be
 starting the normal isolated build, no-regression, extracted-input, and retail-byte
 validation.
 
+### Vtable-corroborated boundary validation
+
+Policy version 6 handles a narrow compiler transformation in which the target moves
+part of one source function into a local helper. The normal sequence still must align
+at least eight primary functions monotonically and cover 85% of the source functions
+and target bytes. Source and target function counts may differ by one and their text
+sizes by at most 3%. The candidate must own a unique source vtable whose uniquely
+paired target object agrees at every matchable function slot, with at least eight
+matched slots overall and four slots from the candidate TU. Every unmatched target
+function must be a single helper inside the bounded gap, have no callers outside the
+gap, and be called by an aligned function. The adapter independently reconstructs and
+checks these relationships from the serialized evidence.
+
+For PAL `CShockWave.cpp`, 9 of 10 functions align over 4,208 bytes, or 97.1% of the
+4,332-byte target gap. Its source and target vtables agree in all 24 matchable slots;
+seven slots point to aligned `CShockWave` functions. The one unmatched 124-byte target
+helper is called only by the aligned constructor. The independent ownership oracle
+scores the complete range and all nine aligned function anchors as correct.
+
+Run `20260910T123136.416946Z` accepted
+`.text 0x80221D1C..0x80222E08`. Representation rose from 787 to 788 of 823 source
+TUs. Objdiff-matched and source-linked code stayed at 1,361,884 and 177,036 bytes,
+respectively, because the source object remains disabled. The final DOL SHA-1 stayed
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`.
+
 ### Measured coverage replay
 
 The first complete PAL coverage run prepared 30 candidate TUs with batch size one.

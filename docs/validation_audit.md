@@ -369,3 +369,32 @@ integration both passed the no-regression and retail-byte gates; the final DOL
 SHA-1 remained `4d3780c77842ae7fddbdd5732b70bed100df5c65`. Representation moved
 from 786 to 787 of 823 source TUs. Matched and source-linked code were unchanged,
 as expected for a comparison split whose source object remains disabled.
+
+## Vtable-corroborated TU boundaries (2026-09-10)
+
+Coverage policy version 6 adds a conservative fallback for a neighbor-bounded target
+gap containing one compiler-generated local helper. It requires at least eight
+primary function pairs, 85% source-function and target-byte coverage, monotone order,
+text sizes within 3%, and function counts within one. A unique source vtable and one
+size-compatible target object must agree at every matchable relocation slot. At least
+eight vtable slots must match overall and at least four must point to aligned functions
+from the candidate TU. The sole unmatched target function must have only gap-local
+callers and at least one aligned caller. The runner independently rechecks the slot
+pairs, helper extent, callers, counts, coverage, ordering, and bounds.
+
+The complete `GM8E01_00` to `GM8E01_02` calibration retained 430/430 correct ranges
+in the calibration partition and 463/463 in the held-out partition, with no incorrect
+ranges or anchors. PAL calibration also produced no incorrect range or anchor. Adding
+the separately build-verified CShockWave interval to the ownership oracle labeled the
+new policy path: its one range and all nine aligned anchors scored correct.
+
+Run `20260910T123136.416946Z` accepted
+`MetroidPrime/Weapons/CShockWave.cpp` as
+`.text 0x80221D1C..0x80222E08` (4,332 bytes). Nine of ten functions aligned over
+4,208 target bytes. All 24 matchable vtable slots agreed, including seven aligned
+class methods. The unmatched 124-byte helper is called only by the aligned
+constructor. The worker trial and final integration passed the no-regression and
+retail-byte gates, retaining DOL SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. Representation moved from 787 to 788
+of 823 source TUs; matched and source-linked code stayed at 1,361,884 and 177,036
+bytes. The final suites contain 97 passing Python tests and 72 passing DTK tests.

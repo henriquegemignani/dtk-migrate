@@ -174,6 +174,7 @@ def summarize(records):
                     "this-layout-shift",
                     "boundary-sequence",
                     "layout-corroborated-boundary",
+                    "vtable-corroborated-boundary",
                 )
             },
         }

@@ -70,7 +70,7 @@ batches concurrently, then revalidates their union in deterministic order. Only
 the coordinator publishes validated changes. User input drift stops publication.
 Python's free-threaded runtime does not replace process and filesystem isolation.
 
-Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 5
+Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 6
 accepts strict exact-body intervals, corroborated `this`-layout groups, and
 boundary-constrained function sequences. A layout
 group requires at least two unique functions whose normalized instruction streams
@@ -91,6 +91,14 @@ covering at least 1,024 bytes and 16 changed member accesses can corroborate the
 complete neighbor-bounded gap. This fallback additionally requires source and target
 function counts to differ by at most one and text sizes by at most 2%. It assigns
 ownership without treating the weaker function alignment as rename evidence.
+For polymorphic classes whose compiler output moves one function body into a local
+helper, a second complete-gap fallback requires at least eight monotonically aligned
+functions covering 85% of both the source functions and target bytes. A uniquely
+paired vtable must agree in every matchable slot, including at least eight matched
+slots and four slots belonging to the candidate TU. Source and target text sizes
+must be within 3%, function counts within one, and the only unmatched target helper
+must be called entirely from inside the gap and from at least one aligned function.
+The runner revalidates the vtable pairs and helper call graph before trying the range.
 When functions in an eligible boundary sequence strictly identify data symbols used by
 source-side asset extraction, DTK also proposes equivalent target extraction entries.
 The target symbol and its existing extent stay intact, while `rename` preserves the

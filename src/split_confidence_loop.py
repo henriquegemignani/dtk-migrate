@@ -302,6 +302,64 @@ def write_splits(
     path.write_text(text, encoding="utf-8")
 
 
+def order_new_code_units(
+    existing_order: list[str],
+    blocks: dict[str, list[str]],
+    new_names: list[str],
+) -> list[str]:
+    """Insert new code-bearing units by their first .text address.
+
+    DTK resolves the final link order from address adjacency in every section.
+    Migration trials deliberately run its splitter with ``--no-update``, so the
+    Python writer must place new code units itself instead of appending them.
+    Existing units retain their exact relative order, including data-only and
+    specially ordered runtime blocks.
+    """
+
+    result = list(existing_order)
+    if len(result) != len(set(result)):
+        raise ValueError("Duplicate unit in existing split order")
+
+    def text_start(name):
+        starts = [
+            value[1]
+            for line in blocks[name]
+            if (value := parse_range(line)) and value[0] == ".text"
+        ]
+        return min(starts, default=None)
+
+    pending = []
+    for name in new_names:
+        if name not in blocks:
+            raise ValueError(f"Missing split block for {name}")
+        if name not in result and name not in pending:
+            pending.append(name)
+    pending.sort(
+        key=lambda name: (
+            text_start(name) is None,
+            text_start(name) or 0,
+            name,
+        )
+    )
+
+    for name in pending:
+        start = text_start(name)
+        if start is None:
+            result.append(name)
+            continue
+        index = next(
+            (
+                index
+                for index, other in enumerate(result)
+                if (other_start := text_start(other)) is not None
+                and other_start > start
+            ),
+            len(result),
+        )
+        result.insert(index, name)
+    return result
+
+
 class FunctionConfidence:
     """Looks up dtk match's own per-function tier/confidence for addresses in
     a candidate's .text ranges, from the `--output` JSON report. This is a
@@ -1359,7 +1417,12 @@ def stage_and_build(
         staged = dict(existing_blocks)
         staged.update(remaining)
         write_splits(
-            splits_path, header, staged, existing_order + [n for n, _ in remaining]
+            splits_path,
+            header,
+            staged,
+            order_new_code_units(
+                existing_order, staged, [name for name, _ in remaining]
+            ),
         )
         if not remaining:
             return load_report(version), remaining, excluded
@@ -1753,7 +1816,8 @@ def _main():
         final_blocks = dict(existing_blocks)
         for name in promoted:
             final_blocks[name] = candidates_by_name[name]
-        write_splits(splits_path, header, final_blocks, existing_order + promoted)
+        promoted_order = order_new_code_units(existing_order, final_blocks, promoted)
+        write_splits(splits_path, header, final_blocks, promoted_order)
 
         # A section-level fuzzy score can hide that most of a rejected
         # candidate's own functions actually compiled byte-identical (see
@@ -1773,7 +1837,7 @@ def _main():
                 splits_path,
                 header,
                 retry_existing_blocks,
-                existing_order + promoted,
+                promoted_order,
                 trim_candidates,
                 original_text,
                 args.target,
@@ -1807,10 +1871,15 @@ def _main():
                             f"auto-trimmed boundary still {reason} (was: {trim_origin[name]})",
                         )
                     )
-            final_blocks = dict(existing_blocks)
+        final_blocks = dict(existing_blocks)
         for name in promoted:
             final_blocks[name] = candidates_by_name[name]
-        write_splits(splits_path, header, final_blocks, existing_order + promoted)
+        write_splits(
+            splits_path,
+            header,
+            final_blocks,
+            order_new_code_units(existing_order, final_blocks, promoted),
+        )
     except Exception:
         splits_path.write_text(original_text, encoding="utf-8")
         print("\nEvaluating the build failed; restored the original splits.txt.")
@@ -1891,7 +1960,12 @@ def _main():
             final_blocks = dict(existing_blocks)
             for name in promoted:
                 final_blocks[name] = candidates_by_name[name]
-            write_splits(splits_path, header, final_blocks, existing_order + promoted)
+            write_splits(
+                splits_path,
+                header,
+                final_blocks,
+                order_new_code_units(existing_order, final_blocks, promoted),
+            )
         else:
             splits_path.write_text(original_text, encoding="utf-8")
             raise RuntimeError(
@@ -1937,7 +2011,10 @@ def _main():
                 for name in promoted:
                     final_blocks[name] = candidates_by_name[name]
                 write_splits(
-                    splits_path, header, final_blocks, existing_order + promoted
+                    splits_path,
+                    header,
+                    final_blocks,
+                    order_new_code_units(existing_order, final_blocks, promoted),
                 )
             else:
                 splits_path.write_text(original_text, encoding="utf-8")
