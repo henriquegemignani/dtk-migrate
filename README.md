@@ -52,8 +52,13 @@ From this repository:
 uv run src/parallel_migration.py --project-root ../prime --source GM8E01_00 --target GM8P01_00 --dtk /path/to/dtk --stage both --workers 3 --build-jobs 4
 ```
 
-`--stage` accepts `coverage`, `discover`, `verify`, `both` (default), or `all`.
-`all` runs coverage → discovery → source verification. `--limit` bounds
+`--stage` accepts `derive`, `coverage`, `discover`, `verify`, `both` (default), or
+`all`. `all` runs symbol derivation → coverage → discovery → source verification.
+Derivation runs first because the later stages depend on it: `dtk match` anchors
+its proposals on symbol names, so every name established there widens what
+coverage and discovery can propose. Measured on `GM8P01_00`, naming first took
+discovery from a frontier of roughly 29 candidates to 349, of which 156 were
+accepted. `--limit` bounds
 candidates **per stage**; `--batch-size` defaults to 40. `--workers 1` uses exactly
 the same batches and validation as parallel execution. The default resource
 setting is three processes with four Ninja jobs each. Warmed candidate builds
@@ -71,6 +76,18 @@ private configuration and build cache. It prepares proposals once, evaluates
 batches concurrently, then revalidates their union in deterministic order. Only
 the coordinator publishes validated changes. User input drift stops publication.
 Python's free-threaded runtime does not replace process and filesystem isolation.
+
+Derivation is opt-in through `--stage derive` or `--stage all`. It names target
+symbols by comparing compiled source objects against the originals extracted
+from the target binary, exactly as [the standalone tool](#derive-symbol-names-from-compiled-objects)
+does, and stages only `confident` and `probable` proposals. A rename changes no
+bytes, so the retail hash cannot tell a right name from a wrong one; the names
+are corroborated before they reach the stage, by the body comparison. What the
+build decides is whether a name can be *applied*: naming an address after a
+function another unit compiles from source puts that name in two linked objects,
+and the linker rejects it. That failure is loud, so a batch that will not link is
+bisected exactly as a split candidate is, and only the offending names are
+dropped. A rename that reduces any unit's matched code is also rejected.
 
 Coverage is opt-in through `--stage coverage` or `--stage all`. Policy version 8
 accepts strict exact-body intervals, corroborated `this`-layout groups, and
@@ -182,6 +199,66 @@ One rejected proposal does not permanently blacklist a source file. A different
 boundary, neighboring split, symbol map, or tool revision can change its result.
 An exception or interrupt restores the input splits and symbols and attempts to
 rebuild them. Process termination or power loss cannot run Python cleanup.
+
+## Derive symbol names from compiled objects
+
+```sh
+uv run src/derive_symbol_names.py --project ../prime --target GM8P01_00
+```
+
+Names target symbols by comparing each unit's **compiled source object**
+(`build/<target>/src/...`) with the **object extracted from the target binary**
+(`build/<target>/obj/...`). Both already exist after a normal build, so this
+costs a couple of seconds and no compilation of its own.
+
+Three methods contribute, strongest first:
+
+- **`body-match`** (needs `--objdiff`). Compares function bodies directly.
+  objdiff pairs symbols by name, so a proposed pairing is invisible to it, but
+  the inputs are ours: renaming both sides to one short token in a temporary
+  copy makes the pair scorable. Nothing is rebuilt and the project's files are
+  never written. A name is taken only when one candidate both scores well and
+  leads the runner-up clearly -- see [the method notes](docs/symbol_derivation.md).
+- **`call-site`.** Aligning the relocations inside a function whose name already
+  agrees names whatever it calls, **including in units with no source of their
+  own**: where the source object calls `GetTextureElement__20CParticleDataFactory...`
+  and the extracted object calls `fn_8030DA80`, that address has its name.
+- **`function-position`.** A placeholder sitting between two agreeing names is
+  the function the source defines there.
+
+PAL inlines differently enough that ordering alone misplaces functions, so
+where `body-match` and `function-position` disagree the position loses: a body
+comparison and a call site both observe the function itself, while a position
+only observes its neighbours. Two equally strong methods that disagree are
+dropped rather than ranked.
+
+This is a different signal from `dtk match`, which compares two versions of the
+same binary. Here the source object states what the unit is *supposed* to
+contain, so the comparison stays inside one translation unit and rests on names
+the build already agrees on.
+
+Nothing is written to `symbols.txt` without `--apply` (which needs `--dtk`);
+by default the run only writes a rename file for `dtk symbols rename`. A
+proposal is dropped unless every unit with an opinion agrees, the symbol exists,
+and the new name is not already taken at another address. `--tier` selects how
+much to keep:
+
+| tier | evidence |
+|---|---|
+| `confident` | a body match that scores high and leads clearly, or a call site inside a name-anchored function whose relocation lists align exactly |
+| `probable` | a body match past both thresholds, a call site in a shorter alignment, or a positional function name whose size also agrees |
+| `candidate` | a positional function name whose size disagrees |
+
+`--tier probable` is the default. `--unit` restricts the run, `--report` writes
+JSON, and `--limit` bounds the units examined. `--body-percent`, `--body-margin`
+and `--size-ratio` tune body matching; the defaults are calibrated, so prefer
+`--tier` for routine tightening.
+
+Gaps whose two sides differ in length are deliberately left unpaired: that is
+where the target version restructured the code, and pairing across it is how a
+rename pass starts inventing names. For the same reason call sites are only
+mined from function pairs that matched *by name* — a positionally guessed
+function pair would make every name inside it rest on that guess.
 
 ## Verify whole source files
 

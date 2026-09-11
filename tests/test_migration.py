@@ -111,6 +111,33 @@ class DataProposalTests(unittest.TestCase):
         self.assertEqual(discovery.data_proposals(proposed, existing), [])
 
 
+class LinkOrderGraphTests(unittest.TestCase):
+    def test_first_ctors_split_is_not_an_edge_source(self):
+        # dtk drops the first .ctors split before pairing. Keeping it invents
+        # an edge from that one unit into the next .ctors owner, which is how
+        # a whole program collapses into one false cycle.
+        # .ctors deliberately contradicts .text here: keeping the first split
+        # yields B -> A on top of .text's A -> B, a cycle dtk never sees.
+        blocks = {
+            "A.cpp": [line(0x100, 0x200), line(0x904, 0x908, ".ctors")],
+            "B.cpp": [line(0x200, 0x300), line(0x900, 0x904, ".ctors")],
+        }
+        graph = scl.build_link_order_graph(blocks)
+        self.assertEqual(graph, {"A.cpp": {"B.cpp"}})
+        self.assertEqual([s for s in scl.find_sccs(graph) if len(s) > 1], [])
+
+    def test_contradicting_sections_are_still_a_cycle(self):
+        blocks = {
+            "A.cpp": [line(0x100, 0x200), line(0x500, 0x600, ".sdata")],
+            "B.cpp": [line(0x200, 0x300), line(0x400, 0x500, ".sdata")],
+        }
+        graph = scl.build_link_order_graph(blocks)
+        self.assertEqual(
+            [sorted(s) for s in scl.find_sccs(graph) if len(s) > 1],
+            [["A.cpp", "B.cpp"]],
+        )
+
+
 class EvidenceTests(unittest.TestCase):
     def test_legacy_failure_restores_symbols_splits_and_skip_state(self):
         with tempfile.TemporaryDirectory() as directory:

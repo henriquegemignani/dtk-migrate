@@ -102,6 +102,40 @@ class DiscoveryAdapterTests(unittest.TestCase):
         self.assertEqual(events_by_unit["B.cpp"]["status"], "accepted")
         self.assertEqual(events_by_unit["B.cpp"]["gain"], 0)
 
+    def test_link_order_cycle_is_rejected_without_building(self):
+        # B.cpp's .sdata range sits before A.cpp's while its .text sits after,
+        # so the implied link order contradicts itself. dtk would refuse this
+        # before compiling, so the batch must be bisected without a build.
+        ctx = FakeContext(self.root)
+        ctx.splits.write_text(
+            "Sections:\n\t.text type:code\n\n"
+            "A.cpp:\n\t.text start:0x00000100 end:0x00000200\n"
+            "\t.sdata start:0x00000500 end:0x00000600\n",
+            encoding="utf-8",
+        )
+        builds = []
+        original_build = ctx.build
+
+        def counting_build():
+            builds.append(1)
+            return original_build()
+
+        ctx.build = counting_build
+        cyclic = {
+            "name": "B.cpp",
+            "lines": [
+                "\t.text start:0x00000200 end:0x00000300",
+                "\t.sdata start:0x00000400 end:0x00000500",
+            ],
+            "kind": "data",
+        }
+        result = adapter.evaluate(ctx, [cyclic])
+        self.assertEqual(result["accepted"], [])
+        self.assertEqual(result["events"][0]["status"], "link-order-cycle")
+        # only evaluate's own baseline and final builds, none for the candidate
+        self.assertEqual(len(builds), 2)
+        self.assertNotIn("B.cpp", ctx.splits.read_text())
+
     def test_retail_validation_failure_is_bisected(self):
         def behavior(names):
             if "B.cpp" in names:

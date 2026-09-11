@@ -29,6 +29,16 @@ def _replace(path, data, expected):
         temporary.unlink(missing_ok=True)
 
 
+def _cyclic_units(blocks):
+    """Units caught in a link-order cycle, by dtk's own graph rules."""
+    return {
+        name
+        for scc in scl.find_sccs(scl.build_link_order_graph(blocks))
+        if len(scc) > 1
+        for name in scc
+    }
+
+
 def _regresses(before, after):
     old, new = by_path(before), by_path(after)
     return any(
@@ -161,6 +171,15 @@ def evaluate(ctx, candidates):
         nonlocal report
         staged = dict(blocks)
         staged.update((c["name"], c["lines"]) for c in batch)
+        # dtk rejects a cyclic link order before compiling anything, so a batch
+        # that implies one can be bisected without paying for a build. Only a
+        # candidate's own cycle counts: candidates drag otherwise-fine units
+        # into a component with them, and an already-cyclic input is the
+        # caller's, not something this batch introduced.
+        cyclic = _cyclic_units(staged) - _cyclic_units(blocks)
+        if any(c["name"] in cyclic for c in batch):
+            retry(batch, "link-order-cycle")
+            return
         new_names = [c["name"] for c in batch if c["name"] not in blocks]
         staged_order = scl.order_new_code_units(order, staged, new_names)
         write(staged, staged_order)

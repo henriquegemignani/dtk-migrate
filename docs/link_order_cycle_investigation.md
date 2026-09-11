@@ -14,12 +14,33 @@
 > The first full run against `GM8P01_00` landed 377 candidates and rejected 70,
 > and its log shows 160 `Cyclic dependency ... resolving link order` failures
 > against only 3 retail-hash mismatches — so link order, not range correctness,
-> is what now bounds the remaining data migration. Discovery still burns a real
-> build (plus bisection rebuilds) per doomed candidate; the graph below predicts
-> the same failure in milliseconds and is not wired into the discovery adapter.
-> Reuse it as a pre-filter that skips provably cyclic candidates, not as a
-> resolution heuristic — the mass-drop strategy this document criticizes is
-> still the wrong answer.
+> is what now bounds the remaining data migration.
+>
+> **2026-09-11, later:** the pre-filter suggested above is now in
+> `discovery_adapter.trial`, but wiring it in first required fixing
+> `build_link_order_graph`, which did not mirror dtk after all. dtk drops the
+> first split of `.ctors`/`.dtors` before pairing them (`__init_cpp_exceptions.o`,
+> `split.rs`); the Python model paired from it, inventing an edge out of one
+> arbitrary unit into every other `.ctors` owner. That single missing rule
+> reported a **673-node cyclic component for the `GM8P01_00` baseline that dtk
+> builds without complaint** — which is very likely what produced the 674-node
+> component this document opens with, and means the mass-drop analysis below was
+> reasoning about a mostly phantom cycle.
+>
+> Measured against the 2026-09-10 run's 439 data candidates, using its archived
+> inputs and outcomes as ground truth:
+>
+> | model | baseline SCC | flags a candidate that succeeded | catches known failures |
+> |---|---|---|---|
+> | before the fix | 673 nodes | — | 0 of 67 |
+> | after the fix | 0 nodes | **0 of 372** | 5 of 67 alone, 29 of 67 staged together |
+>
+> So the filter is sound but partial: it never rejects something that would have
+> built, and it flagged 4 of 11 batches before paying for a build. The failures
+> it still misses are either non-cycle (the same log carries 113 linker errors)
+> or cycles only visible through dtk's auto-generated splits, which splits.txt
+> does not describe. It stays a filter, never a resolution heuristic — the
+> mass-drop strategy this document criticizes is still the wrong answer.
 
 ## Context
 

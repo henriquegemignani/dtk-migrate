@@ -139,6 +139,7 @@ def check_frozen_environment(run):
 
 def adapter(stage):
     modules = {
+        "derive": "derivation_adapter",
         "coverage": "coverage_adapter",
         "discover": "discovery_adapter",
         "verify": "verification_adapter",
@@ -696,7 +697,7 @@ def main(argv=None):
     )
     parser.add_argument(
         "--stage",
-        choices=("coverage", "discover", "verify", "both", "all"),
+        choices=("derive", "coverage", "discover", "verify", "both", "all"),
         default="both",
     )
     parser.add_argument("--workers", type=int, default=3)
@@ -813,7 +814,7 @@ def main(argv=None):
                     "Build the project once to install its compiler, objdiff and sjiswrap tools before snapshotting"
                 )
             source_bytes = sum((root / name).stat().st_size for name in manifest)
-            stage_count = 3 if args.stage == "all" else 2 if args.stage == "both" else 1
+            stage_count = 4 if args.stage == "all" else 2 if args.stage == "both" else 1
             preflight_space(run_dir, source_bytes, (args.workers + 2) * stage_count)
             env = environment_identity(dtk, ninja)
             (run_dir / "tools").mkdir()
@@ -864,8 +865,10 @@ def main(argv=None):
         started = time.monotonic()
         current = root
         results = {}
+        # Naming runs first: `dtk match` anchors its proposals on symbol names,
+        # so every name derived here widens what the later stages can propose.
         stages = (
-            ("coverage", "discover", "verify")
+            ("derive", "coverage", "discover", "verify")
             if run["stage"] == "all"
             else ("discover", "verify")
             if run["stage"] == "both"

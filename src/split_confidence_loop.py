@@ -1154,8 +1154,17 @@ def build_link_order_graph(blocks: dict[str, list[str]]) -> dict[str, set[str]]:
                 section, start, end = r
                 by_section.setdefault(section, []).append((start, end, name))
     graph: dict[str, set[str]] = {}
-    for ranges in by_section.values():
+    for section, ranges in by_section.items():
         ranges.sort()
+        if section in (".ctors", ".dtors"):
+            # dtk drops the first split of each of these before pairing them
+            # (`__init_cpp_exceptions.o`, split.rs). Pairing from it instead
+            # invents an edge out of one arbitrary unit into every other
+            # .ctors/.dtors owner, which is enough on its own to tie the whole
+            # program into one false cycle: on Prime's PAL target that single
+            # missing rule reported a 673-node component for a baseline dtk
+            # builds without complaint, and skipping it collapses that to zero.
+            ranges = ranges[1:]
         for (_, _, a), (_, _, b) in pairwise(ranges):
             if a != b:
                 graph.setdefault(a, set()).add(b)
