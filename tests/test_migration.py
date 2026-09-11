@@ -57,6 +57,60 @@ class DiscoveryTests(unittest.TestCase):
         )
 
 
+class DataProposalTests(unittest.TestCase):
+    def test_extends_already_established_unit_with_named_data(self):
+        existing = {"A.cpp": [line(0x100, 0x160)]}
+        proposed = {"A.cpp": [line(0x300, 0x308, ".sbss")]}
+        result = dict(discovery.data_proposals(proposed, existing))["A.cpp"]
+        self.assertEqual(
+            {scl.parse_range(l) for l in result},
+            {(".text", 0x100, 0x160), (".sbss", 0x300, 0x308)},
+        )
+
+    def test_never_creates_a_unit_from_data_alone(self):
+        proposed = {"A.cpp": [line(0x300, 0x308, ".sbss")]}
+        self.assertEqual(discovery.data_proposals(proposed, {}), [])
+
+    def test_creates_a_unit_that_emits_no_code_in_the_source(self):
+        proposed = {"A.cpp": [line(0x300, 0x308, ".sbss")]}
+        source = {"A.cpp": [line(0x900, 0x908, ".sbss")]}
+        result = dict(discovery.data_proposals(proposed, {}, source))
+        self.assertEqual(
+            [scl.parse_range(l) for l in result["A.cpp"]], [(".sbss", 0x300, 0x308)]
+        )
+
+    def test_still_refuses_a_unit_whose_source_has_code(self):
+        # dtk proposing no .text means it could not match the code, not that
+        # the unit has none -- placing data alone here would guess a boundary.
+        proposed = {"A.cpp": [line(0x300, 0x308, ".sbss")]}
+        source = {"A.cpp": [line(0x900, 0x980), line(0x990, 0x998, ".sbss")]}
+        self.assertEqual(discovery.data_proposals(proposed, {}, source), [])
+
+    def test_created_unit_still_cannot_claim_another_unit(self):
+        proposed = {"A.cpp": [line(0x300, 0x310, ".sbss")]}
+        source = {"A.cpp": [line(0x900, 0x910, ".sbss")]}
+        existing = {"B.cpp": [line(0x304, 0x308, ".sbss")]}
+        self.assertEqual(discovery.data_proposals(proposed, existing, source), [])
+
+    def test_ignores_code_sections(self):
+        existing = {"A.cpp": [line(0x100, 0x160)]}
+        proposed = {"A.cpp": [line(0x160, 0x180)]}
+        self.assertEqual(discovery.data_proposals(proposed, existing), [])
+
+    def test_cannot_claim_another_existing_unit(self):
+        existing = {
+            "A.cpp": [line(0x100, 0x160)],
+            "B.cpp": [line(0x300, 0x310, ".sbss")],
+        }
+        proposed = {"A.cpp": [line(0x304, 0x30C, ".sbss")]}
+        self.assertEqual(discovery.data_proposals(proposed, existing), [])
+
+    def test_same_range_is_not_a_new_proposal(self):
+        existing = {"A.cpp": [line(0x100, 0x160), line(0x300, 0x308, ".sbss")]}
+        proposed = {"A.cpp": [line(0x300, 0x308, ".sbss")]}
+        self.assertEqual(discovery.data_proposals(proposed, existing), [])
+
+
 class EvidenceTests(unittest.TestCase):
     def test_legacy_failure_restores_symbols_splits_and_skip_state(self):
         with tempfile.TemporaryDirectory() as directory:

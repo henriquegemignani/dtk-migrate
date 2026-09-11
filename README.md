@@ -164,12 +164,18 @@ bounds the number of proposals examined. This script:
 
 1. Checks the baseline build and generates fresh DTK proposals and confident renames.
 2. Stages code ranges, including proposed fragments and extensions to existing
-   partial code splits. Existing data ranges are preserved.
+   partial code splits.
 3. Compiles and measures each candidate, retaining it only if it adds matched
    code without reducing another existing unit's matched code.
-4. Requires a retail build check for every accepted batch. This checks split
+4. Extends already-established units with proposed non-code ranges (`.rodata`,
+   `.bss`, `.sdata`, `.sbss`, ...) that DTK's own proposals already name but
+   that were never carried over. These never create a new unit and never
+   claim a range another explicit unit already owns, so there is no matched-
+   code signal to gate on; a candidate is kept once its batch still builds and
+   still preserves the retail hash.
+5. Requires a retail build check for every accepted batch. This checks split
    integrity; candidates remain disabled as whole source files.
-5. Bisects failing batches, rebuilds the final state, and records commands and
+6. Bisects failing batches, rebuilds the final state, and records commands and
    results under `build/<target>/discovery/`.
 
 One rejected proposal does not permanently blacklist a source file. A different

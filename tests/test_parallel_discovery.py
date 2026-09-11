@@ -17,6 +17,15 @@ def candidate(name):
     }
 
 
+def data_candidate(name):
+    start = 0x100 + ord(name[0]) * 16
+    return {
+        "name": name,
+        "lines": [f"\t.sbss start:0x{start:08X} end:0x{start + 8:08X}"],
+        "kind": "data",
+    }
+
+
 def report(values):
     return {
         "units": [
@@ -36,6 +45,9 @@ class FakeContext:
         self.splits.parent.mkdir(parents=True)
         self.splits.write_text("Sections:\n\t.text type:code\n\n", encoding="utf-8")
         self.splits.with_name("symbols.txt").write_text("original", encoding="utf-8")
+        source_splits = root / "config" / self.source / "splits.txt"
+        source_splits.parent.mkdir(parents=True)
+        source_splits.write_text("Sections:\n\t.text type:code\n\n", encoding="utf-8")
         self.behavior = behavior or (lambda names: {n: 10 for n in names})
         self.last = None
 
@@ -49,7 +61,10 @@ class FakeContext:
             scl.write_splits(
                 self.output / "proposals.txt",
                 "Sections:\n\t.text type:code\n\n",
-                {"A.cpp": candidate("A.cpp")["lines"]},
+                {
+                    "A.cpp": candidate("A.cpp")["lines"]
+                    + data_candidate("A.cpp")["lines"]
+                },
                 ["A.cpp"],
             )
         else:
@@ -72,6 +87,20 @@ class DiscoveryAdapterTests(unittest.TestCase):
         self.assertEqual(result["deferred"], [b])
         self.assertEqual(result["report"], ctx.build())
         self.assertNotIn("B.cpp", ctx.splits.read_text())
+
+    def test_data_candidate_is_kept_without_code_gain(self):
+        # A data-only extension never moves matched_code, so the ordinary
+        # gain test must not apply to it -- only the build/retail-hash check
+        # and the aggregate regression check do.
+        ctx = FakeContext(self.root, lambda names: {n: 0 for n in names})
+        code, data = candidate("A.cpp"), data_candidate("B.cpp")
+        result = adapter.evaluate(ctx, [code, data])
+        self.assertEqual(result["accepted"], [data])
+        self.assertEqual(result["deferred"], [code])
+        events_by_unit = {e["unit"]: e for e in result["events"]}
+        self.assertEqual(events_by_unit["A.cpp"]["status"], "no-matched-code-gain")
+        self.assertEqual(events_by_unit["B.cpp"]["status"], "accepted")
+        self.assertEqual(events_by_unit["B.cpp"]["gain"], 0)
 
     def test_retail_validation_failure_is_bisected(self):
         def behavior(names):
@@ -135,6 +164,20 @@ class DiscoveryAdapterTests(unittest.TestCase):
         with self.assertRaises(OSError):
             adapter.evaluate(ctx, [candidate("A.cpp")])
         self.assertEqual(ctx.splits.read_text(), "user edits")
+
+    def test_prepare_never_yields_one_unit_twice(self):
+        # A.cpp already has a split, so dtk's proposal qualifies it for both a
+        # code extension and a data extension. Each candidate carries a whole
+        # body, so emitting both would let the second revert the first.
+        ctx = FakeContext(self.root)
+        ctx.splits.write_text(
+            "Sections:\n\t.text type:code\n\nA.cpp:\n\t.text start:0x00000510 end:0x00000514\n",
+            encoding="utf-8",
+        )
+        prepared = adapter.prepare(ctx)
+        names = [c["name"] for c in prepared["candidates"]]
+        self.assertEqual(names, ["A.cpp"])
+        self.assertEqual(prepared["candidates"][0]["kind"], "code")
 
     def test_prepare_reverts_regressing_renames(self):
         ctx = FakeContext(self.root)

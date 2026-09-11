@@ -78,6 +78,81 @@ def code_proposals(proposals, existing):
     )
 
 
+def data_only_in_source(source, name):
+    """True when this unit emits no code at all in the source version.
+
+    Such a unit can never be reached by a code pass: there is no .text to
+    anchor, which is exactly why coverage dispositions it `zero-code`. Its
+    data can still be proposed by symbol name, so it is the one case where a
+    proposal may create the target unit outright. This asks the source split,
+    not the proposal -- a proposal missing .text usually means dtk could not
+    match the code, which is the case the rule below exists to reject.
+    """
+    body = source.get(name)
+    return bool(body) and not any(
+        (r := scl.parse_range(l)) and r[0] in (".text", ".init") for l in body
+    )
+
+
+def data_proposals(proposals, existing, source=None):
+    """Extend established units with proposed non-code sections.
+
+    dtk match --splits proposes a range for every section by symbol-name
+    correspondence, but code_proposals only ever acts on .text/.init. A unit
+    whose code is already split and matched can still be missing its .rodata,
+    .bss, .sdata, .sbss, or similar ranges: the symbols are already correctly
+    named in the target, dtk already proposed the range, nothing ever claimed
+    it, it just was never carried over.
+
+    A unit that already has a split is only ever extended. A new unit is
+    created from data alone in exactly one case: `source` maps unit name to
+    its source-version body, and that body has no code at all, so no code
+    pass could ever have placed it. Either way, a proposal is dropped if it
+    would overlap another established unit.
+    """
+    source = source or {}
+    result = []
+    names = list(existing) + [
+        n for n in proposals if n not in existing and data_only_in_source(source, n)
+    ]
+    for name in names:
+        body = existing.get(name, [])
+        lines = proposals.get(name)
+        if not lines:
+            continue
+        ranges = [
+            r
+            for l in lines
+            if (r := scl.parse_range(l)) and r[0] not in (".text", ".init")
+        ]
+        if not ranges:
+            continue
+        new_body = list(body)
+        for section in sorted({r[0] for r in ranges}):
+            section_ranges = [r for r in ranges if r[0] == section]
+            old = [r for l in new_body if (r := scl.parse_range(l)) and r[0] == section]
+            start = min(r[1] for r in section_ranges + old)
+            end = max(r[2] for r in section_ranges + old)
+            if old == [(section, start, end)]:
+                continue
+            occupied = [
+                r
+                for n, ls in existing.items()
+                if n != name
+                for l in ls
+                if (r := scl.parse_range(l)) and r[0] == section
+            ]
+            if any(start < r[2] and r[1] < end for r in occupied):
+                continue
+            new_body = [
+                l for l in new_body if not (r := scl.parse_range(l)) or r[0] != section
+            ]
+            new_body.append(f"\t{section:11} start:0x{start:08X} end:0x{end:08X}")
+        if new_body != body:
+            result.append((name, new_body))
+    return sorted(result, key=lambda item: item[0])
+
+
 def main():
     from migration_workspace import project_lock
 

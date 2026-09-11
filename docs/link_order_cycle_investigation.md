@@ -3,10 +3,23 @@
 > **2026-09-09 audit:** this is a historical investigation of the old loop, not
 > a verified explanation of every current cycle. The new `discover_splits.py`
 > uses build-driven batch bisection and does not use this mass-drop heuristic.
-> Its code-only proposals avoid speculative data-order constraints. A retail hash
-> validates compiled candidates only when they are actual source link inputs;
-> see [validation_audit.md](validation_audit.md). Prior claims that all retained
-> candidates were byte-verified have been withdrawn.
+> A retail hash validates compiled candidates only when they are actual source
+> link inputs; see [validation_audit.md](validation_audit.md). Prior claims that
+> all retained candidates were byte-verified have been withdrawn.
+>
+> **2026-09-11 update:** the earlier claim here that discovery's "code-only
+> proposals avoid speculative data-order constraints" no longer holds.
+> `data_proposals` now also extends units with their non-code ranges, which
+> pins those units in each data section's order, so cycles are back in scope.
+> The first full run against `GM8P01_00` landed 377 candidates and rejected 70,
+> and its log shows 160 `Cyclic dependency ... resolving link order` failures
+> against only 3 retail-hash mismatches — so link order, not range correctness,
+> is what now bounds the remaining data migration. Discovery still burns a real
+> build (plus bisection rebuilds) per doomed candidate; the graph below predicts
+> the same failure in milliseconds and is not wired into the discovery adapter.
+> Reuse it as a pre-filter that skips provably cyclic candidates, not as a
+> resolution heuristic — the mass-drop strategy this document criticizes is
+> still the wrong answer.
 
 ## Context
 

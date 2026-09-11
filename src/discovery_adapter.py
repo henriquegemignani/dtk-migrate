@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 import split_confidence_loop as scl
-from discover_splits import by_path, code_bytes, code_proposals
+from discover_splits import by_path, code_bytes, code_proposals, data_proposals
 from migration_runtime import TRIAL_ERRORS, trial_build
 
 VALIDATION = "objdiff matched code; retail hash checks split integrity, not candidate source linkage"
@@ -85,13 +85,32 @@ def prepare(ctx, limit=None):
         _, proposals, _ = scl.parse_splits(
             (ctx.output / "proposals.txt").read_text(encoding="utf-8")
         )
+        source_splits = ctx.root / "config" / ctx.source / "splits.txt"
+        _, source_blocks, _ = scl.parse_splits(
+            source_splits.read_text(encoding="utf-8")
+        )
         candidates = [
-            {"name": n, "lines": ls} for n, ls in code_proposals(proposals, blocks)
+            {"name": n, "lines": ls, "kind": "code"}
+            for n, ls in code_proposals(proposals, blocks)
         ]
         if limit is not None:
             candidates = candidates[:limit]
+        # One unit must never yield two candidates. Each kind carries a
+        # complete replacement body, so whichever landed second would revert
+        # the other's sections, and evaluate()'s duplicate guard only sees a
+        # single batch. Code keeps the slot because it has to prove a matched
+        # code gain, which the data pass deliberately skips; the unit's data
+        # is proposed again by the next run.
+        staged = {c["name"] for c in candidates}
+        data_candidates = [
+            {"name": n, "lines": ls, "kind": "data"}
+            for n, ls in data_proposals(proposals, blocks, source_blocks)
+            if n not in staged
+        ]
+        if limit is not None:
+            data_candidates = data_candidates[:limit]
         return {
-            "candidates": candidates,
+            "candidates": candidates + data_candidates,
             "baseline": baseline,
             "starting": starting,
             "events": events,
@@ -151,10 +170,15 @@ def evaluate(ctx, candidates):
             retry(batch, "build-conflict")
             return
         before, after = by_path(report), by_path(tested)
+        # A data candidate only extends an already-matched unit's data ranges;
+        # it never moves objdiff's matched-code count, so the code gain test
+        # doesn't apply to it. It still passes through the build/retail-hash
+        # check above and the aggregate regression check below.
         keep = [
             c
             for c in batch
-            if code_bytes(after.get(c["name"], {}))
+            if c.get("kind") == "data"
+            or code_bytes(after.get(c["name"], {}))
             > code_bytes(before.get(c["name"], {}))
         ]
         if len(keep) != len(batch):
@@ -177,7 +201,9 @@ def evaluate(ctx, candidates):
                 {
                     "unit": name,
                     "status": "accepted",
-                    "gain": code_bytes(after[name]) - code_bytes(before.get(name, {})),
+                    # A unit created from data alone may carry no code measure.
+                    "gain": code_bytes(after.get(name, {}))
+                    - code_bytes(before.get(name, {})),
                 }
             )
             is_new = name not in blocks

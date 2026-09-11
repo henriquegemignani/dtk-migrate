@@ -165,8 +165,13 @@ are known naming noise was withdrawn in DTK's plan documentation.
 
 - Discovery uses the project's objdiff matching policy. It does not prove the
   correctness of every relocation or every unnamed function in a proposed range.
-- Data sections are preserved during code discovery. Migrating missing data,
-  full-file emitted sections and relocations should improve actual source linkage.
+- Discovery also extends already-established units with proposed `.rodata`,
+  `.bss`, `.sdata`, and `.sbss` ranges that DTK's own name-based proposals
+  already identify but that a code-only pass never claimed; it only ever
+  extends a unit that already has a split; it never creates one from data
+  alone, and never claims a range another explicit unit owns. Full-file
+  emitted sections and relocations beyond what DTK proposes by name are still
+  outside its scope and should further improve actual source linkage.
 - Cross-unit template instantiations and deduplication can change ownership
   between versions; source-unit order is evidence, not ground truth for PAL.
 - Build bisection can miss mutually dependent groups that fail individually.
