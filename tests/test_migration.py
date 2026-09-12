@@ -57,7 +57,59 @@ class DiscoveryTests(unittest.TestCase):
         )
 
 
+class RangeExtensionTests(unittest.TestCase):
+    """dtk ends a proposed range at the last symbol it matched, so an unmatched
+    symbol just past it lands in a remainder nothing owns and nothing emits."""
+
+    def extend(self, start, end, occupied=(), source=None):
+        return discovery.extended_end(".sbss", start, end, list(occupied), source)
+
+    def test_grows_over_an_unowned_remainder_up_to_the_source_size(self):
+        # musyx/runtime/synth.c: proposed 0x44 where the source unit has 0x48,
+        # stranding one symbol at the exclusive end and failing the link.
+        self.assertEqual(
+            self.extend(0x8046BB48, 0x8046BB8C, source=[line(0x0, 0x48, ".sbss")]),
+            0x8046BB90,
+        )
+
+    def test_never_grows_into_the_next_owner(self):
+        self.assertEqual(
+            self.extend(
+                0x100,
+                0x120,
+                occupied=[(".sbss", 0x130, 0x200)],
+                source=[line(0x0, 0x80, ".sbss")],
+            ),
+            0x130,
+        )
+
+    def test_leaves_a_range_that_already_matches_the_source_size(self):
+        self.assertEqual(
+            self.extend(0x100, 0x148, source=[line(0x0, 0x48, ".sbss")]), 0x148
+        )
+
+    def test_leaves_a_range_alone_without_a_source_body(self):
+        self.assertEqual(self.extend(0x100, 0x120), 0x120)
+
+    def test_leaves_a_range_alone_when_the_source_lacks_that_section(self):
+        self.assertEqual(
+            self.extend(0x100, 0x120, source=[line(0x0, 0x40, ".data")]), 0x120
+        )
+
+    def test_section_size_spans_every_range_a_unit_claims(self):
+        body = [line(0x100, 0x140, ".bss"), line(0x180, 0x200, ".bss")]
+        self.assertEqual(discovery.section_size(body, ".bss"), 0x100)
+        self.assertIsNone(discovery.section_size(body, ".sbss"))
+
+
 class DataProposalTests(unittest.TestCase):
+    def test_extends_a_proposal_that_stops_short_of_its_source_size(self):
+        existing = {"A.cpp": [line(0x100, 0x160)]}
+        proposed = {"A.cpp": [line(0x300, 0x344, ".sbss")]}
+        source = {"A.cpp": [line(0x0, 0x40), line(0x900, 0x948, ".sbss")]}
+        result = dict(discovery.data_proposals(proposed, existing, source))["A.cpp"]
+        self.assertIn((".sbss", 0x300, 0x348), {scl.parse_range(l) for l in result})
+
     def test_extends_already_established_unit_with_named_data(self):
         existing = {"A.cpp": [line(0x100, 0x160)]}
         proposed = {"A.cpp": [line(0x300, 0x308, ".sbss")]}

@@ -190,6 +190,15 @@ bounds the number of proposals examined. This script:
    claim a range another explicit unit already owns, so there is no matched-
    code signal to gate on; a candidate is kept once its batch still builds and
    still preserves the retail hash.
+   DTK ends a proposed range at the last symbol it could match, so an unmatched
+   symbol immediately after it lands in a remainder nothing owns. Nothing emits
+   that symbol and the unit's own code still references it, so the link fails on
+   an undefined symbol — `musyx/runtime/synth.c` lost its whole data migration to
+   a four-byte tail of exactly this shape. A proposed range is therefore grown
+   over such a remainder, bounded twice: never into the next owner's range, and
+   never past the size the same unit has in the source version. Measured against
+   an archived run, this changes 74 of 214 data proposals and touches 32 of the
+   64 units that previously failed to build.
 5. Requires a retail build check for every accepted batch. This checks split
    integrity; candidates remain disabled as whole source files.
 6. Bisects failing batches, rebuilds the final state, and records commands and

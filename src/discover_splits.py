@@ -94,6 +94,36 @@ def data_only_in_source(source, name):
     )
 
 
+def section_size(body, section):
+    """How many bytes a unit's body claims in one section, if it claims any."""
+    ranges = [r for l in body or [] if (r := scl.parse_range(l)) and r[0] == section]
+    return max(r[2] for r in ranges) - min(r[1] for r in ranges) if ranges else None
+
+
+def extended_end(section, start, end, occupied, source_body):
+    """Grow a proposed range over an unowned remainder that would strand a symbol.
+
+    dtk ends a proposed range at the last symbol it could match, so an unmatched
+    symbol sitting immediately after lands in a remainder nothing owns. Nothing
+    emits it, and the unit's own code still references it, so the link fails
+    with an undefined symbol -- `musyx/runtime/synth.c` lost its whole data
+    migration to a four-byte tail of exactly this shape.
+
+    Claiming that remainder is only safe with evidence that it belongs here, so
+    the growth is bounded twice: never into the next owner's range, and never
+    past the size the same unit has in the source version. A unit whose source
+    body is unknown or already large enough is left alone.
+    """
+    expected = section_size(source_body, section)
+    if expected is None or end - start >= expected:
+        return end
+    limit = start + expected
+    following = [r[1] for r in occupied if r[1] >= end]
+    if following:
+        limit = min(limit, min(following))
+    return max(end, limit)
+
+
 def data_proposals(proposals, existing, source=None):
     """Extend established units with proposed non-code sections.
 
@@ -144,6 +174,7 @@ def data_proposals(proposals, existing, source=None):
             ]
             if any(start < r[2] and r[1] < end for r in occupied):
                 continue
+            end = extended_end(section, start, end, occupied, source.get(name))
             new_body = [
                 l for l in new_body if not (r := scl.parse_range(l)) or r[0] != section
             ]
