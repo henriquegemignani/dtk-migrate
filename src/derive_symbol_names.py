@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import elf_objects
 import objdiff_probe
+import project_modules
 import split_confidence_loop as scl
 
 # Calibrated against NTSC agreement over a 45-unit sample; see
@@ -257,9 +258,11 @@ def unit_key(path):
     return PurePosixPath(str(path).replace("\\", "/")).with_suffix("").as_posix()
 
 
-def address_owner(root, version):
+def address_owner(root, version, module=project_modules.DOL_NAME):
     """Answers which unit's split contains an address, by name and section."""
-    text = (root / "config" / version / "splits.txt").read_text(encoding="utf-8")
+    text = project_modules.find(root, version, module).splits.read_text(
+        encoding="utf-8"
+    )
     _, blocks, _ = scl.parse_splits(text)
     spans = []
     for name, lines in blocks.items():
@@ -354,12 +357,21 @@ def resolve(proposals, symbols, defined_by=None, owner=None):
     return accepted, rejected
 
 
-def unit_objects(root, version):
+def unit_objects(root, version, module=project_modules.DOL_NAME):
     """Units that have both a compiled source object and an extracted one."""
-    source_root = root / "build" / version / "src"
-    target_root = root / "build" / version / "obj"
+    selected = project_modules.find(root, version, module)
+    source_root, target_root = selected.sources, selected.extracted
     if not source_root.is_dir():
-        raise SystemExit(f"No compiled source objects under {source_root}")
+        # A REL the version does not build has an `obj/` but never a `src/`, so
+        # there is nothing to compare against and the reason is worth naming.
+        raise SystemExit(
+            f"No compiled source objects under {source_root}"
+            + (
+                f"; {version} may not build the {module!r} module"
+                if not selected.is_dol
+                else ""
+            )
+        )
     units = []
     for source in sorted(source_root.rglob("*.o")):
         relative = source.relative_to(source_root)
@@ -388,10 +400,19 @@ def _one_unit(entry, objdiff, limits):
     return found, None, unit_key(unit), defines
 
 
-def derive(root, version, only=None, limit=None, objdiff=None, limits=None, jobs=1):
+def derive(
+    root,
+    version,
+    only=None,
+    limit=None,
+    objdiff=None,
+    limits=None,
+    jobs=1,
+    module=project_modules.DOL_NAME,
+):
     """Collect, reconcile and report every rename the object pairs imply."""
     proposals, failures = [], []
-    units = unit_objects(root, version)
+    units = unit_objects(root, version, module)
     if only:
         wanted = set(only)
         units = [u for u in units if u[0] in wanted or Path(u[0]).stem in wanted]
@@ -413,9 +434,9 @@ def derive(root, version, only=None, limit=None, objdiff=None, limits=None, jobs
             failures.append(failure)
         for name in defines:
             defined_by.setdefault(name, set()).add(key)
-    symbols = load_symbols(root / "config" / version / "symbols.txt")
+    symbols = load_symbols(project_modules.find(root, version, module).symbols)
     accepted, rejected = resolve(
-        proposals, symbols, defined_by, address_owner(root, version)
+        proposals, symbols, defined_by, address_owner(root, version, module)
     )
     return {
         "units": len(units),
@@ -474,6 +495,11 @@ def main(argv=None):
         "--jobs", type=int, default=8, help="units to body-match in parallel"
     )
     parser.add_argument(
+        "--module",
+        default=project_modules.DOL_NAME,
+        help="linked module to name, e.g. a REL beside the DOL (default: main)",
+    )
+    parser.add_argument(
         "--tier",
         choices=["confident", "probable", "candidate"],
         default="probable",
@@ -497,6 +523,7 @@ def main(argv=None):
         objdiff=args.objdiff,
         limits=limits,
         jobs=args.jobs,
+        module=args.module,
     )
     allowed = {"confident": {"confident"}, "probable": {"confident", "probable"}}.get(
         args.tier, {"confident", "probable", "candidate"}
@@ -527,7 +554,10 @@ def main(argv=None):
     for failure in result["failures"]:
         print(f"    unreadable: {failure['unit']}: {failure['error']}")
 
-    out = args.out or args.project / "build" / args.target / "derived_renames.txt"
+    out = args.out or (
+        project_modules.find(args.project, args.target, args.module).build
+        / "derived_renames.txt"
+    )
     written = write_renames(out, kept)
     print(f"wrote {written} renames to {out}")
     if args.report:
@@ -541,7 +571,7 @@ def main(argv=None):
     if args.apply:
         if not args.dtk:
             raise SystemExit("--apply needs --dtk")
-        symbols = args.project / "config" / args.target / "symbols.txt"
+        symbols = project_modules.find(args.project, args.target, args.module).symbols
         subprocess.run(
             [str(args.dtk), "symbols", "rename", str(symbols), str(out)], check=True
         )

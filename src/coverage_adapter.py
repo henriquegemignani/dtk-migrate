@@ -10,6 +10,7 @@ import tempfile
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
 
+import split_audit
 import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
@@ -1196,6 +1197,13 @@ def prepare(ctx, limit=None):
             "missing": len(missing),
             "dispositions": dispositions,
         },
+        # Audited, not evaluated: a unit that already owns a range counts as
+        # represented, so no stage will look for its real one. Reporting is the
+        # whole contribution here -- repair needs the range to be separately
+        # determinable, which this cannot decide.
+        "stunted_splits": split_audit.stunted_splits(
+            target_blocks, split_audit.load_blocks(ctx.root, ctx.source)
+        ),
     }
 
 
@@ -1590,6 +1598,7 @@ def summary(prepared, result):
             },
         },
         "measures": final_measures,
+        "stunted_splits": prepared.get("stunted_splits", []),
         "validation": result["validation"],
     }
 
@@ -1647,4 +1656,46 @@ def markdown_summary(value):
         counts[disposition] = counts.get(disposition, 0) + 1
     for disposition, count in sorted(counts.items()):
         lines.append(f"- {disposition}: {count}")
+    lines.extend(_stunted_section(value.get("stunted_splits", [])))
     return "\n".join(lines) + "\n"
+
+
+def _stunted_section(stunted):
+    """Report units whose existing range is too small to be the whole unit.
+
+    These never appear as candidates: owning any range makes a unit represented,
+    so this stage skips it and discovery only extends what is already there. The
+    report is the only place they can surface at all.
+    """
+    if not stunted:
+        return []
+    lines = [
+        "",
+        "## Stunted splits",
+        "",
+        (
+            f"{len(stunted)} units claim less than half the bytes the same unit"
+            " claims in the source version. A range this small is usually built on"
+            " a symbol that several source objects define, so the two versions'"
+            " linkers placed it in different units and matching its name proved"
+            " nothing about ownership."
+        ),
+        "",
+        (
+            "These are **not** candidates: owning any range makes a unit"
+            " represented, so no stage looks for its real one while the fragment"
+            " stands. Removing a fragment is only safe when the unit's true range"
+            " is separately determinable, which this audit does not decide."
+        ),
+        "",
+        "| TU | Section | Claimed | Source version | Ratio |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for entry in stunted[:20]:
+        lines.append(
+            f"| `{entry['unit']}` | `{entry['section']}` | {entry['claimed_bytes']} | "
+            f"{entry['expected_bytes']} | {entry['ratio']:.3f} |"
+        )
+    if len(stunted) > 20:
+        lines.append(f"\n…and {len(stunted) - 20} more; see `coverage.json`.")
+    return lines

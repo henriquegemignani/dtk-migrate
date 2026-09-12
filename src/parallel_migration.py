@@ -431,7 +431,30 @@ def integrate(ctx, stage, candidates, outcomes):
     }
 
 
-def run_stage(run_dir, run, stage, source_root):
+def withhold_reserved(prepared, reserved):
+    """Drop candidates an earlier stage already certified, recording which.
+
+    A unit an earlier stage certified belongs to that stage for the rest of the
+    run. Coverage records the exact range it validated and re-checks it when the
+    run publishes, so a later stage extending the same unit invalidates that
+    certificate and costs the whole run its publication -- every other stage's
+    work included. Leaving the unit to the next run is far cheaper than
+    re-deriving a certificate for a range coverage never examined.
+    """
+    reserved_names = set(reserved)
+    prepared["reserved_by_earlier_stage"] = sorted(
+        {candidate["name"] for candidate in prepared["candidates"]} & reserved_names
+    )
+    if reserved_names:
+        prepared["candidates"] = [
+            candidate
+            for candidate in prepared["candidates"]
+            if candidate["name"] not in reserved_names
+        ]
+    return prepared
+
+
+def run_stage(run_dir, run, stage, source_root, reserved=()):
     started = time.monotonic()
     stage_dir = run_dir / stage
     baseline = stage_dir / "baseline"
@@ -463,6 +486,7 @@ def run_stage(run_dir, run, stage, source_root):
         prepared = adapter(stage).prepare(
             ctx, limit=None if run.get("only") else run["limit"]
         )
+        withhold_reserved(prepared, reserved)
         requested = set(run.get("only", []))
         prepared["eligible_excluded_by_only"] = []
         if requested:
@@ -521,6 +545,7 @@ def run_stage(run_dir, run, stage, source_root):
                 "newly_assigned_code_bytes",
             )
         }
+    result["reserved_by_earlier_stage"] = prepared.get("reserved_by_earlier_stage", [])
     write_json(stage_dir / "result.json", result)
     return integrated, result
 
@@ -875,7 +900,15 @@ def main(argv=None):
             else (run["stage"],)
         )
         for stage in stages:
-            current, results[stage] = run_stage(run_dir, run, stage, current)
+            # Coverage certifies a specific range and re-checks it when the run
+            # publishes, so whatever it accepted is off-limits to later stages.
+            reserved = {
+                candidate["name"]
+                for name, outcome in results.items()
+                if name == "coverage"
+                for candidate in outcome.get("accepted", [])
+            }
+            current, results[stage] = run_stage(run_dir, run, stage, current, reserved)
         report = publish(root, current, run_dir, run, results)
         summary = {
             "schema": SCHEMA,

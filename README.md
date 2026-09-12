@@ -209,6 +209,31 @@ boundary, neighboring split, symbol map, or tool revision can change its result.
 An exception or interrupt restores the input splits and symbols and attempts to
 rebuild them. Process termination or power loss cannot run Python cleanup.
 
+## Linked modules beside the DOL
+
+A game may ship RELs alongside its DOL. Each is a module with its own splits and
+symbols, and `src/project_modules.py` reads their locations from the version's
+`config.yml` rather than assuming them, because nothing about the layout is
+conventional: Metroid Prime keeps `NESemuP.rel` under `config/GM8E01_00/NESemu/`
+but builds it to `build/GM8E01_00/NESemuP/`, and the same module is called
+`NESPALemuP` in PAL. Modules are therefore paired across versions **by position**
+in `config.yml`, and each result records both names.
+
+Compiled source objects are shared: a file compiles once into `build/<version>/src`
+whichever module links it, while only the extracted objects are per-module under
+`build/<version>/<module>/obj`. Pairing that one source tree against a module's
+own `obj/` selects exactly the units that module contains — and is what makes a
+file moving between the DOL and a REL observable, since such a move changes which
+`obj/` holds it and never where it compiles to. `split_audit.relocated_units`
+reports those moves; `split_audit.unsplit_modules` reports a module the target has
+not begun splitting at all.
+
+`derive_symbol_names.py --module NAME` names symbols in a module other than the
+DOL. The rest of the pipeline is still DOL-only: coverage, discovery and
+verification all gate on builds, and a version that excludes a module from
+`config.build_rels` produces no compiled source objects for it, so there would be
+nothing to compare. Enabling the module in the game project comes first.
+
 ## Derive symbol names from compiled objects
 
 ```sh
