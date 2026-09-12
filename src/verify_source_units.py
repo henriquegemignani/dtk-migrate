@@ -75,6 +75,67 @@ def legacy_blocks(text):
     return blocks
 
 
+def is_already_universal(status):
+    """True for a status that already enables an object for every version."""
+    return (isinstance(status, ast.Name) and status.id == "Matching") or (
+        isinstance(status, ast.Constant) and status.value is True
+    )
+
+
+def is_rewritable(status):
+    """True when adding a version to this status is a rename of its argument list.
+
+    The grammar this understands is `Matching`/`True`, `MatchingFor(...)`, and
+    the flat negatives `NonMatching`/`Equivalent`/`False`. Anything else -- most
+    of all `EquivalentFor(...)`, which means "links from source for these
+    versions, but only in a `--non-matching` build" -- states something a longer
+    `MatchingFor` cannot. Promoting `EquivalentFor("A", "B")` to
+    `MatchingFor("A", "B", "C")` would silently claim A and B are byte-identical
+    when they are only equivalent, so such an object is left alone rather than
+    rewritten into a stronger claim than anyone has evidence for.
+    """
+    if is_already_universal(status):
+        return True
+    if (
+        isinstance(status, ast.Call)
+        and isinstance(status.func, ast.Name)
+        and status.func.id == "MatchingFor"
+        and not status.keywords
+    ):
+        return True
+    return (
+        isinstance(status, ast.Name) and status.id in ("NonMatching", "Equivalent")
+    ) or (isinstance(status, ast.Constant) and status.value is False)
+
+
+def unrewritable_names(text):
+    """Objects whose matching expression `render_config` must not touch.
+
+    The verification stage picks its candidates from the build report, which
+    says nothing about how an object is declared, so without this it can choose
+    one it cannot then express -- which is a whole batch lost at evaluate time,
+    long after the work is done.
+    """
+    blocked = {}
+    for node in ast.walk(ast.parse(text.replace("\r\n", "\n"))):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Object"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and not is_rewritable(node.args[0])
+        ):
+            status = node.args[0]
+            blocked[node.args[1].value] = (
+                status.func.id
+                if isinstance(status, ast.Call) and isinstance(status.func, ast.Name)
+                else ast.dump(status)
+            )
+    return blocked
+
+
 def render_config(original, version, names):
     """Edit only selected Object statuses; preserve existing flags and VERSIONS order.
 
@@ -134,9 +195,7 @@ def render_config(original, version, names):
             raise ValueError(f"Multiple Object declarations for {name}")
         found.add(name)
         status = node.args[0]
-        if (isinstance(status, ast.Name) and status.id == "Matching") or (
-            isinstance(status, ast.Constant) and status.value is True
-        ):
+        if is_already_universal(status):
             continue  # Already enabled for every version; never narrow it.
         if (
             isinstance(status, ast.Call)

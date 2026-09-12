@@ -6,12 +6,12 @@ import ast
 import json
 import os
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import split_confidence_loop as scl
 from discover_splits import by_path, code_bytes
 from migration_runtime import TRIAL_ERRORS, ValidationError, trial_build
-from verify_source_units import legacy_blocks, render_config
+from verify_source_units import legacy_blocks, render_config, unrewritable_names
 
 
 class ConfigChangedError(RuntimeError):
@@ -87,6 +87,23 @@ def configured_names(text, target):
     return names
 
 
+def module_of(target_path, version):
+    """The REL module a compiled object belongs to, or None for the DOL.
+
+    dtk puts a module's extracted objects under `build/<version>/<module>/obj/`
+    and the DOL's directly under `build/<version>/obj/`, so the path says which
+    link an object is destined for. This matters because a unit configured with
+    `MatchingFor(<version>)` may live in either, and the two are validated
+    against different artifacts.
+    """
+    parts = PurePosixPath(str(target_path).replace("\\", "/")).parts
+    try:
+        after = parts[parts.index(version) + 1 :]
+    except ValueError:
+        return None
+    return after[0] if len(after) > 1 and after[0] != "obj" else None
+
+
 def validate(ctx, names, *, trial=False):
     """Require retail byte equality and actual compiled linker dependencies."""
     names = set(names) | configured_names(
@@ -94,16 +111,12 @@ def validate(ctx, names, *, trial=False):
     )
     report = trial_build(ctx) if trial else ctx.build()
     units = by_path(report)
-    inputs = ctx.run(
-        [ctx.ninja, "-t", "inputs", f"build/{ctx.target}/main.elf"], capture=True
-    )
 
     def normalize(path):
         return os.path.normcase(
             os.path.normpath(str(ctx.root / Path(path.replace("\\", "/"))))
         )
 
-    inputs = {normalize(p) for p in inputs.splitlines() if p.strip()}
     objdiff = json.loads((ctx.root / "objdiff.json").read_text(encoding="utf-8"))
     comparison = {}
     for unit in objdiff["units"]:
@@ -112,13 +125,38 @@ def validate(ctx, names, *, trial=False):
             if name in comparison:
                 raise ValidationError(f"Ambiguous objdiff source unit: {name}")
             comparison[name] = unit
+
+    linked = {}
+
+    def links(module):
+        """Objects the given module's link actually consumes."""
+        if module not in linked:
+            artifact = (
+                f"build/{ctx.target}/main.elf"
+                if module is None
+                else f"build/{ctx.target}/{module}/{module}.plf"
+            )
+            found = ctx.run([ctx.ninja, "-t", "inputs", artifact], capture=True)
+            linked[module] = {normalize(p) for p in found.splitlines() if p.strip()}
+        return linked[module]
+
     for name in sorted(set(names)):
-        if units.get(name, {}).get("metadata", {}).get("complete") is not True:
+        unit = comparison.get(name, {})
+        module = module_of(unit.get("target_path", ""), ctx.target)
+        # dtk's report covers the DOL; a REL's units are absent from it entirely,
+        # so their completeness is a question it cannot answer. The link check
+        # below is the half that actually tests "configured to link from source",
+        # and it works for every module.
+        if (
+            module is None
+            and units.get(name, {}).get("metadata", {}).get("complete") is not True
+        ):
             raise ValidationError(f"{name} was not configured to link from source")
-        obj_path = comparison.get(name, {}).get("base_path", "")
-        if not obj_path or normalize(obj_path) not in inputs:
+        obj_path = unit.get("base_path", "")
+        artifact = "main.elf" if module is None else f"{module}.plf"
+        if not obj_path or normalize(obj_path) not in links(module):
             raise ValidationError(
-                f"{name}'s compiled object is not an input to main.elf"
+                f"{name}'s compiled object is not an input to {artifact}"
             )
     return report
 
@@ -153,12 +191,27 @@ def prepare(ctx, limit=None):
                 candidate["name"],
             )
         )
+        # Candidates come from the build report, which says nothing about how an
+        # object is declared. Dropping the ones whose declaration cannot be
+        # rewritten here costs those units; leaving them in costs whichever
+        # batch they land in, after that batch has already done its builds.
+        blocked = unrewritable_names(rendered)
+        events = [
+            {
+                "unit": candidate["name"],
+                "status": "skipped",
+                "reason": f"{blocked[candidate['name']]} cannot be widened safely",
+            }
+            for candidate in candidates
+            if candidate["name"] in blocked
+        ]
+        candidates = [c for c in candidates if c["name"] not in blocked]
         if limit is not None:
             candidates = candidates[:limit]
         return {
             "candidates": candidates,
             "baseline": baseline,
-            "events": [],
+            "events": events,
             "migrated_legacy": {v: sorted(names) for v, names in migrated.items()},
         }
     except BaseException:

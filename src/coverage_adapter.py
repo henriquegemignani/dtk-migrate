@@ -1122,11 +1122,24 @@ def prepare(ctx, limit=None):
         )
     except TRIAL_ERRORS as error:
         log = (ctx.output / "build.log").read_text(encoding="utf-8", errors="replace")
-        if "coverage" in log.lower() and (
-            "unrecognized" in log.lower() or "unknown" in log.lower()
-        ):
+        # Only the line dtk actually complained on. The log also echoes the
+        # command, so searching the whole of it finds `--coverage` every time
+        # and reports a missing flag whatever went wrong -- including when the
+        # `match` subcommand is absent altogether, which is a different tool and
+        # a different fix.
+        complaint = next(
+            (
+                line.strip()
+                for line in log.splitlines()
+                if "unrecognized" in line.lower() or "unknown" in line.lower()
+            ),
+            "",
+        )
+        if complaint:
+            missing = "match" if "match" in complaint.lower() else "match --coverage"
             raise RuntimeError(
-                "DTK does not support `match --coverage`; build the coverage-capable DTK revision"
+                f"{ctx.dtk} does not support `{missing}`; "
+                f"build the coverage-capable DTK revision. dtk said: {complaint}"
             ) from error
         raise
     if not evidence_path.is_file():

@@ -144,8 +144,16 @@ def score_matrix(objdiff, target_path, source_path, targets, sources, size_ratio
     return scores
 
 
-def rank(scores):
-    """Best candidate and its lead over the runner-up, per target."""
+# A score this high means the two bodies differ by a few instructions at most,
+# which is a different kind of statement from a merely good score: the pairing
+# is either right or the counterpart is a near-duplicate of it. So the useful
+# question above this line is not how far ahead the best candidate is, but how
+# many candidates reach it at all.
+EXACT_PERCENT = 99.0
+
+
+def rank(scores, exact_percent=EXACT_PERCENT):
+    """Best candidate, its lead over the runner-up, and the field behind it."""
     ranked = {}
     for target, candidates in scores.items():
         if not candidates:
@@ -158,5 +166,7 @@ def rank(scores):
             "percent": percent,
             "margin": percent - runner_up,
             "candidates": len(order),
+            "exact": sum(1 for _, value in order if value >= exact_percent),
+            "order": order,
         }
     return ranked

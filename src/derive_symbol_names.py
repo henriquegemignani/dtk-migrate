@@ -2,15 +2,22 @@
 """Derives target-version symbol names by comparing compiled source objects to
 the originals extracted from the target binary.
 
-For every unit that has both a source object and an extracted object, three
+For every unit that has both a source object and an extracted object, four
 methods propose names, strongest first:
 
-`body-match` compares the two function bodies with objdiff and takes the
-candidate that both scores well and leads the runner-up clearly. `call-site`
-aligns the relocations inside a function whose name already agrees, which names
-whatever it calls -- including in units with no source of their own, since a
-call site names its callee. `function-position` names a placeholder sitting
-between two agreeing names.
+`body-match` compares the two function bodies with objdiff. Three things can
+settle one: a candidate that leads the runner-up clearly, a lone candidate close
+enough to exact that nothing else in the field is competing with it, or -- for
+the pairs that are genuinely too alike to score apart -- the order the two
+objects define their functions in. `call-site` aligns the relocations inside a
+function whose name already agrees, which names whatever it calls -- including
+in units with no source of their own, since a call site names its callee.
+`function-position` names a placeholder sitting between two agreeing names.
+
+`misplaced-name` asks the opposite question of the other three: not what an
+unnamed function should be called, but whether a name already in `symbols.txt`
+is on the wrong function. A wrong name blocks the correct one and reports only
+that the name was taken, so it hides exactly the rename it displaces.
 
 PAL inlines differently enough that ordering alone misplaces functions, so where
 a body comparison and a position disagree the position loses; it observes only a
@@ -42,6 +49,7 @@ from pathlib import Path, PurePosixPath
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import elf_objects
+import match_ordering
 import objdiff_probe
 import project_modules
 import split_confidence_loop as scl
@@ -56,6 +64,15 @@ BODY_LIMITS = {
     "margin": 15.0,
     "confident_percent": 80.0,
     "confident_margin": 30.0,
+    # A lone candidate at this score needs no lead: the margin rule exists to
+    # separate two plausible readings of the same body, and above this line
+    # there is only one reading. CFishCloud's `__dt__CFishCloudModifier` scores
+    # 99.6 against a field of other destructors topping out at 89.8 -- a lead of
+    # 9.8 that the margin rule rejects and that is nonetheless unambiguous.
+    "exact_percent": 99.0,
+    # Ordering can settle a pairing the body scores cannot, but only above the
+    # same floor; a poor match in the right place is still a poor match.
+    "order_percent": 70.0,
 }
 
 
@@ -198,6 +215,43 @@ def unit_proposals(source, target, unit):
     return proposals
 
 
+def _body_entry(unit, old, new, signal, tier, best, extra=None):
+    """One body-match proposal, carrying what decided it."""
+    return {
+        "old": old,
+        "new": new,
+        "unit": unit,
+        "method": "body-match",
+        "signal": signal,
+        "tier": tier,
+        "percent": round(best["percent"], 2),
+        "margin": round(best["margin"], 2),
+        "candidates": best["candidates"],
+        "exact": best["exact"],
+        **(extra or {}),
+    }
+
+
+def _decide(best, limits):
+    """Whether the scores alone settle a pairing, and how confidently.
+
+    Two rules, because a score field has two shapes that admit one reading. The
+    usual one is a clear lead over the runner-up. The other is a single
+    candidate so close to exact that the rest of the field is not competing with
+    it at all -- the case a fixed margin misjudges, because it measures the
+    runner-up rather than the winner.
+    """
+    if best["percent"] >= limits["exact_percent"] and best["exact"] == 1:
+        return "sole-exact", "confident"
+    if best["percent"] < limits["percent"] or best["margin"] < limits["margin"]:
+        return None, None
+    confident = (
+        best["percent"] >= limits["confident_percent"]
+        and best["margin"] >= limits["confident_margin"]
+    )
+    return "margin", "confident" if confident else "probable"
+
+
 def body_proposals(objdiff, unit, target_path, source_path, target, source, limits):
     """Renames implied by comparing function bodies with objdiff.
 
@@ -208,6 +262,12 @@ def body_proposals(objdiff, unit, target_path, source_path, target, source, limi
     lead over the runner-up is the shape a wrong name takes, and a field of
     uniformly poor scores means the counterpart was inlined away and there is
     nothing here to name.
+
+    What the scores settle on their own then places what they do not. The
+    settled pairings and the functions already agreeing by name form an
+    increasing run through the two objects, and a pairing the scores left
+    ambiguous is believed when it takes its place in that run and no other
+    ambiguous pairing wants the same seat.
     """
     unnamed = [f for f in target["functions"] if is_derivable(f["name"])]
     named = [f for f in source["functions"] if is_usable_source_name(f["name"])]
@@ -216,31 +276,197 @@ def body_proposals(objdiff, unit, target_path, source_path, target, source, limi
     scores = objdiff_probe.score_matrix(
         objdiff, target_path, source_path, unnamed, named, limits["size_ratio"]
     )
-    proposals = []
-    for old, best in objdiff_probe.rank(scores).items():
-        if best["percent"] < limits["percent"] or best["margin"] < limits["margin"]:
+    ranked = objdiff_probe.rank(scores, limits["exact_percent"])
+    at = {f["name"]: i for i, f in enumerate(target["functions"])}
+    source_at = {f["name"]: i for i, f in enumerate(source["functions"])}
+
+    # A function both objects already call by the same name is a pairing nothing
+    # has to derive, so it anchors the run for free.
+    agreed = [
+        (at[f["name"]], source_at[f["name"]])
+        for f in target["functions"]
+        if f["name"] in source_at and is_usable_source_name(f["name"])
+    ]
+    proposals, decided, undecided = [], list(agreed), []
+    for old, best in ranked.items():
+        signal, tier = _decide(best, limits)
+        if signal is None:
+            candidates = [
+                (source_at[name], (name, percent))
+                for name, percent in best["order"]
+                if percent >= limits["order_percent"]
+            ]
+            if candidates:
+                undecided.append((at[old], (old, best, candidates)))
             continue
+        decided.append((at[old], source_at[best["name"]]))
+        proposals.append(_body_entry(unit, old, best["name"], signal, tier, best))
+
+    backbone = match_ordering.spine(decided)
+    on_spine = set(backbone)
+    for proposal in proposals:
+        pair = (at[proposal["old"]], source_at[proposal["new"]])
+        proposal["off_spine"] = pair not in on_spine
+
+    settled = match_ordering.rescue(
+        [
+            (position, [(where, load) for where, load in payload[2]])
+            for position, payload in undecided
+        ],
+        backbone,
+    )
+    carried = {position: payload for position, payload in undecided}
+    for position, _, (name, percent) in settled:
+        old, best, _ = carried[position]
         proposals.append(
-            {
-                "old": old,
-                "new": best["name"],
-                "unit": unit,
-                "method": "body-match",
-                "tier": (
-                    "confident"
-                    if best["percent"] >= limits["confident_percent"]
-                    and best["margin"] >= limits["confident_margin"]
-                    else "probable"
-                ),
-                "percent": round(best["percent"], 2),
-                "margin": round(best["margin"], 2),
-                "candidates": best["candidates"],
-            }
+            _body_entry(
+                unit,
+                old,
+                name,
+                "order",
+                "probable",
+                best,
+                {"off_spine": False, "chosen_percent": round(percent, 2)},
+            )
         )
     return proposals
 
 
+# How far a function may sit from the size of the name it carries before that
+# name is worth re-examining. Wider than `size_ratio`, because this is looking
+# for a name on the wrong function rather than a version's inlining drift, and
+# a false suspicion here costs one objdiff run while a missed one leaves a wrong
+# name in place.
+SUSPECT_RATIO = 2.0
+
+
+def misplaced_names(
+    objdiff, unit, target_path, source_path, target, source, limits, reference=None
+):
+    """Names the target carries that the source says belong to another function.
+
+    Everything else here names functions that have no name. This asks the
+    opposite question -- whether a name already in `symbols.txt` is on the wrong
+    address -- because a wrong name does more damage than a missing one: it is
+    the answer to the question the rest of the tool is asking, so it silently
+    blocks the correct rename and reports only that the name was taken.
+
+    `dtk match` places names by propagating them between versions, so the way
+    this goes wrong is a shift: two adjacent functions, the first named with the
+    second's name. `CFishCloud` carries `BuildBoidNearList` on a 0xE8 function
+    while the source compiles that name to 0x330 and compiles `OldBuildBoidNearList`
+    to 0xE8, and the 0x330 function next door is still a placeholder.
+
+    The size disagreement is the cheap tell and is only a suspicion; objdiff
+    decides. A correction is proposed only when one source function explains the
+    address near-exactly, alone, and at a size that fits -- a high bar, because
+    unlike every other method here this one overwrites a name somebody already
+    has reason to trust.
+
+    `reference` is the other version's symbol sizes, and it is what keeps this
+    honest. The source object is only authoritative about a name's body when the
+    unit actually matches; where it does not, a function the source failed to
+    inline is indistinguishable from a name on the wrong address. If the
+    reference version carries the same name at a size the target address agrees
+    with, then two versions place the name here and only our unbuilt source
+    objects, so the finding is marked `contested` and demoted below the applied
+    tiers -- reported for a human, never renamed automatically.
+    """
+    defined = {f["name"]: f for f in source["functions"]}
+    present = {f["name"] for f in target["functions"]}
+    suspects = []
+    for function in target["functions"]:
+        namesake = defined.get(function["name"])
+        if namesake is None or not is_usable_source_name(function["name"]):
+            continue
+        low, high = function["size"], namesake["size"]
+        if not low or not high:
+            continue
+        if max(low, high) / min(low, high) > SUSPECT_RATIO:
+            suspects.append(function)
+    if not suspects:
+        return []
+    # A generous ratio, so the name the address currently carries is scored too
+    # and the report can say what it lost as well as what it gained.
+    scores = objdiff_probe.score_matrix(
+        objdiff,
+        target_path,
+        source_path,
+        suspects,
+        [f for f in source["functions"] if is_usable_source_name(f["name"])],
+        max(limits["size_ratio"], SUSPECT_RATIO * 2),
+    )
+    found = []
+    for old, best in objdiff_probe.rank(scores, limits["exact_percent"]).items():
+        if best["percent"] < limits["exact_percent"] or best["exact"] != 1:
+            continue
+        if best["name"] == old or best["name"] in present:
+            # Either the name is where it belongs, or the name this would free
+            # is already on another function here and the two would have to
+            # trade places -- a swap, which no single rename can express.
+            continue
+        carrier = next(f for f in target["functions"] if f["name"] == old)
+        replacement = defined[best["name"]]
+        if not replacement["size"] or not carrier["size"]:
+            continue
+        ratio = max(carrier["size"], replacement["size"]) / min(
+            carrier["size"], replacement["size"]
+        )
+        if ratio > limits["size_ratio"]:
+            continue
+        # The other version's opinion on where this name lives. It knows nothing
+        # about our source, so when it agrees with the address the disagreement
+        # is ours to fix in the source, not the symbol file's.
+        elsewhere = (reference or {}).get(old)
+        contested = bool(
+            elsewhere
+            and carrier["size"]
+            and max(elsewhere, carrier["size"]) / min(elsewhere, carrier["size"])
+            <= limits["size_ratio"]
+        )
+        found.append(
+            {
+                "old": old,
+                "new": best["name"],
+                "unit": unit,
+                "method": "misplaced-name",
+                "signal": "misplaced",
+                "contested": contested,
+                "reference_size": elsewhere,
+                "tier": "candidate" if contested else "confident",
+                "percent": round(best["percent"], 2),
+                "margin": round(best["margin"], 2),
+                "candidates": best["candidates"],
+                "exact": best["exact"],
+                # None, not zero: a namesake too far off in size to be scored at
+                # all is a different statement from one that scored nothing.
+                "own_percent": (
+                    round(dict(best["order"])[old], 2)
+                    if old in dict(best["order"])
+                    else None
+                ),
+                "carried_size": carrier["size"],
+                "namesake_size": defined[old]["size"],
+                "replacement_size": replacement["size"],
+            }
+        )
+    return found
+
+
 SYMBOL_LINE = re.compile(r"^(\S+) = (\.\w+):0x([0-9A-Fa-f]+);")
+SYMBOL_SIZE = re.compile(r"^(\S+) = \.\w+:0x[0-9A-Fa-f]+;.*\bsize:0x([0-9A-Fa-f]+)")
+
+
+def load_symbol_sizes(path):
+    """Name to size for every sized symbol in a dtk symbols file."""
+    sizes = {}
+    if not path.is_file():
+        return sizes
+    for line in path.read_text(encoding="utf-8").splitlines():
+        found = SYMBOL_SIZE.match(line.strip())
+        if found:
+            sizes[found.group(1)] = int(found.group(2), 16)
+    return sizes
 
 
 def load_symbols(path):
@@ -284,7 +510,12 @@ def address_owner(root, version, module=project_modules.DOL_NAME):
 # at the function itself; a position only looks at its neighbours, so when the
 # two disagree the position is the one that loses rather than the one that
 # poisons the result.
-STRENGTH = {"body-match": 2, "call-site": 2, "function-position": 1}
+STRENGTH = {
+    "misplaced-name": 2,
+    "body-match": 2,
+    "call-site": 2,
+    "function-position": 1,
+}
 
 
 def resolve(proposals, symbols, defined_by=None, owner=None):
@@ -381,7 +612,7 @@ def unit_objects(root, version, module=project_modules.DOL_NAME):
     return units
 
 
-def _one_unit(entry, objdiff, limits):
+def _one_unit(entry, objdiff, limits, reference=None):
     """Every proposal one unit implies, or the error that stopped it."""
     unit, source_path, target_path = entry
     try:
@@ -393,6 +624,9 @@ def _one_unit(entry, objdiff, limits):
     if objdiff is not None:
         found += body_proposals(
             objdiff, unit, target_path, source_path, target, source, limits
+        )
+        found += misplaced_names(
+            objdiff, unit, target_path, source_path, target, source, limits, reference
         )
     defines = {
         f["name"] for f in source["functions"] if is_usable_source_name(f["name"])
@@ -409,10 +643,18 @@ def derive(
     limits=None,
     jobs=1,
     module=project_modules.DOL_NAME,
+    reference=None,
 ):
     """Collect, reconcile and report every rename the object pairs imply."""
     proposals, failures = [], []
     units = unit_objects(root, version, module)
+    # The other version's symbol sizes, so a correction can be told apart from
+    # a unit whose source has not been matched yet. See `misplaced_names`.
+    sizes = (
+        load_symbol_sizes(project_modules.find(root, reference, module).symbols)
+        if reference
+        else None
+    )
     if only:
         wanted = set(only)
         units = [u for u in units if u[0] in wanted or Path(u[0]).stem in wanted]
@@ -423,10 +665,10 @@ def derive(
     if jobs > 1 and objdiff is not None:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             results = list(
-                pool.map(lambda entry: _one_unit(entry, objdiff, limits), units)
+                pool.map(lambda entry: _one_unit(entry, objdiff, limits, sizes), units)
             )
     else:
-        results = [_one_unit(entry, objdiff, limits) for entry in units]
+        results = [_one_unit(entry, objdiff, limits, sizes) for entry in units]
     defined_by = {}
     for found, failure, key, defines in results:
         proposals.extend(found)
@@ -444,7 +686,41 @@ def derive(
         "accepted": accepted,
         "rejected": rejected,
         "failures": failures,
+        "corrections": corrections(accepted, rejected),
     }
+
+
+def corrections(accepted, rejected):
+    """Misplaced names, and the rename each one is standing in the way of.
+
+    A correction is deliberately reported and applied on its own rather than
+    paired with the rename it unblocks. Freeing a name cannot collide with
+    anything -- the name it moves to is unused -- so it is safe whatever else
+    lands, including when the pipeline bisects a failing batch and separates
+    the two halves. Applying both at once is the case that is not safe: half a
+    swap puts one name on two addresses. The blocked rename is simply proposed
+    again by the next run, once the name it wants is free.
+    """
+    blocked = {}
+    for entry in rejected:
+        if entry["reason"] == "name already taken":
+            blocked.setdefault(entry["new"], []).append(entry["old"])
+    return [
+        {
+            "unit": proposal["unit"],
+            "address_named": old,
+            "should_be": proposal["new"],
+            "contested": proposal.get("contested", False),
+            "reference_size": proposal.get("reference_size"),
+            "percent": proposal["percent"],
+            "own_percent": proposal["own_percent"],
+            "carried_size": proposal["carried_size"],
+            "namesake_size": proposal["namesake_size"],
+            "frees_name_for": sorted(blocked.get(old, [])),
+        }
+        for old, proposal in sorted(accepted.items())
+        if proposal["method"] == "misplaced-name"
+    ]
 
 
 def write_renames(path, accepted):
@@ -492,6 +768,22 @@ def main(argv=None):
         help="lowest lead over the runner-up to accept",
     )
     parser.add_argument(
+        "--exact-percent",
+        type=float,
+        default=BODY_LIMITS["exact_percent"],
+        help="score above which a lone candidate needs no lead over the field",
+    )
+    parser.add_argument(
+        "--order-percent",
+        type=float,
+        default=BODY_LIMITS["order_percent"],
+        help="lowest score an ordering-settled pairing may have",
+    )
+    parser.add_argument(
+        "--reference",
+        help="other version to check a misplaced name against, e.g. GM8E01_00",
+    )
+    parser.add_argument(
         "--jobs", type=int, default=8, help="units to body-match in parallel"
     )
     parser.add_argument(
@@ -514,6 +806,8 @@ def main(argv=None):
         "size_ratio": args.size_ratio,
         "percent": args.body_percent,
         "margin": args.body_margin,
+        "exact_percent": args.exact_percent,
+        "order_percent": args.order_percent,
     }
     result = derive(
         args.project,
@@ -524,6 +818,7 @@ def main(argv=None):
         limits=limits,
         jobs=args.jobs,
         module=args.module,
+        reference=args.reference,
     )
     allowed = {"confident": {"confident"}, "probable": {"confident", "probable"}}.get(
         args.tier, {"confident", "probable", "candidate"}
@@ -536,14 +831,64 @@ def main(argv=None):
 
     counts = {}
     for proposal in kept.values():
-        key = (proposal["method"], proposal["tier"])
+        key = (proposal["method"], proposal.get("signal", ""), proposal["tier"])
         counts[key] = counts.get(key, 0) + 1
     print(f"units compared:      {result['units']}")
     print(f"raw proposals:       {result['proposed']}")
     print(f"unambiguous:         {len(result['accepted'])}")
     print(f"kept at --tier {args.tier}: {len(kept)}")
-    for (method, tier), count in sorted(counts.items()):
-        print(f"    {method:18} {tier:10} {count}")
+    for (method, signal, tier), count in sorted(counts.items()):
+        label = f"{method}/{signal}" if signal else method
+        print(f"    {label:30} {tier:10} {count}")
+    reordered = sorted(
+        {p["unit"] for p in kept.values() if p.get("off_spine")},
+    )
+    if reordered:
+        print(
+            f"units whose functions reorder: {len(reordered)} "
+            "(body scores decided these; ordering does not corroborate them)"
+        )
+        for unit in reordered[:10]:
+            names = [
+                p["new"]
+                for p in kept.values()
+                if p.get("off_spine") and p["unit"] == unit
+            ]
+            print(f"    {unit}: {', '.join(sorted(names)[:3])}")
+    contested = [c for c in result["corrections"] if c["contested"]]
+    if contested:
+        print(
+            f"\nmisplaced names CONTESTED: {len(contested)} "
+            "(the reference version places the name here too -- review by hand)"
+        )
+        for entry in contested:
+            print(f"    {entry['unit']}")
+            print(
+                f"      {entry['address_named'][:64]}"
+                f"\n        carries 0x{entry['carried_size']:X}; "
+                f"our source compiles that name to 0x{entry['namesake_size']:X}, "
+                f"but the reference has it at 0x{entry['reference_size']:X}"
+                f"\n        would be {entry['should_be'][:56]}  "
+                f"({entry['percent']}%)"
+                "\n        not renamed: an unmatched source explains this equally well"
+            )
+    corrected = [c for c in result["corrections"] if c["address_named"] in kept]
+    if corrected:
+        print(
+            f"\nmisplaced names corrected: {len(corrected)} "
+            "(a name already in symbols.txt that sits on the wrong function)"
+        )
+        for entry in corrected:
+            print(f"    {entry['unit']}")
+            print(
+                f"      {entry['address_named'][:64]}"
+                f"\n        carries 0x{entry['carried_size']:X}, "
+                f"but that name compiles to 0x{entry['namesake_size']:X}"
+                f"\n        -> {entry['should_be'][:64]}  ({entry['percent']}%)"
+            )
+            for waiting in entry["frees_name_for"]:
+                print(f"        frees the name for {waiting}, proposable next run")
+        print()
     if result["rejected"]:
         reasons = {}
         for entry in result["rejected"]:

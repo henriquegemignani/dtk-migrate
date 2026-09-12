@@ -97,6 +97,10 @@ def prepare(ctx, limit=None):
         objdiff=objdiff,
         limits=deriver.BODY_LIMITS,
         jobs=ctx.build_jobs,
+        # The version being migrated from is the check on a misplaced name: if
+        # it places the name where the target already has it, our own unmatched
+        # source is the likelier explanation and nothing is renamed.
+        reference=ctx.source,
     )
     candidates = [
         {
@@ -104,6 +108,11 @@ def prepare(ctx, limit=None):
             "new": proposal["new"],
             "method": proposal["method"],
             "tier": proposal["tier"],
+            # Which rule settled it, and whether the unit's own ordering agreed.
+            # A rename decided against the run is right often enough to keep and
+            # unusual enough to be worth a reviewer opening it in objdiff.
+            "signal": proposal.get("signal"),
+            "off_spine": bool(proposal.get("off_spine")),
         }
         for old, proposal in sorted(result["accepted"].items())
         if proposal["tier"] in ("confident", "probable")
@@ -114,11 +123,30 @@ def prepare(ctx, limit=None):
         {"unit": entry["old"], "status": "rejected", "reason": entry["reason"]}
         for entry in result["rejected"]
     )
+    # A correction overwrites a name somebody already had reason to trust, so it
+    # is recorded as its own event rather than disappearing into the rename
+    # count -- it is the one outcome here a reviewer would want to see by name.
+    chosen = {candidate["name"] for candidate in candidates}
+    corrections = [
+        entry for entry in result["corrections"] if entry["address_named"] in chosen
+    ]
+    events.extend(
+        {
+            "unit": entry["unit"],
+            "status": "misplaced-name",
+            "was": entry["address_named"],
+            "should_be": entry["should_be"],
+            "percent": entry["percent"],
+            "frees_name_for": entry["frees_name_for"],
+        }
+        for entry in corrections
+    )
     return {
         "candidates": candidates,
         "baseline": baseline,
         "starting": baseline,
         "events": events,
+        "corrections": corrections,
     }
 
 
