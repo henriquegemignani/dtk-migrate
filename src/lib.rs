@@ -25,5 +25,6 @@ pub mod build;
 pub mod cli;
 pub mod matching;
 pub mod project;
+pub mod run;
 pub mod stages;
 pub mod workspace;

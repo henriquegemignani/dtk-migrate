@@ -7,7 +7,9 @@ use anyhow::{Result, anyhow};
 use decomp_toolkit::util::path::check_path_buf;
 use typed_path::Utf8NativePathBuf;
 
+pub mod configure_hook;
 pub mod match_cmd;
+pub mod run;
 pub mod splits;
 pub mod symbols;
 
