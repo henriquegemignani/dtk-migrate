@@ -25,7 +25,7 @@ use crate::{
         report::{ObjdiffConfig, ObjdiffUnit, Report, strip_source_root},
         transaction::Owned,
     },
-    stages::{Candidate, Event, Outcome, Prepared, Stage, bisect},
+    stages::{Candidate, Event, Outcome, Prepared, Selections, Stage, bisect},
 };
 
 pub struct Verify;
@@ -117,6 +117,7 @@ impl Stage for Verify {
         ctx: &BuildContext,
         _prepared: &Prepared,
         candidates: &[Candidate],
+        _preferred: &Selections,
     ) -> Result<Outcome> {
         let path = ctx.root.join("configure.py");
         let mut owned = Owned::take(&path)?;
@@ -164,7 +165,14 @@ impl Stage for Verify {
         let report = validate(ctx, &checked, false, None)?;
         owned.check()?;
         owned.commit();
-        Ok(Outcome { accepted, deferred, events, report, validation: VALIDATION.to_string() })
+        Ok(Outcome {
+            accepted,
+            deferred,
+            events,
+            report,
+            validation: VALIDATION.to_string(),
+            selections: Selections::new(),
+        })
     }
 
     fn validate(
@@ -172,6 +180,7 @@ impl Stage for Verify {
         ctx: &BuildContext,
         accepted: &[Candidate],
         _prepared: &Prepared,
+        _selections: &Selections,
     ) -> Result<Report> {
         let text = std::fs::read_to_string(ctx.root.join("configure.py"))?;
         let mut names = Configure::parse(&text)?.configured_names(&ctx.target);

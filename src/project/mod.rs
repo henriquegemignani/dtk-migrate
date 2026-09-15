@@ -7,6 +7,7 @@
 //! not parse.
 
 pub mod analyze;
+pub mod audit;
 pub mod config;
 pub mod configure_py;
 pub mod link_order;

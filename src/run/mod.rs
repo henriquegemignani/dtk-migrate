@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     build::{context::BuildContext, process::Cancel},
-    stages::{Candidate, Event, Stage, discover::Discover, verify::Verify},
+    stages::{
+        Candidate, Event, Selections, Stage, coverage::Coverage, discover::Discover, verify::Verify,
+    },
     workspace::{Manifest, Snapshot, fingerprint},
 };
 
@@ -50,9 +52,10 @@ pub const ORDER: [&str; 4] = ["derive", "coverage", "discover", "verify"];
 
 pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
     Ok(match name {
+        "coverage" => Box::new(Coverage),
         "discover" => Box::new(Discover),
         "verify" => Box::new(Verify),
-        "derive" | "coverage" => bail!("The {name} stage is not implemented yet"),
+        "derive" => bail!("The {name} stage is not implemented yet"),
         other => bail!("Unknown stage: {other}"),
     })
 }
@@ -142,6 +145,9 @@ pub struct StageResult {
     pub stage: String,
     pub accepted: Vec<Candidate>,
     pub deferred: Vec<Candidate>,
+    /// Which alternative each accepted candidate was proved with.
+    #[serde(default)]
+    pub selections: Selections,
     pub events: Vec<Event>,
     pub validation: String,
     pub dol_sha1: String,
@@ -342,14 +348,18 @@ pub fn run_stage(
         candidates.iter().filter(|c| worker_accepted.contains(&c.name)).cloned().collect();
 
     let mut events: Vec<Event> = outcomes.iter().flat_map(|o| o.events.clone()).collect();
-    let mut outcome = stage.evaluate(&ctx, &prepared.prepared, &proposed)?;
+    // A worker already found an alternative that works for each candidate it
+    // accepted; integration tries that one first rather than rediscovering it.
+    let preferred: Selections = outcomes.iter().flat_map(|o| o.selections.clone()).collect();
+    let mut outcome = stage.evaluate(&ctx, &prepared.prepared, &proposed, &preferred)?;
+    let mut selections = outcome.selections.clone();
     events.extend(outcome.events.clone());
     let mut accepted: BTreeSet<String> = outcome.accepted.iter().map(|c| c.name.clone()).collect();
     let mut pending: Vec<Candidate> =
         candidates.iter().filter(|c| !accepted.contains(&c.name)).cloned().collect();
 
     while !pending.is_empty() && !accepted.is_empty() {
-        let retry = stage.evaluate(&ctx, &prepared.prepared, &pending)?;
+        let retry = stage.evaluate(&ctx, &prepared.prepared, &pending, &preferred)?;
         events.extend(retry.events.clone());
         let added: BTreeSet<String> = retry.accepted.iter().map(|c| c.name.clone()).collect();
         outcome = retry;
@@ -357,11 +367,14 @@ pub fn run_stage(
             break;
         }
         accepted.extend(added.iter().cloned());
+        selections.extend(outcome.selections.clone());
         pending.retain(|c| !added.contains(&c.name));
     }
 
+    selections.retain(|name, _| accepted.contains(name));
     let result = StageResult {
         stage: stage_name.to_string(),
+        selections,
         accepted: candidates.iter().filter(|c| accepted.contains(&c.name)).cloned().collect(),
         deferred: pending,
         events,
@@ -374,6 +387,9 @@ pub fn run_stage(
         seconds: started.elapsed().as_secs_f64(),
     };
     write_json(&stage_dir.join("result.json"), &result)?;
+    for (name, contents) in stage.artifacts(&prepared.prepared, &result)? {
+        std::fs::write(stage_dir.join(name), contents)?;
+    }
     Ok((integrated, result))
 }
 

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     build::process::Cancel,
     run::{RunDir, RunRecord, context, read_json, write_json},
-    stages::{Candidate, Event, Prepared, Stage},
+    stages::{Candidate, Event, Prepared, Selections, Stage},
     workspace::{Manifest, fingerprint},
 };
 
@@ -59,6 +59,10 @@ pub struct JobResult {
     pub deferred: Vec<Candidate>,
     pub events: Vec<Event>,
     pub validation: String,
+    /// Which alternative each accepted candidate was proved with, so
+    /// integration can try the same one first.
+    #[serde(default)]
+    pub selections: Selections,
 }
 
 fn job_fingerprint(
@@ -229,7 +233,7 @@ fn run_one(
     tracing::info!("{}: batch {} ({} candidates)", spec.stage, spec.job_id, spec.candidates.len());
 
     let ctx = context(workspace, run, output.join("process"), Some(cancel));
-    let outcome = stage.evaluate(&ctx, prepared, &spec.candidates)?;
+    let outcome = stage.evaluate(&ctx, prepared, &spec.candidates, &Selections::new())?;
     let result = JobResult {
         schema: crate::run::SCHEMA,
         job_id: spec.job_id.clone(),
@@ -238,6 +242,7 @@ fn run_one(
         deferred: outcome.deferred,
         events: outcome.events,
         validation: outcome.validation,
+        selections: outcome.selections,
     };
     accept_stored(&result, spec).context("The stage returned candidates it was not given")?;
     write_json(&result_path, &result)?;
@@ -272,6 +277,7 @@ mod tests {
             deferred: deferred.iter().map(|n| Candidate::new(*n)).collect(),
             events: Vec::new(),
             validation: "fixture".into(),
+            selections: Selections::new(),
         }
     }
 

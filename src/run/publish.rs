@@ -145,7 +145,12 @@ pub fn publish(
             if result.accepted.is_empty() {
                 continue;
             }
-            report = stage_for(stage_name)?.validate(&ctx, &result.accepted, prepared)?;
+            report = stage_for(stage_name)?.validate(
+                &ctx,
+                &result.accepted,
+                prepared,
+                &result.selections,
+            )?;
         }
         crate::run::check_environment(run)?;
         let after = Snapshot::of(root)?;

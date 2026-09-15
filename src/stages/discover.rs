@@ -26,7 +26,7 @@ use crate::{
         splits::{Splits, parse_range},
         transaction::Owned,
     },
-    stages::{Candidate, Event, Outcome, Prepared, Stage},
+    stages::{Candidate, Event, Outcome, Prepared, Selections, Stage},
 };
 
 pub struct Discover;
@@ -348,6 +348,7 @@ impl Stage for Discover {
         ctx: &BuildContext,
         _prepared: &Prepared,
         candidates: &[Candidate],
+        _preferred: &Selections,
     ) -> Result<Outcome> {
         let names: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
         if names.len() != candidates.len() {
@@ -387,6 +388,7 @@ impl Stage for Discover {
             events: state.events,
             report: final_report,
             validation: VALIDATION.to_string(),
+            selections: Selections::new(),
         })
     }
 
@@ -395,6 +397,7 @@ impl Stage for Discover {
         ctx: &BuildContext,
         _accepted: &[Candidate],
         _prepared: &Prepared,
+        _selections: &Selections,
     ) -> Result<Report> {
         ctx.build(None)
     }

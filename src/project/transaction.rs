@@ -45,6 +45,10 @@ impl Owned {
 
     pub fn original(&self) -> &[u8] { &self.original }
 
+    /// What this transaction last wrote, which is what a caller must hand back
+    /// to undo one step without undoing the others.
+    pub fn current(&self) -> &[u8] { &self.current }
+
     /// Confirms the file still holds what this transaction last wrote.
     pub fn check(&self) -> Result<()> {
         match std::fs::read(&self.path) {

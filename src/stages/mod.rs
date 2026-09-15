@@ -14,7 +14,7 @@
 //! None of them keeps anything on the strength of a proposal alone, and none of
 //! them is allowed to conclude something the build did not show.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,18 @@ use crate::{
     project::report::Report,
 };
 
+pub mod coverage;
 pub mod discover;
 pub mod verify;
+
+/// Which alternative a stage chose for a candidate, when a candidate has more
+/// than one way to be right.
+///
+/// Only coverage does: a unit can be claimed by an exact-body run, a layout
+/// group or a bounded sequence, and which one survived the build is part of the
+/// result rather than an implementation detail. Recording it lets publication
+/// re-check the same range rather than a differently-derived one.
+pub type Selections = BTreeMap<String, String>;
 
 /// One thing a stage wants to try, and whatever evidence it carries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +93,10 @@ pub struct Prepared {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Outcome {
     pub accepted: Vec<Candidate>,
+    /// Which alternative each accepted candidate was proved with. Empty for a
+    /// stage whose candidates have only one form.
+    #[serde(default)]
+    pub selections: Selections,
     /// Rejected here, but not ruled out: a different batch, boundary or
     /// baseline can change the answer, which is why this is not a blacklist.
     pub deferred: Vec<Candidate>,
@@ -101,11 +115,15 @@ pub trait Stage {
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared>;
 
     /// Tries the given candidates against the prepared baseline.
+    ///
+    /// `preferred` names the alternative a worker already found to work, so
+    /// integration tries that one first instead of rediscovering it.
     fn evaluate(
         &self,
         ctx: &BuildContext,
         prepared: &Prepared,
         candidates: &[Candidate],
+        preferred: &Selections,
     ) -> Result<Outcome>;
 
     /// Rechecks an accepted set in the project that is about to keep it.
@@ -118,7 +136,22 @@ pub trait Stage {
         ctx: &BuildContext,
         accepted: &[Candidate],
         prepared: &Prepared,
+        selections: &Selections,
     ) -> Result<Report>;
+
+    /// Extra files this stage wants written beside its result, as
+    /// (name, contents).
+    ///
+    /// Coverage writes a summary that separates the four things a migration can
+    /// mean by progress, because a single number would be read as the strongest
+    /// of them.
+    fn artifacts(
+        &self,
+        _prepared: &Prepared,
+        _result: &crate::run::StageResult,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Tries a batch, halving it on failure until single candidates are isolated.
