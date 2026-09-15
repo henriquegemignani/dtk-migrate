@@ -40,6 +40,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    # CreateJobObjectW takes SECURITY_ATTRIBUTES, so the job object bindings
+    # only exist when this is on.
+    "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

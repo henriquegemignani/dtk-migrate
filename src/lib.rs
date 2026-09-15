@@ -21,6 +21,8 @@
 //!    whole-file proof.
 
 pub mod analysis;
+pub mod build;
 pub mod cli;
 pub mod matching;
 pub mod project;
+pub mod workspace;
