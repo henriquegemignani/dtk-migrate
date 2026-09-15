@@ -1,0 +1,24 @@
+Number of Processors : 24
+CPU Speed            : 3700 MHz
+OS Version           : 10.00.00.00
+OS Build Number      : 26200
+Clock type           : PerfCounter
+Boot time            : 2026/09/09:00:32:40.5000000
+Native Pointer Size  : 8 (64bit)
+Start time (UTC)     : 2026/09/10:15:18:22.1494705
+End time (UTC)       : 2026/09/10:15:18:57.4053268  (+         0:00:00:35.2558563)
+Total # Lost Buffers : 0
+Total # Lost Events  : 0
+
+Number of Traces     : 1
+
+Trace name: .\build\investigations\etw-task-smoke\smoke.etl
+    Log file mode        : Sequential Relogged
+    Pointer size         : 8 (64bit)
+    Start time (UTC)     : 2026/09/10:15:18:22.1494705
+    End time (UTC)       : 2026/09/10:15:18:57.4053268  (+         0:00:00:35.2558563)
+    Start time (Local)   : 2026/09/10:18:18:22.1494705
+    End time (Local)     : 2026/09/10:18:18:57.4053268
+    # Lost Buffers       : 0
+    # Lost Events        : 0
+

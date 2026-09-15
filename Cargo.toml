@@ -1,0 +1,51 @@
+[package]
+name = "dtk-migrate"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Validated cross-version split discovery and source migration for decomp-toolkit projects"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "dtk_migrate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dtk-migrate"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { version = "1.0", features = ["backtrace"] }
+clap = { version = "4.5", features = ["derive"] }
+decomp-toolkit = { git = "https://github.com/henriquegemignani/decomp-toolkit", branch = "feature/library-exposure" }
+fs4 = "0.13"
+indexmap = { version = "2.6", features = ["serde"] }
+itertools = "0.13"
+ppc750cl = "0.3"
+rayon = "1.10"
+regex = "1.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+sha1 = "0.10"
+sha2 = "0.10"
+tempfile = "3.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+typed-path = "0.9"
+walkdir = "2.5"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+codegen-units = 1

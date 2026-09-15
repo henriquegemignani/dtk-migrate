@@ -87,6 +87,31 @@ def configured_names(text, target):
     return names
 
 
+# Sections that hold no bytes. They exist as a name, an address and a size, so
+# a fuzzy match percent over one of them scores our symbol annotations rather
+# than anything in the binary. dtk auto-sizes a symbol to the gap before the
+# next one, which is how `GXMisc.c`'s `FinishQueue` came to be 0xC in PAL and
+# 0x8 in NTSC -- one wrong size, a 75% section score, and a unit whose code is a
+# byte-identical match was never offered as a candidate at all.
+EMPTY_SECTIONS = frozenset({".bss", ".sbss", ".sbss2"})
+
+
+def matches_on_content(unit):
+    """True when every section that actually holds bytes is a full fuzzy match.
+
+    A unit with nothing but empty sections answers False: there is no evidence
+    either way, and this is the gate that decides what is worth a build.
+    """
+    sections = [
+        section
+        for section in unit.get("sections", [])
+        if section.get("name") not in EMPTY_SECTIONS
+    ]
+    return bool(sections) and all(
+        section.get("fuzzy_match_percent", 0) == 100 for section in sections
+    )
+
+
 def module_of(target_path, version):
     """The REL module a compiled object belongs to, or None for the DOL.
 
@@ -104,8 +129,19 @@ def module_of(target_path, version):
     return after[0] if len(after) > 1 and after[0] != "obj" else None
 
 
-def validate(ctx, names, *, trial=False):
-    """Require retail byte equality and actual compiled linker dependencies."""
+def validate(ctx, names, *, trial=False, record=None):
+    """Require retail byte equality and actual compiled linker dependencies.
+
+    `record`, when given, collects the configured units this version has no
+    split for. Such a unit is declared `MatchingFor(<target>)` but appears in
+    neither the report nor `objdiff.json`, because dtk emits no rule for a unit
+    it cannot place -- so nothing is compiled and nothing is linked. That is
+    vacuous rather than wrong (the units it happens to are empty ones, whose
+    split in the source version is a zero-length range), and it is a standing
+    property of the configuration rather than anything a candidate did. Failing
+    the whole stage on it would block work that has nothing to do with it, so it
+    is reported and stepped over.
+    """
     names = set(names) | configured_names(
         (ctx.root / "configure.py").read_text(encoding="utf-8"), ctx.target
     )
@@ -142,6 +178,12 @@ def validate(ctx, names, *, trial=False):
 
     for name in sorted(set(names)):
         unit = comparison.get(name, {})
+        if not unit and name not in units:
+            # No split for this version, so there is no object and no link to
+            # check. Anything with a split reaches the assertions below.
+            if record is not None:
+                record.append(name)
+            continue
         module = module_of(unit.get("target_path", ""), ctx.target)
         # dtk's report covers the DOL; a REL's units are absent from it entirely,
         # so their completeness is a question it cannot answer. The link check
@@ -174,15 +216,15 @@ def prepare(ctx, limit=None):
     owned = original
     try:
         owned = _replace(path, owned, rendered.encode("utf-8"))
-        baseline = validate(ctx, configured_names(rendered, ctx.target))
+        unsplit = []
+        baseline = validate(ctx, configured_names(rendered, ctx.target), record=unsplit)
         _check_owned(path, owned)
         candidates = [
             {"name": name}
             for name, unit in by_path(baseline).items()
             if not unit.get("metadata", {}).get("complete")
             and code_bytes(unit) > 0
-            and unit.get("sections")
-            and all(s.get("fuzzy_match_percent", 0) == 100 for s in unit["sections"])
+            and matches_on_content(unit)
         ]
         units = by_path(baseline)
         candidates.sort(
@@ -205,6 +247,15 @@ def prepare(ctx, limit=None):
             for candidate in candidates
             if candidate["name"] in blocked
         ]
+        events.extend(
+            {
+                "unit": name,
+                "status": "configured-without-split",
+                "reason": f"MatchingFor({ctx.target}) but {ctx.target} has no split "
+                "for it, so nothing is compiled or linked",
+            }
+            for name in sorted(unsplit)
+        )
         candidates = [c for c in candidates if c["name"] not in blocked]
         if limit is not None:
             candidates = candidates[:limit]

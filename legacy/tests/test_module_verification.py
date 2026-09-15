@@ -51,3 +51,21 @@ class ModuleAttributionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnsplitConfigurationTests(unittest.TestCase):
+    """A unit configured for a version that has no split for it."""
+
+    def test_the_helper_separates_split_from_unsplit_units(self):
+        # `musyx/runtime/hw_lib_dolphin.c` is MatchingFor(GM8P01_00) but PAL has
+        # no split for it, so dtk emits no rule, nothing compiles, and it shows
+        # up in neither the report nor objdiff.json. The source version's split
+        # for it is a zero-length .sbss range: the TU is simply empty.
+        report_units = {"has/split.cpp": {"metadata": {"complete": True}}}
+        objdiff_units = {"has/split.cpp": {"base_path": "b.o", "target_path": "t.o"}}
+        unsplit = [
+            name
+            for name in ("has/split.cpp", "musyx/runtime/hw_lib_dolphin.c")
+            if name not in objdiff_units and name not in report_units
+        ]
+        self.assertEqual(unsplit, ["musyx/runtime/hw_lib_dolphin.c"])
