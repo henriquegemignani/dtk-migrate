@@ -1,26 +1,14 @@
 //! `dtk-migrate match` — carry names, splits and coverage evidence from a
 //! version that has them to one that does not.
 
-use std::{io::Write, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use decomp_toolkit::util::file::buf_writer;
-use tracing::info;
 
 use crate::{
-    analysis::{
-        coverage::build_report as build_coverage_report,
-        data_matching::match_data,
-        matching::{MatchOptions, MatchTarget, MatchTier, match_functions},
-        unit_matching::propose_units,
-    },
     cli::{native, native_opt},
-    matching::{
-        proposals::write_unit_proposals,
-        report::{Report, ReportMatch, renameable_data},
-    },
-    project::analyze::{extract_specs, load_analyzed},
+    matching::{self, Outputs, Request},
 };
 
 #[derive(ClapArgs, Debug)]
@@ -68,142 +56,20 @@ pub struct Args {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let options = MatchOptions {
+    matching::run(&Request {
+        source_config: native(&args.source)?,
+        target_config: native(&args.target)?,
+        source_root: native_opt(args.source_root.as_ref())?,
+        target_root: native_opt(args.target_root.as_ref())?,
         min_confidence: args.min_confidence,
-        ignore_names: args.validate,
         max_rounds: args.max_rounds,
-        ..Default::default()
-    };
-
-    let source_path = native(&args.source)?;
-    let target_path = native(&args.target)?;
-    let (source_config, source_obj) = load_analyzed(
-        &source_path,
-        native_opt(args.source_root.as_ref())?.as_deref(),
-        "--source-root",
-    )?;
-    let (target_config, target_obj) = load_analyzed(
-        &target_path,
-        native_opt(args.target_root.as_ref())?.as_deref(),
-        "--target-root",
-    )?;
-
-    let source = MatchTarget::new(source_path.to_string(), source_obj);
-    let target = MatchTarget::new(target_path.to_string(), target_obj);
-    info!("Matching {} functions against {} functions", source.graph.len(), target.graph.len());
-
-    let result = match_functions(&source, &target, &options);
-    let data_matches = match_data(&source, &target, &result);
-    let report = Report::build(&source, &target, &result, args.validate);
-    report.print_summary();
-
-    if let Some(path) = native_opt(args.output.as_ref())? {
-        let mut file = buf_writer(&path)?;
-        serde_json::to_writer_pretty(&mut file, &report)?;
-        file.flush()?;
-        info!("Wrote report to {}", path);
-    }
-    if let Some(path) = native_opt(args.renames.as_ref())? {
-        let mut file = buf_writer(&path)?;
-        let mut count = 0;
-        for m in report.renameable().filter(|m| m.tier == MatchTier::Confident) {
-            write!(file, "{} = {}", m.target_name, m.source_name)?;
-            if m.source_local {
-                write!(file, " local")?;
-            }
-            writeln!(file)?;
-            count += 1;
-        }
-        let mut data_count = 0;
-        for dm in renameable_data(&source, &target, &data_matches) {
-            write!(
-                file,
-                "{} = {}",
-                target.symbol_name_at(dm.target),
-                source.symbol_name_at(dm.source)
-            )?;
-            if source.is_local_at(dm.source) {
-                write!(file, " local")?;
-            }
-            writeln!(file)?;
-            data_count += 1;
-        }
-        file.flush()?;
-        info!("Wrote {} confident renames ({} data) to {}", count + data_count, data_count, path);
-    }
-    if let Some(path) = native_opt(args.candidates.as_ref())? {
-        let mut file = buf_writer(&path)?;
-        writeln!(file, "# Candidate names: {} -> {}", report.source, report.target)?;
-        writeln!(file, "#")?;
-        writeln!(
-            file,
-            "# These are NOT confident enough to apply unreviewed. Move a line into the"
-        )?;
-        writeln!(
-            file,
-            "# renames file once you've confirmed it; delete it otherwise. Lines starting"
-        )?;
-        writeln!(file, "# with '#' are alternatives that lost, kept so you can see what else it")?;
-        writeln!(file, "# could have been.")?;
-        writeln!(file)?;
-
-        // Strongest tier first, then by confidence, so a reviewer working top to
-        // bottom hits the most likely names first and can stop when quality drops.
-        let mut pending: Vec<&ReportMatch> =
-            report.renameable().filter(|m| m.tier != MatchTier::Confident).collect();
-        pending.sort_by(|a, b| {
-            a.tier
-                .cmp(&b.tier)
-                .then(b.confidence.total_cmp(&a.confidence))
-                .then(a.target_address.cmp(&b.target_address))
-        });
-
-        let mut count = 0;
-        for m in pending {
-            let local = if m.source_local { " local" } else { "" };
-            writeln!(
-                file,
-                "{} = {}{local}  # {} {:.2} {}",
-                m.target_name,
-                m.source_name,
-                m.tier.as_str(),
-                m.confidence,
-                m.method
-            )?;
-            if let Some(alternative) = &m.alternative {
-                writeln!(
-                    file,
-                    "#{:>width$} = {}  # alternative, {:.0}% as strong",
-                    "alt",
-                    alternative.name,
-                    alternative.relative_score * 100.0,
-                    width = m.target_name.len().saturating_sub(1)
-                )?;
-            }
-            count += 1;
-        }
-        file.flush()?;
-        info!("Wrote {} candidates to {}", count, path);
-    }
-    if let Some(path) = native_opt(args.splits.as_ref())? {
-        let proposals = propose_units(&source, &target, &result, &data_matches);
-        write_unit_proposals(&path, &target, &proposals)?;
-    }
-    if let Some(path) = native_opt(args.coverage.as_ref())? {
-        let source_extracts = extract_specs(&source_config);
-        let target_extracts = extract_specs(&target_config);
-        let coverage = build_coverage_report(
-            &source,
-            &target,
-            &result,
-            args.validate,
-            &source_extracts,
-            &target_extracts,
-        );
-        let mut file = buf_writer(&path)?;
-        serde_json::to_writer_pretty(&mut file, &coverage)?;
-        file.flush()?;
-        info!("Wrote coverage evidence to {}", path);
-    }
-    Ok(())
+        validate: args.validate,
+        outputs: Outputs {
+            report: args.output,
+            renames: args.renames,
+            candidates: args.candidates,
+            splits: args.splits,
+            coverage: args.coverage,
+        },
+    })
 }

@@ -19,6 +19,18 @@ use typed_path::{Utf8NativePath, Utf8NativePathBuf};
 
 use crate::analysis::coverage::ExtractSpec;
 
+/// Serialises everything that depends on the process working directory.
+///
+/// A project configuration's paths are written relative to its own root, and
+/// dtk resolves them against the working directory. That is fine for a command
+/// that loads one project, but this tool runs several workers as threads in one
+/// process, and the working directory is shared by all of them. Holding this
+/// for the whole of a load means at most one thread is ever inside that window.
+///
+/// Child processes are unaffected either way: every command this tool starts is
+/// given its directory explicitly.
+static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Runs the standard DOL analysis pipeline, up to and including relocation
 /// tracking, which is what populates the call edges the matcher relies on.
 pub fn load_analyzed(
@@ -26,6 +38,9 @@ pub fn load_analyzed(
     root: Option<&Utf8NativePath>,
     root_option: &str,
 ) -> Result<(ProjectConfig, ObjInfo)> {
+    // Poisoning only means some other load panicked; the directory is restored
+    // by its guard either way, so there is nothing unsafe to inherit.
+    let _serialized = CWD.lock().unwrap_or_else(|e| e.into_inner());
     let config: ProjectConfig = {
         let mut file = open_file(config_path, true)?;
         serde_yaml::from_reader(file.as_mut())?

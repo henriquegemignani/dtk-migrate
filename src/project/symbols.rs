@@ -124,13 +124,30 @@ pub fn apply_renames(
     renames: &Renames,
     dry_run: bool,
 ) -> Result<RenameReport> {
-    let text = {
-        let mut file = open_file(path, true)?;
-        let data = file.map()?;
-        std::str::from_utf8(data)
-            .map_err(|e| anyhow!("Symbols file is not valid UTF-8: {e}"))?
-            .to_string()
-    };
+    let (rendered, report) = render_renames(&read_symbols(path)?, renames);
+    if report.applied > 0 && !dry_run {
+        let mut file = buf_writer(path)?;
+        file.write_all(rendered.as_bytes())?;
+        file.flush()?;
+    }
+    Ok(report)
+}
+
+/// Reads a symbols file as text.
+pub fn read_symbols(path: &Utf8NativePath) -> Result<String> {
+    let mut file = open_file(path, true)?;
+    let data = file.map()?;
+    Ok(std::str::from_utf8(data)
+        .map_err(|e| anyhow!("Symbols file is not valid UTF-8: {e}"))?
+        .to_string())
+}
+
+/// Renames without touching the filesystem, for a caller that owns the write.
+///
+/// A migration trial has to be able to put the file back exactly as it was, so
+/// it writes through its own transaction rather than letting this do it.
+pub fn render_renames(text: &str, renames: &Renames) -> (String, RenameReport) {
+    let text = text.to_string();
 
     // A name is only free if nothing keeps it. Symbols being renamed away are
     // releasing theirs, so they don't block anyone.
@@ -188,12 +205,7 @@ pub fn apply_renames(
         .cloned()
         .collect();
 
-    if report.applied > 0 && !dry_run {
-        let mut file = buf_writer(path)?;
-        file.write_all(out.as_bytes())?;
-        file.flush()?;
-    }
-    Ok(report)
+    (out, report)
 }
 
 /// Adds `scope:local` to a symbol line's attributes, unless it already

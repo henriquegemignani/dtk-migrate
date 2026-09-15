@@ -9,8 +9,10 @@
 pub mod analyze;
 pub mod config;
 pub mod configure_py;
+pub mod link_order;
 pub mod pysyntax;
 pub mod report;
 pub mod split_merge;
 pub mod splits;
 pub mod symbols;
+pub mod transaction;
