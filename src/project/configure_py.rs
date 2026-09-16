@@ -386,6 +386,19 @@ fn check_legacy_shape(body: &str, version: &str, literal: &str) -> Result<()> {
     Ok(())
 }
 
+/// Drops comments, blank lines and trailing whitespace, and normalises string
+/// quoting, so formatting differences do not read as edits.
+fn normalize_python(text: &str) -> String {
+    strip_comments(text)
+        .split('\n')
+        // Quote style is not meaning; a literal written with either quote is
+        // the same value.
+        .map(|line| line.replace('\'', "\"").trim_end().to_string())
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,17 +562,4 @@ mod tests {
         let text = format!("{VERSIONS}objects = []\n\n{BEGIN}\n{LEGACY_BODY}");
         assert!(Configure::parse(&text).unwrap_err().to_string().contains("Malformed"));
     }
-}
-
-/// Drops comments, blank lines and trailing whitespace, and normalises string
-/// quoting, so formatting differences do not read as edits.
-fn normalize_python(text: &str) -> String {
-    strip_comments(text)
-        .split('\n')
-        // Quote style is not meaning; a literal written with either quote is
-        // the same value.
-        .map(|line| line.replace('\'', "\"").trim_end().to_string())
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }

@@ -482,7 +482,7 @@ impl Trials {
         let introduced: BTreeSet<String> =
             cyclic_units(&staged.blocks).difference(baseline_cycles).cloned().collect();
         if batch.iter().any(|c| introduced.contains(&c.name)) {
-            return Ok(self.reject(owned, splits, batch, "link-order-cycle")?);
+            return self.reject(owned, splits, batch, "link-order-cycle");
         }
 
         staged.place_new_units(&new_names)?;
@@ -490,7 +490,7 @@ impl Trials {
         let tested = match ctx.trial_build() {
             Ok(report) => report,
             Err(error) if is_trial_failure(&error) => {
-                return Ok(self.reject(owned, splits, batch, "build-conflict")?);
+                return self.reject(owned, splits, batch, "build-conflict");
             }
             Err(error) => return Err(error),
         };
@@ -511,7 +511,7 @@ impl Trials {
             return Ok(if keep.is_empty() { Retry::Done } else { Retry::Split(vec![keep]) });
         }
         if regresses(&self.report, &tested) {
-            return Ok(self.reject(owned, splits, batch, "regresses-existing-code")?);
+            return self.reject(owned, splits, batch, "regresses-existing-code");
         }
 
         for candidate in batch {

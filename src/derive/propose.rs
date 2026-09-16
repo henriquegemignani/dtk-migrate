@@ -175,6 +175,20 @@ impl Default for Limits {
     }
 }
 
+/// A pairing of one list's position with another's.
+pub type Pair = (usize, usize);
+
+/// An alignment: every pairing, and the subset that matched by name.
+pub type Alignment = (Vec<Pair>, BTreeSet<Pair>);
+
+/// One candidate for an undecided target: where its source sits, and what the
+/// body comparison thought of it.
+type Candidate = (usize, (String, f32));
+
+/// A target the scores could not settle: its name, its field of candidates, and
+/// where each of those candidates sits.
+type Undecided = (String, Ranked, Vec<Candidate>);
+
 /// Index pairs of a longest common subsequence of two key lists.
 fn common_subsequence(left: &[String], right: &[String]) -> Vec<(usize, usize)> {
     let (rows, columns) = (left.len(), right.len());
@@ -211,7 +225,7 @@ fn common_subsequence(left: &[String], right: &[String]) -> Vec<(usize, usize)> 
 /// sides differ in length is left unpaired: that is where the target version
 /// genuinely restructured the code, and guessing across it is how a rename pass
 /// starts inventing names.
-pub fn align(left: &[String], right: &[String]) -> (Vec<(usize, usize)>, BTreeSet<(usize, usize)>) {
+pub fn align(left: &[String], right: &[String]) -> Alignment {
     // A placeholder must never anchor: it is unnamed on purpose, and two
     // unrelated `fn_` names comparing unequal is not the point — the point is
     // that it carries no evidence. Unique sentinels keep them out of the
@@ -404,7 +418,7 @@ pub fn by_body(
         .collect();
 
     let mut proposals: Vec<Proposal> = Vec::new();
-    let mut undecided: Vec<(usize, (String, Ranked, Vec<(usize, (String, f32))>))> = Vec::new();
+    let mut undecided: Vec<(usize, Undecided)> = Vec::new();
     for (old, best) in &ranked {
         match decide(best, limits) {
             Some((signal, tier)) => {
@@ -412,7 +426,7 @@ pub fn by_body(
                 proposals.push(body_entry(unit, old, &best.name, signal, tier, best));
             }
             None => {
-                let candidates: Vec<(usize, (String, f32))> = best
+                let candidates: Vec<Candidate> = best
                     .order
                     .iter()
                     .filter(|(_, percent)| *percent >= limits.order_percent)
@@ -434,9 +448,9 @@ pub fn by_body(
         proposal.off_spine = Some(!on_spine.contains(&pair));
     }
 
-    let pending: Vec<(usize, Vec<(usize, (String, f32))>)> =
+    let pending: Vec<(usize, Vec<Candidate>)> =
         undecided.iter().map(|(position, payload)| (*position, payload.2.clone())).collect();
-    let carried: BTreeMap<usize, &(String, Ranked, Vec<(usize, (String, f32))>)> =
+    let carried: BTreeMap<usize, &Undecided> =
         undecided.iter().map(|(position, payload)| (*position, payload)).collect();
     for (position, _, (name, percent)) in ordering::rescue(&pending, &backbone) {
         let (old, best, _) = carried[&position];

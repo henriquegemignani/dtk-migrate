@@ -140,6 +140,7 @@ pub fn skip_space(text: &str, mask: &Mask, from: usize) -> Option<usize> {
 }
 
 /// Given the offset of an opening delimiter, the offset of its match.
+#[allow(clippy::needless_range_loop)] // the absolute offset is the result
 pub fn matching_delimiter(text: &str, mask: &Mask, open: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut depth = 0usize;
@@ -165,6 +166,7 @@ pub fn matching_delimiter(text: &str, mask: &Mask, open: usize) -> Option<usize>
 /// argument ranges, each trimmed of surrounding whitespace and comments.
 ///
 /// A trailing comma produces no empty final argument, matching Python.
+#[allow(clippy::needless_range_loop)] // the absolute offsets are the result
 pub fn split_arguments(text: &str, mask: &Mask, open: usize, close: usize) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
     let mut arguments = Vec::new();

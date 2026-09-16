@@ -1,106 +1,85 @@
 # Metroid Prime: NTSC 0-00 → PAL
 
-The source `GM8E01_00` is partially matched (over 60% at the start of this task),
-not fully matched. The target is `GM8P01_00`. The goal is at least 15% PAL matched
-code obtained through scripts, with manual investigation used only to improve the
-automated process.
+The source `GM8E01_00` is partly matched, not fully matched. The target is
+`GM8P01_00`. The goal is matched PAL code obtained through the tool, with manual
+investigation used only to improve the automated process.
 
 ## Local paths
 
-- Script repository: `C:/Users/henri/programming/decomp/dtk-version-matching`
+This checkout expects the game project and a decomp-toolkit checkout beside it:
+
+- Tool: `C:/Users/henri/programming/decomp/dtk-version-matching`
 - Game project: `C:/Users/henri/programming/decomp/prime`
-- DTK checkout: `C:/Users/henri/programming/decomp-toolkit`
+- decomp-toolkit: `C:/Users/henri/programming/decomp-toolkit`
 
-DTK is not a sibling under `decomp/` in this setup. Adjust these paths elsewhere.
+decomp-toolkit is **not** a sibling under `decomp/` here, which the
+`.cargo/config.toml` path override has to account for. Adjust these elsewhere.
 
-Build development DTK from its checkout when testing a change:
-
-```powershell
-cargo build --release --bin dtk
-cargo test --release
-```
-
-Use the executable directly through `--dtk`, which is forwarded to the game's
-configure script. Copying it into `build/tools/dtk.exe` is unnecessary and risks
-having Ninja replace it with a downloaded release.
-
-## Automated migration
-
-From the tooling checkout:
+## Migrating
 
 ```powershell
-uv run src/parallel_migration.py --project-root ../prime --source GM8E01_00 --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe --stage all --workers 3 --build-jobs 4
-uv run src/discover_splits.py --project-root ../prime --source GM8E01_00 --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
-uv run src/verify_source_units.py --project-root ../prime --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
+cargo install --path .
+dtk-migrate run --project-root ../prime --source GM8E01_00 --target GM8P01_00 --stages all
 ```
 
-For a bounded discovery run add `--limit 100`. `--batch-size 40` sets initial
-group size; failures are bisected. The old recommendation to keep `--limit` near
-25 concerned the historical loop, whose companion expansion could exceed the
-limit and whose cycle heuristic discarded many proposals.
+For a bounded first pass add `--limit 100`. Keep the default `--batch-size 40`
+for full runs: failures are bisected, so a large batch costs less when it passes
+and more when it does not. `--batch-size 1` is for narrow diagnostics and was
+responsible for hundreds of avoidable full-link cycles in one measured run.
 
-Keep the default grouped batch size for full runs. `--batch-size 1` is intended
-for narrow diagnostics and was responsible for hundreds of avoidable full-link
-cycles in the 2026-09-10 `_48` migration. Candidate builds have a 120-second
-default timeout; change it with `--build-timeout SECONDS` when measured incremental
-builds need a different bound.
-
-The first command runs coverage, discovery, and verification in isolated workers;
-the latter two are serial
-alternatives using the same validation adapters. See [parallel execution](parallel.md).
-Do not run these commands concurrently in one checkout. Generated reports must
-describe the final accepted splits, not an intermediate trial.
+Do not run a migration and an unrelated build in the same checkout at once. The
+project lock stops two migrations, but not a build someone starts by hand.
 
 ## Measuring progress
 
 Read `build/GM8P01_00/report.json`:
 
-- `measures.matched_code_percent`: objdiff matches across the configured report,
-  including the unported NES REL in the denominator.
-- Category `dol` → `measures.matched_code_percent`: main DOL only.
-- `complete_code_percent`: bytes configured to link from source, not a separate
-  byte-equality test.
+- `measures.matched_code_percent` — comparison matches across the configured
+  report, including the unported NES REL in the denominator
+- category `dol` → `measures.matched_code_percent` — the main executable only
+- `complete_code_percent` — bytes configured to link from source, which is a
+  build setting rather than a byte comparison
 
 The initial report on 2026-09-09 showed 256,284 / 3,908,836 code bytes matched
-(6.5565% overall; 6.6154% DOL-only), and 111,176 bytes configured to link from source
-(2.8442% overall). A fresh baseline retail build passed. Split presence was much
-higher than either percentage, illustrating why unit counts cannot measure this
-goal. Final measurements and caveats are recorded in [the audit](validation_audit.md).
+(6.5565% overall, 6.6154% for the DOL alone), and 111,176 bytes configured to
+link from source (2.8442%). A fresh baseline retail build passed. Split presence
+was much higher than either percentage, which is why unit counts cannot measure
+this goal. Final measurements and caveats are in
+[the audit](history/validation_audit.md).
 
 ## Calibration
 
-`GM8E01_02`, the final NTSC-U release, combines aspects of `GM8E01_00` and PAL and
-is useful for calibration. A read-only check, without transferring anything to it:
+`GM8E01_02`, the final NTSC-U release, combines aspects of `GM8E01_00` and PAL,
+which makes it a useful calibration target. A read-only accuracy check, with the
+target's names hidden while matching and scored against them afterwards:
 
 ```powershell
-C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe match config/GM8E01_00/config.yml config/GM8E01_02/config.yml --validate -o build/ntsc02-calibration.json
+dtk-migrate match config/GM8E01_00/config.yml config/GM8E01_02/config.yml --validate -o ntsc02.json
 ```
 
-Hidden-name validation measures name agreement on named target functions. It is
-neither a compiler comparison nor a retail hash check. PAL remains the primary
-target; do not spend the migration effort optimizing `_02` instead.
+That measures name agreement on already-named target functions. It is neither a
+compiler comparison nor a retail hash check.
 
-The partial-coverage policy has a separate ownership calibration:
+The coverage policy has its own calibration:
 
 ```powershell
-uv run src/calibrate_coverage.py --project-root F:/programming/decomp/prime --source GM8E01_00 --target GM8P01_00 --dtk C:/Users/henri/programming/decomp-toolkit/target/release/dtk.exe
+dtk-migrate calibrate --project-root ../prime --source GM8E01_00 --target GM8P01_00
 ```
 
-Use `GM8P01_00` as the target when calibrating layout-shift evidence against PAL.
-The command masks target names and split ownership during proposal generation,
-partitions TUs deterministically, and checks every proposed anchor and complete
-range against a separately generated ownership oracle. Unowned portions of partial
-splits are reported as unknown instead of being counted as errors. It does not
-publish configuration. After applying coverage changes, pass `--oracle-splits`
-with the saved pre-change split file so calibration cannot score its own output as
-an oracle label.
+Use `GM8P01_00` when calibrating layout-shift evidence against PAL. After
+applying coverage changes, pass `--oracle-splits` with the saved pre-change
+splits file, so calibration cannot score its own output.
 
-## Existing legacy state
+PAL remains the primary target; do not spend the migration effort optimising
+`_02` instead.
 
-The old skip file `build/GM8P01_00/split_confidence_skip.txt` does not constrain the
-new discovery script. Do not interpret its entries as proof of wrong source code.
-Existing PAL splits and names predate this task; the new results measure additions
-to that baseline, not a clean-room migration from an empty target configuration.
+## Existing state
+
+Existing PAL splits and names predate this work. The results measure additions to
+that baseline, not a clean-room migration from an empty target configuration.
+
+The old skip file `build/GM8P01_00/split_confidence_skip.txt`, if it is still
+around, constrains nothing and is not proof that any unit cannot be migrated.
 
 Match source-unit path casing exactly, including `runtime/` and `dolphin/`.
 Windows accepting inconsistent casing does not establish Linux compatibility.

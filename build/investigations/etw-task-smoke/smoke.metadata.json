@@ -1,9 +1,0 @@
-﻿{
-    "profile":  "GeneralProfile",
-    "started_utc":  "2026-09-10T15:18:23.7573245Z",
-    "stopped_utc":  "2026-09-10T15:19:26.5589109Z",
-    "etl_path":  "C:\\Users\\henri\\programming\\decomp\\dtk-version-matching\\build\\investigations\\etw-task-smoke\\smoke.etl",
-    "etl_bytes":  913309696,
-    "stop_task_last_run_utc":  "2026-09-10T15:18:33.0000000Z",
-    "stop_task_result":  0
-}

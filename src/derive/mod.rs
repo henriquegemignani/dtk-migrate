@@ -312,12 +312,16 @@ pub fn unit_objects(
     Ok(units)
 }
 
+/// What one unit contributed: its proposals, whatever stopped it, its identity,
+/// and the names its source defines.
+type UnitResult = (Vec<Proposal>, Option<Failure>, String, BTreeSet<String>);
+
 /// Everything one unit's object pair implies.
 fn one_unit(
     entry: &(String, PathBuf, PathBuf),
     limits: &Limits,
     reference: Option<&BTreeMap<String, u64>>,
-) -> (Vec<Proposal>, Option<Failure>, String, BTreeSet<String>) {
+) -> UnitResult {
     let (unit, source_path, target_path) = entry;
     let read = || -> Result<(Compiled, Compiled)> {
         Ok((
@@ -415,7 +419,7 @@ pub fn derive(request: &Request) -> Result<Report> {
 
     // Each unit is independent, and the work is arithmetic over two small
     // objects, so this parallelises cleanly.
-    let results: Vec<(Vec<Proposal>, Option<Failure>, String, BTreeSet<String>)> = units
+    let results: Vec<UnitResult> = units
         .par_iter()
         .map(|entry| one_unit(entry, &request.limits, reference.as_ref()))
         .collect();

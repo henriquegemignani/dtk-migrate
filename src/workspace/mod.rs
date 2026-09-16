@@ -207,9 +207,7 @@ pub fn copy_snapshot(source: &Path, destination: &Path, manifest: &Manifest) -> 
     let destination = std::path::absolute(destination)?;
     check_ancestors(&source)?;
     check_ancestors(&destination)?;
-    if destination == source
-        || destination.strip_prefix(&source).is_ok_and(|relative| included(relative))
-    {
+    if destination == source || destination.strip_prefix(&source).is_ok_and(included) {
         bail!("Snapshot destination must be outside source inputs");
     }
 

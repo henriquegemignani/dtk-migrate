@@ -1,5 +1,10 @@
 # PAL migration validation audit — 2026-09-09
 
+> **Archived.** This records work done by the Python tool that `dtk-migrate`
+> replaced, and every file and command it names belongs to that tool. It is kept
+> because the reasoning still applies and the corrections it records are the
+> reason the current gates are shaped the way they are.
+
 ## Follow-up: source-link declarations
 
 `verify_source_units.py` now updates ordinary `MatchingFor(...)` calls directly,

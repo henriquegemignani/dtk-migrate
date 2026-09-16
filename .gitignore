@@ -6,7 +6,3 @@
 .vscode/
 *.swp
 .DS_Store
-
-# While legacy/ still holds the Python tool being ported.
-__pycache__/
-*.pyc

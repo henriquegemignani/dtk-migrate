@@ -1,13 +1,16 @@
 # Deriving symbol names from compiled objects
 
-`src/derive_symbol_names.py` names target-version symbols by comparing each
-unit's compiled source object (`build/<target>/src/...`) against the object
-extracted from the target binary (`build/<target>/obj/...`). Both already exist
-after a normal build.
+`dtk-migrate derive` names target-version symbols by comparing each unit's
+compiled source object (`build/<target>/src/...`) against the object extracted
+from the target binary (`build/<target>/obj/...`). Both already exist after a
+normal build, so this costs seconds and no compilation of its own.
 
-## Why this is a different signal from `dtk match`
+The same code runs as the pipeline's first stage, where the names it proposes
+also have to survive a build; see [coverage](coverage.md).
 
-`dtk match` compares two versions of the same binary, so its evidence is
+## Why this is a different signal from `match`
+
+`dtk-migrate match` compares two versions of the same binary, so its evidence is
 whatever survived between them. Here the source object states what a unit is
 *supposed* to contain, which confines every comparison to one translation unit
 and lets names the build already agrees on act as anchors.
@@ -17,24 +20,27 @@ and lets names the build already agrees on act as anchors.
 ### `body-match`
 
 The strongest, and the only one that observes the function itself rather than
-its surroundings. It needs `--objdiff`.
+its surroundings.
 
 objdiff pairs symbols **by name**, so a proposal that `fn_8030DA80` is some
 source function is invisible to it -- the two sides have different names and
-never get paired. Every placeholder function in the report therefore carries no
-`fuzzy_match_percent` at all. This is a property of the data, not an oversight:
-the measurement does not exist until the rename has been made.
+never get paired. Every placeholder function in an ordinary comparison therefore
+carries no match percent at all. This is a property of the question, not an
+oversight: the measurement does not exist until the rename has been made.
 
-The inputs are ours, though. Renaming both sides to one short token in a
-temporary copy makes the pair scorable. dtk's placeholder names (`fn_XXXXXXXX`,
-11 characters) are shorter than mangled source names, so the token is written
-straight into `.strtab` in place; no string table moves, nothing is rebuilt, and
-the project's own files are never opened for writing.
+objdiff will, however, accept an explicit mapping. Telling it "compare this
+placeholder against that source function" makes the pair scorable without
+renaming anything, without rebuilding, and without writing to the project.
 
-One objdiff run reports a match percent for **every** symbol in the object, so a
-whole permutation of pairings costs a single invocation. Packing candidate
-pairings into permutations covers the full cross product in about as many runs
-as one target has candidates, rather than one run per pairing.
+> An earlier version of this tool shelled out to `objdiff-cli`, which has no way
+> to state a mapping, and worked around it by rewriting both objects' string
+> tables to a shared five-character token in a temporary copy. Comparing in
+> process removes the copy, the patching, and the separate binary to locate.
+
+One comparison reports a match percent for **every** symbol in the object, so a
+whole permutation of pairings costs a single diff. Packing candidate pairings
+into permutations covers the full cross product in about as many comparisons as
+one target has candidates, rather than one per pairing.
 
 **An absolute threshold does not work.** Match percent measures body similarity,
 which conflates "wrong pairing" with "right pairing, but PAL differs and the
@@ -112,7 +118,7 @@ different and more damaging failure: a wrong name is the answer to the question
 the other methods are asking, so it silently blocks the correct rename and the
 report says only `name already taken`.
 
-`dtk match` places names by propagating them between versions, so the way this
+`dtk-migrate match` places names by propagating them between versions, so the way this
 goes wrong is a **shift** -- two adjacent functions, the first carrying the
 second's name. `CFishCloud` is the worked example:
 
