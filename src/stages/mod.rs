@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub mod coverage;
+pub mod derive;
 pub mod discover;
 pub mod verify;
 

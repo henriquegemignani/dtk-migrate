@@ -25,6 +25,12 @@ enum Command {
     Run(cli::run::Args),
     /// Match functions between two versions of the same executable.
     Match(cli::match_cmd::Args),
+    /// Name target symbols by comparing a unit's two compiled objects.
+    Derive(cli::derive::Args),
+    /// Report what the existing splits already get wrong.
+    Audit(cli::audit::Args),
+    /// Score the coverage policy against a version that already has the answers.
+    Calibrate(cli::calibrate::Args),
     /// Work with a version's symbols file.
     Symbols(cli::symbols::Args),
     /// Work with a version's splits file.
@@ -56,6 +62,9 @@ fn main() {
     let result = match args.command {
         Command::Run(c_args) => cli::run::run(c_args),
         Command::Match(c_args) => cli::match_cmd::run(c_args),
+        Command::Derive(c_args) => cli::derive::run(c_args),
+        Command::Audit(c_args) => cli::audit::run(c_args),
+        Command::Calibrate(c_args) => cli::calibrate::run(c_args),
         Command::Symbols(c_args) => cli::symbols::run(c_args),
         Command::Splits(c_args) => cli::splits::run(c_args),
         Command::ConfigureHook(c_args) => cli::configure_hook::run(c_args),

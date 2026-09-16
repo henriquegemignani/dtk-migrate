@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     build::{context::BuildContext, process::Cancel},
     stages::{
-        Candidate, Event, Selections, Stage, coverage::Coverage, discover::Discover, verify::Verify,
+        Candidate, Event, Selections, Stage, coverage::Coverage, derive::Derive,
+        discover::Discover, verify::Verify,
     },
     workspace::{Manifest, Snapshot, fingerprint},
 };
@@ -55,7 +56,7 @@ pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
         "coverage" => Box::new(Coverage),
         "discover" => Box::new(Discover),
         "verify" => Box::new(Verify),
-        "derive" => bail!("The {name} stage is not implemented yet"),
+        "derive" => Box::new(Derive),
         other => bail!("Unknown stage: {other}"),
     })
 }

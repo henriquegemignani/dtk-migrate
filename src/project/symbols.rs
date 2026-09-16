@@ -59,6 +59,18 @@ impl Renames {
         Ok(())
     }
 
+    /// Builds a set from pairs already decided in memory.
+    ///
+    /// Used by symbol derivation, which produces its renames rather than
+    /// reading them back from a file it just wrote.
+    pub fn from_pairs<'a>(pairs: impl IntoIterator<Item = (&'a String, &'a String)>) -> Self {
+        let mut renames = Self::default();
+        for (from, to) in pairs {
+            renames.entries.insert(from.clone(), RenameTarget { name: to.clone(), local: false });
+        }
+        renames
+    }
+
     /// Parses `target = source` pairs, one per line, as written by `dtk
     /// match`. Anything from a `#` onward is a comment. A source name may be
     /// followed by the bare word `local` to carry `scope:local` onto the

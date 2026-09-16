@@ -22,6 +22,7 @@ decomp-toolkit = { git = "https://github.com/henriquegemignani/decomp-toolkit", 
 fs4 = "0.13"
 indexmap = { version = "2.6", features = ["serde"] }
 itertools = "0.13"
+objdiff-core = { version = "3.8", default-features = false, features = ["ppc", "serde", "std"] }
 ppc750cl = "0.3"
 rayon = "1.10"
 regex = "1.11"
