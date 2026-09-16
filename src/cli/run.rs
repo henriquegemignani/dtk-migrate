@@ -59,6 +59,8 @@ pub struct Args {
     /// The decomp-toolkit binary. Defaults to the project's own.
     #[arg(long)]
     pub dtk: Option<PathBuf>,
+    /// The Ninja binary. Defaults to the first on PATH, resolved through a
+    /// package manager's launcher if it finds one.
     #[arg(long)]
     pub ninja: Option<PathBuf>,
     /// The interpreter that runs the project's `configure.py`.

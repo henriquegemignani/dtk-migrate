@@ -431,7 +431,6 @@ dependencies = [
 [[package]]
 name = "decomp-toolkit"
 version = "1.8.4"
-source = "git+https://github.com/henriquegemignani/decomp-toolkit?branch=feature%2Flibrary-exposure#f539fea96daf281ca4a3c45319f6258e87f74962"
 dependencies = [
  "aes",
  "anyhow",
