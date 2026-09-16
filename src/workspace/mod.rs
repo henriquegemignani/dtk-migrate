@@ -201,6 +201,38 @@ pub fn preflight_space(parent: &Path, source_bytes: u64, copies: u64) -> Result<
     Ok(())
 }
 
+/// The longest path most Windows programs can open.
+///
+/// Long-path support has to be opted into per process, and the compilers a
+/// decomp project uses are old enough that they have not.
+const MAX_PATH: usize = 260;
+
+/// Refuses to start when a workspace would put files past what the toolchain can
+/// open.
+///
+/// A private workspace sits several directories below the project, which adds
+/// fifty-odd characters to every path in it. CodeWarrior does not report a path
+/// it cannot open: it reports the file that included it as a syntax error, on
+/// the line after the include. That is a very long way from the cause, so it is
+/// worth refusing up front and saying so.
+pub fn preflight_path_length(destination: &Path, manifest: &Manifest) -> Result<()> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let base = destination.to_string_lossy().chars().count();
+    let longest = manifest.keys().max_by_key(|name| name.chars().count());
+    let Some(longest) = longest else { return Ok(()) };
+    let total = base + 1 + longest.chars().count();
+    if total > MAX_PATH {
+        bail!(
+            "A workspace under {} would put files {total} characters deep, past the {MAX_PATH} \
+             the compilers can open (worst: {longest}). Move the project somewhere shorter.",
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
 /// Copies every manifest entry into a fresh directory, verifying as it goes.
 pub fn copy_snapshot(source: &Path, destination: &Path, manifest: &Manifest) -> Result<()> {
     let source = std::path::absolute(source)?;
@@ -210,6 +242,7 @@ pub fn copy_snapshot(source: &Path, destination: &Path, manifest: &Manifest) -> 
     if destination == source || destination.strip_prefix(&source).is_ok_and(included) {
         bail!("Snapshot destination must be outside source inputs");
     }
+    preflight_path_length(&destination, manifest)?;
 
     let mut total = 0u64;
     let mut sources = Vec::with_capacity(manifest.len());
@@ -459,6 +492,23 @@ mod tests {
             assert!(safe_path(dir.path(), bad).is_err(), "{bad} should be refused");
         }
         assert!(safe_path(dir.path(), "config/PAL/splits.txt").is_ok());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_workspace_too_deep_for_the_toolchain_is_refused() {
+        let manifest = Manifest::from([("a/".to_string() + &"b".repeat(250), "x".to_string())]);
+        let error = preflight_path_length(Path::new("C:/deep/enough/already"), &manifest)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("past the 260"), "{error}");
+        assert!(error.contains("Move the project"), "{error}");
+    }
+
+    #[test]
+    fn a_workspace_that_fits_is_allowed() {
+        let manifest = Manifest::from([("config/PAL/splits.txt".to_string(), "x".to_string())]);
+        assert!(preflight_path_length(Path::new("C:/prime/build/run/baseline"), &manifest).is_ok());
     }
 
     #[test]

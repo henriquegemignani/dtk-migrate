@@ -39,11 +39,11 @@ pub fn patch_build_ninja(text: &str, jobs: usize, hook: &str) -> Result<String> 
     let mut patched_split = false;
     let mut patched_configure = false;
 
-    for line in text.split_inclusive('\n') {
-        let body = line.strip_suffix('\n').unwrap_or(line);
+    for (logical, original) in fold_continuations(text) {
+        let body = logical.strip_suffix('\n').unwrap_or(&logical);
         if let Some(name) = body.strip_prefix("rule ") {
             rule = Some(name.trim().to_string());
-            out.push(line.to_string());
+            out.push(original);
             continue;
         }
         // Any line that is not indented ends the rule block.
@@ -51,46 +51,39 @@ pub fn patch_build_ninja(text: &str, jobs: usize, hook: &str) -> Result<String> 
             rule = None;
         }
         let Some(command) = body.strip_prefix("  command = ") else {
-            out.push(line.to_string());
+            out.push(original);
             continue;
         };
-        let newline = if line.ends_with('\n') { "\n" } else { "" };
         match rule.as_deref() {
             Some("split") => {
                 if command.contains("--no-update") {
                     patched_split = true;
-                    out.push(line.to_string());
+                    out.push(original);
                     continue;
-                }
-                if command.ends_with('$') {
-                    bail!("The split rule's command spans lines; refusing to edit it");
                 }
                 let Some(index) = command.find(SPLIT_MARKER) else {
                     bail!("Unsupported dtk-template split rule: {command}");
                 };
                 let (before, after) = command.split_at(index + SPLIT_MARKER.len());
-                out.push(format!("  command = {before}--no-update -j {jobs} {after}{newline}"));
+                out.push(format!("  command = {before}--no-update -j {jobs} {after}\n"));
                 patched_split = true;
             }
             Some("configure") => {
                 if command.starts_with(&escape(hook)) {
                     patched_configure = true;
-                    out.push(line.to_string());
+                    out.push(original);
                     continue;
-                }
-                if command.ends_with('$') {
-                    bail!("The configure rule's command spans lines; refusing to edit it");
                 }
                 if !command.contains("$python") || !command.contains("$configure_args") {
                     bail!("Unsupported dtk-template configure rule: {command}");
                 }
                 out.push(format!(
-                    "  command = {} configure-hook --jobs {jobs} -- {command}{newline}",
+                    "  command = {} configure-hook --jobs {jobs} -- {command}\n",
                     escape(hook)
                 ));
                 patched_configure = true;
             }
-            _ => out.push(line.to_string()),
+            _ => out.push(original),
         }
     }
 
@@ -101,6 +94,52 @@ pub fn patch_build_ninja(text: &str, jobs: usize, hook: &str) -> Result<String> 
         bail!("No configure rule found in build.ninja");
     }
     Ok(out.concat())
+}
+
+/// Joins Ninja's `$`-continued lines, keeping the original text alongside.
+///
+/// dtk-template's writer wraps anything past 78 columns, and a run's frozen dtk
+/// sits under a long path, so the split rule's command arrives in three pieces.
+/// Matching against a fragment finds nothing.
+///
+/// Each entry is `(logical line, original text)`. A line this function does not
+/// change is emitted from its original text, so the file only differs where it
+/// was deliberately patched.
+fn fold_continuations(text: &str) -> Vec<(String, String)> {
+    let mut folded: Vec<(String, String)> = Vec::new();
+    let mut logical = String::new();
+    let mut original = String::new();
+    for line in text.split_inclusive('\n') {
+        original.push_str(line);
+        let body = line.strip_suffix('\n').unwrap_or(line).trim_end_matches('\r');
+        // A trailing `$` continues the line; `$$` is an escaped dollar, so only
+        // an odd number of them counts.
+        let dollars = body.len() - body.trim_end_matches('$').len();
+        if dollars % 2 == 1 {
+            // The writer splits at a space and re-indents the continuation, so
+            // one space rejoins them.
+            let part = body[..body.len() - 1].trim_end();
+            if logical.is_empty() {
+                logical.push_str(part);
+            } else {
+                logical.push(' ');
+                logical.push_str(part.trim_start());
+            }
+            continue;
+        }
+        if logical.is_empty() {
+            logical.push_str(body);
+        } else {
+            logical.push(' ');
+            logical.push_str(body.trim_start());
+        }
+        logical.push('\n');
+        folded.push((std::mem::take(&mut logical), std::mem::take(&mut original)));
+    }
+    if !original.is_empty() {
+        folded.push((logical, original));
+    }
+    folded
 }
 
 /// Quotes a path for a Ninja command line.
@@ -211,11 +250,44 @@ mod tests {
     }
 
     #[test]
-    fn a_continued_command_line_is_refused_rather_than_mangled() {
+    fn a_wrapped_command_is_joined_and_patched() {
+        // dtk-template wraps past 78 columns, and a run's frozen dtk sits under
+        // a long path, so this is the shape the real file arrives in.
         let text = NINJA.replace(
-            "command = build\\tools\\dtk.exe dol split $in $out_dir\n",
-            "command = build\\tools\\dtk.exe dol split $\n    $in $out_dir\n",
+            "  command = build\\tools\\dtk.exe dol split $in $out_dir\n",
+            "  command = $\n      C:\\very\\long\\path\\dtk.exe $\n      dol split $in $out_dir\n",
         );
-        assert!(patch_build_ninja(&text, 4, "x").unwrap_err().to_string().contains("spans lines"));
+        let out = patch_build_ninja(&text, 4, "dtk-migrate.exe").unwrap();
+        assert!(
+            out.contains(
+                "  command = C:\\very\\long\\path\\dtk.exe dol split --no-update -j 4 $in $out_dir\n"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_line_this_does_not_patch_is_left_exactly_as_it_was() {
+        let wrapped = "build a b: link $\n    one $\n    two\n";
+        let text = format!("{NINJA}{wrapped}");
+        let out = patch_build_ninja(&text, 4, "x").unwrap();
+        assert!(out.ends_with(wrapped), "{out}");
+    }
+
+    #[test]
+    fn an_escaped_dollar_at_the_end_is_not_a_continuation() {
+        let text = format!("{NINJA}value = costs $$\nnext = 1\n");
+        let out = patch_build_ninja(&text, 4, "x").unwrap();
+        assert!(out.contains("value = costs $$\nnext = 1\n"), "{out}");
+    }
+
+    #[test]
+    fn patching_a_wrapped_file_twice_changes_nothing_the_second_time() {
+        let text = NINJA.replace(
+            "  command = build\\tools\\dtk.exe dol split $in $out_dir\n",
+            "  command = $\n      C:\\very\\long\\path\\dtk.exe $\n      dol split $in $out_dir\n",
+        );
+        let once = patch_build_ninja(&text, 4, "dtk-migrate.exe").unwrap();
+        assert_eq!(once, patch_build_ninja(&once, 4, "dtk-migrate.exe").unwrap());
     }
 }
