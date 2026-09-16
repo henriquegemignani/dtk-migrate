@@ -95,3 +95,6 @@ To build against a local checkout instead of fetching it, add a
 [patch."https://github.com/henriquegemignani/decomp-toolkit"]
 decomp-toolkit = { path = "../../decomp-toolkit" }
 ```
+
+That override makes cargo rewrite one line of `Cargo.lock`, dropping the pinned
+git revision. Do not commit that line.
