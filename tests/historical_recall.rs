@@ -41,6 +41,21 @@ use dtk_migrate::{
     },
     project::splits::Splits,
 };
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+#[derive(Deserialize)]
+struct Provenance {
+    baseline_revision: String,
+    baseline_splits_sha256: String,
+    baseline_expected_retail_sha1: String,
+    baseline_verified_dol_sha1: Option<String>,
+    oracle_revision: String,
+    oracle_splits_sha256: String,
+    oracle_expected_retail_sha1: String,
+    oracle_verified_dol_sha1: Option<String>,
+    run_published_dol_sha1: String,
+}
 
 fn fixture(name: &str) -> String {
     let path =
@@ -50,12 +65,25 @@ fn fixture(name: &str) -> String {
 
 fn manifest() -> Manifest {
     let linkage: Linkage = serde_json::from_str(&fixture("linkage.json")).unwrap();
+    let provenance: Provenance = serde_json::from_str(&fixture("provenance.json")).unwrap();
     build_manifest(
         "GM8E01_00",
         "GM8P01_00",
-        Revision { id: "b65ad2a6".into(), splits_sha256: String::new(), configure_sha256: None },
+        Revision {
+            id: provenance.baseline_revision,
+            splits_sha256: provenance.baseline_splits_sha256,
+            configure_sha256: None,
+            expected_retail_sha1: provenance.baseline_expected_retail_sha1,
+            verified_dol_sha1: provenance.baseline_verified_dol_sha1,
+        },
         &fixture("baseline.splits.txt"),
-        Revision { id: "ca286f45".into(), splits_sha256: String::new(), configure_sha256: None },
+        Revision {
+            id: provenance.oracle_revision,
+            splits_sha256: provenance.oracle_splits_sha256,
+            configure_sha256: None,
+            expected_retail_sha1: provenance.oracle_expected_retail_sha1,
+            verified_dol_sha1: provenance.oracle_verified_dol_sha1,
+        },
         &fixture("oracle.splits.txt"),
         &linkage,
     )
@@ -67,6 +95,7 @@ fn manifest() -> Manifest {
 /// fields that need it — proposal recall, per-stage application — are exercised
 /// by unit tests and by the opt-in run below.
 fn run_facts() -> RunFacts {
+    let provenance: Provenance = serde_json::from_str(&fixture("provenance.json")).unwrap();
     RunFacts::from_splits(
         fixture("run-id.txt").trim(),
         "GM8E01_00",
@@ -74,6 +103,8 @@ fn run_facts() -> RunFacts {
         Splits::parse(&fixture("baseline.splits.txt")).unwrap().blocks,
         Splits::parse(&fixture("published.splits.txt")).unwrap().blocks,
     )
+    .with_baseline_splits_sha256(provenance.baseline_splits_sha256)
+    .with_published_dol_sha1(provenance.run_published_dol_sha1)
 }
 
 fn scored() -> Score { score(&manifest(), &run_facts()) }
@@ -99,6 +130,7 @@ fn the_recall_set_is_the_thirty_five_units_the_later_work_proved() {
 fn the_run_started_where_the_fixture_says_it_did() {
     let result = scored();
     assert!(result.baseline_agrees, "the fixture's baseline is not the one the run was given");
+    assert_eq!(result.published_retail_agrees, Some(true));
     assert_eq!(result.target, "GM8P01_00");
 }
 
@@ -367,6 +399,11 @@ fn the_saved_run_agrees_with_the_fixture_distilled_from_it() {
     let reduced = scored();
 
     assert!(full.baseline_agrees);
+    assert_eq!(full.published_retail_agrees, Some(true));
+    assert!(
+        !full.proposal_history_complete,
+        "the schema-1 run cannot reconstruct coordinator-only rediscovery rounds"
+    );
     for key in ["recall-changed/full", "recall-changed-code/code", "control/full"] {
         let (a, b) = (&full.populations[key], &reduced.populations[key]);
         assert_eq!((a.units, a.exact, a.partial, a.wrong), (b.units, b.exact, b.partial, b.wrong));
@@ -420,6 +457,15 @@ fn the_saved_run_agrees_with_the_fixture_distilled_from_it() {
 /// Kept honest: the fixture is the primary files, not this scorer's own output.
 #[test]
 fn the_fixture_is_readable_project_data_rather_than_a_saved_verdict() {
+    let provenance: Provenance = serde_json::from_str(&fixture("provenance.json")).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fixture("baseline.splits.txt").as_bytes())),
+        provenance.baseline_splits_sha256
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fixture("oracle.splits.txt").as_bytes())),
+        provenance.oracle_splits_sha256
+    );
     let baseline = Splits::parse(&fixture("baseline.splits.txt")).unwrap();
     let oracle = Splits::parse(&fixture("oracle.splits.txt")).unwrap();
     let published = Splits::parse(&fixture("published.splits.txt")).unwrap();

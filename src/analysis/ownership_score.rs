@@ -303,6 +303,42 @@ pub enum Verification {
     Verified,
 }
 
+/// How the body selected by a stage compares with the oracle, independently
+/// of whether it was later published or superseded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SelectionQuality {
+    /// No ownership-producing selection was recorded.
+    NoChange,
+    Exact,
+    Partial,
+    Incorrect,
+    /// The selected body lands only in ground the oracle does not assign.
+    Unknown,
+}
+
+/// Classifies one complete replacement body selected for `unit`.
+pub fn selection_quality(
+    unit: &str,
+    oracle: &Oracle,
+    selected: Option<&Body>,
+    scope: Scope,
+) -> SelectionQuality {
+    let Some(selected) = selected else { return SelectionQuality::NoChange };
+    let selected = selected.within(scope);
+    let truth = oracle.body(unit).within(scope);
+    let measured = ledger(unit, oracle, &Body::default(), &selected, scope);
+    if selected.same_ownership(&truth) {
+        SelectionQuality::Exact
+    } else if measured.newly_wrong_bytes > 0 {
+        SelectionQuality::Incorrect
+    } else if measured.attributed_bytes > 0 {
+        SelectionQuality::Partial
+    } else {
+        SelectionQuality::Unknown
+    }
+}
+
 /// What a change did to one unit's ownership, in bytes, against the oracle.
 ///
 /// Every field is an interval measurement, so a body that trades ground reports
@@ -788,5 +824,50 @@ mod tests {
         let found = ledger("a.cpp", &oracle, &held, &held, Scope::Code);
         assert_eq!(outcome(&found, &oracle.body("a.cpp"), &held, false), Outcome::Abstained);
         assert_eq!(outcome(&found, &oracle.body("a.cpp"), &held, true), Outcome::Exact);
+    }
+
+    #[test]
+    fn selected_body_quality_is_independent_of_publication() {
+        let oracle = Oracle::of(&code(&[("a.cpp", 0x1000, 0x2000), ("b.cpp", 0x2000, 0x3000)]));
+        assert_eq!(
+            selection_quality("a.cpp", &oracle, None, Scope::Code),
+            SelectionQuality::NoChange
+        );
+        assert_eq!(
+            selection_quality(
+                "a.cpp",
+                &oracle,
+                Some(&body(&[(".text", 0x1000, 0x2000)])),
+                Scope::Code,
+            ),
+            SelectionQuality::Exact
+        );
+        assert_eq!(
+            selection_quality(
+                "a.cpp",
+                &oracle,
+                Some(&body(&[(".text", 0x1000, 0x1800)])),
+                Scope::Code,
+            ),
+            SelectionQuality::Partial
+        );
+        assert_eq!(
+            selection_quality(
+                "a.cpp",
+                &oracle,
+                Some(&body(&[(".text", 0x1000, 0x2100)])),
+                Scope::Code,
+            ),
+            SelectionQuality::Incorrect
+        );
+        assert_eq!(
+            selection_quality(
+                "a.cpp",
+                &oracle,
+                Some(&body(&[(".text", 0x5000, 0x5100)])),
+                Scope::Code,
+            ),
+            SelectionQuality::Unknown
+        );
     }
 }

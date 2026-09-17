@@ -1464,6 +1464,7 @@ mod tests {
     fn stage_result(accepted: Vec<Candidate>, selections: Selections) -> crate::run::StageResult {
         crate::run::StageResult {
             stage: "coverage".into(),
+            offered: accepted.clone(),
             accepted,
             deferred: Vec::new(),
             selections,

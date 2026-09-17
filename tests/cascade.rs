@@ -558,6 +558,29 @@ fn the_coordinator_follows_the_cascade_it_was_never_told_about() {
         .collect();
     assert_eq!(taken, ["A.cpp", "A.cpp", "B.cpp", "A.cpp"], "{result:#}");
 
+    // The final accepted entry intentionally keeps only A's last, extended
+    // proposal. Audits still need the worker's earlier half-range to measure
+    // proposal recall, so both candidate versions are retained separately.
+    let a_bodies: Vec<Vec<&str>> = result["offered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|candidate| candidate["name"] == "A.cpp")
+        .flat_map(|candidate| candidate["evidence"]["alternatives"].as_array().unwrap())
+        .map(|alternative| {
+            alternative["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|line| line.as_str().unwrap())
+                .collect()
+        })
+        .collect();
+    let first = line(".text", A_FIRST.0, A_FIRST.1);
+    let complete = line(".text", A_FIRST.0, A_REST.1);
+    assert!(a_bodies.contains(&vec![first.as_str()]));
+    assert!(a_bodies.contains(&vec![complete.as_str()]));
+
     // Twice, and no more: the third look found nothing, which is why the run
     // stopped for a reason rather than on the round budget.
     let rediscovered = result["events"]

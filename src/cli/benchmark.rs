@@ -45,23 +45,24 @@ use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 use crate::{
     analysis::ownership_score::{
-        Application, Blocks, Body, Identification, Ledger, Oracle, Outcome, Scope, Verification,
-        ledger, outcome,
+        Application, Blocks, Body, Identification, Ledger, Oracle, Outcome, Scope,
+        SelectionQuality, Verification, ledger, outcome, selection_quality,
     },
     project::{
         configure_py::{Configure, Status},
-        splits::Splits,
+        splits::{Range, Splits},
     },
 };
 
 /// Bumped when the manifest's meaning changes. The historical run's own schema
 /// is frozen — see [`legacy`] — so this versions only what `prepare` writes.
-pub const MANIFEST_SCHEMA: u32 = 2;
-pub const SCORE_SCHEMA: u32 = 2;
+pub const MANIFEST_SCHEMA: u32 = 3;
+pub const SCORE_SCHEMA: u32 = 3;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -72,7 +73,7 @@ pub struct Args {
 #[derive(Subcommand, Debug)]
 pub enum Operation {
     /// Build an oracle manifest from two immutable revisions.
-    Prepare(PrepareArgs),
+    Prepare(Box<PrepareArgs>),
     /// Score a completed run directory against a manifest.
     Score(ScoreArgs),
 }
@@ -105,6 +106,20 @@ pub struct PrepareArgs {
     pub baseline_configure: Option<PathBuf>,
     #[arg(long)]
     pub oracle_configure: Option<PathBuf>,
+    /// A saved baseline `config.yml`, instead of reading the Git blob.
+    #[arg(long)]
+    pub baseline_config: Option<PathBuf>,
+    /// A saved oracle `config.yml`, instead of reading the Git blob.
+    #[arg(long)]
+    pub oracle_config: Option<PathBuf>,
+    /// The baseline revision's built target DOL. Its SHA-1 must equal the
+    /// retail hash declared by that revision before it is recorded as proof.
+    #[arg(long)]
+    pub baseline_dol: Option<PathBuf>,
+    /// The oracle revision's built target DOL. Without this proof, source-linked
+    /// oracle units remain explicitly unverified.
+    #[arg(long)]
+    pub oracle_dol: Option<PathBuf>,
     #[arg(long)]
     pub output: PathBuf,
     /// Also write the two revisions' split files and their linkage, small
@@ -151,6 +166,22 @@ pub struct Revision {
     pub splits_sha256: String,
     #[serde(default)]
     pub configure_sha256: Option<String>,
+    /// Retail target hash declared by this revision's `config.yml`.
+    pub expected_retail_sha1: String,
+    /// SHA-1 of a DOL actually built from this revision, when supplied and
+    /// checked against `expected_retail_sha1` by `prepare`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_dol_sha1: Option<String>,
+}
+
+impl Revision {
+    fn retail_verified(&self) -> bool {
+        valid_sha1(&self.expected_retail_sha1)
+            && self
+                .verified_dol_sha1
+                .as_deref()
+                .is_some_and(|actual| actual.eq_ignore_ascii_case(&self.expected_retail_sha1))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +225,13 @@ impl Manifest {
                 manifest.schema
             );
         }
+        validate_revision("baseline", &manifest.baseline)?;
+        validate_revision("oracle", &manifest.oracle)?;
+        if manifest.units.values().any(|unit| unit.trust == Trust::SourceLinked)
+            && !manifest.oracle.retail_verified()
+        {
+            bail!("Manifest marks source-linked oracle units as trusted without a verified DOL")
+        }
         Ok(manifest)
     }
 
@@ -215,6 +253,49 @@ impl Manifest {
 }
 
 fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+
+fn valid_sha1(hash: &str) -> bool {
+    hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_revision(label: &str, revision: &Revision) -> Result<()> {
+    if !valid_sha1(&revision.expected_retail_sha1) {
+        bail!("The {label} revision does not declare a valid retail SHA-1")
+    }
+    if revision.verified_dol_sha1.is_some() && !revision.retail_verified() {
+        bail!("The {label} revision's verified DOL does not match its declared retail SHA-1")
+    }
+    Ok(())
+}
+
+fn file_sha1(path: &Path) -> Result<String> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(format!("{:x}", Sha1::digest(bytes)))
+}
+
+fn retail_sha1(config: &str) -> Result<String> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(config).context("Failed to parse config.yml")?;
+    value
+        .get("hash")
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_string)
+        .filter(|hash| valid_sha1(hash))
+        .context("config.yml does not declare a 40-digit hexadecimal target `hash`")
+}
+
+fn verified_dol(path: Option<&PathBuf>, expected: &str, revision: &str) -> Result<Option<String>> {
+    let Some(path) = path else { return Ok(None) };
+    let actual = file_sha1(path)?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!(
+            "The DOL supplied for {revision} has SHA-1 {actual}, but its config.yml declares \
+             {expected}"
+        )
+    }
+    Ok(Some(actual))
+}
 
 /// Reads one path at one revision, without touching the working tree.
 fn blob(root: &Path, revision: &str, path: &str) -> Result<String> {
@@ -275,6 +356,15 @@ pub fn build_manifest(
     oracle_splits: &str,
     linkage: &Linkage,
 ) -> Result<Manifest> {
+    validate_revision("baseline", &baseline)?;
+    validate_revision("oracle", &oracle)?;
+    if !baseline.expected_retail_sha1.eq_ignore_ascii_case(&oracle.expected_retail_sha1) {
+        bail!(
+            "The revisions disagree about the retail target: {} versus {}",
+            baseline.expected_retail_sha1,
+            oracle.expected_retail_sha1
+        )
+    }
     let before = Splits::parse(baseline_splits)?.blocks;
     let after = Splits::parse(oracle_splits)?.blocks;
 
@@ -292,7 +382,11 @@ pub fn build_manifest(
             oracle: oracle_body,
             baseline_linked: linkage.baseline.contains(name),
             oracle_linked: oracle_links,
-            trust: if oracle_links { Trust::SourceLinked } else { Trust::Unverified },
+            trust: if oracle_links && oracle.retail_verified() {
+                Trust::SourceLinked
+            } else {
+                Trust::Unverified
+            },
             changed,
             changed_code,
         });
@@ -342,6 +436,7 @@ pub fn linked(text: &str, version: &str) -> Result<BTreeSet<String>> {
 pub fn prepare(args: &PrepareArgs) -> Result<()> {
     let root = std::path::absolute(&args.project_root)?;
     let splits_path = format!("config/{}/splits.txt", args.target);
+    let config_path = format!("config/{}/config.yml", args.target);
 
     let (baseline_id, baseline_splits) =
         source_text(&root, &args.baseline, &splits_path, args.baseline_splits.as_ref())?;
@@ -351,6 +446,12 @@ pub fn prepare(args: &PrepareArgs) -> Result<()> {
         source_text(&root, &args.baseline, "configure.py", args.baseline_configure.as_ref())?;
     let (_, oracle_configure) =
         source_text(&root, &args.oracle, "configure.py", args.oracle_configure.as_ref())?;
+    let (_, baseline_config) =
+        source_text(&root, &args.baseline, &config_path, args.baseline_config.as_ref())?;
+    let (_, oracle_config) =
+        source_text(&root, &args.oracle, &config_path, args.oracle_config.as_ref())?;
+    let baseline_retail = retail_sha1(&baseline_config)?;
+    let oracle_retail = retail_sha1(&oracle_config)?;
 
     let linkage = Linkage {
         baseline: linked(&baseline_configure, &args.target)?,
@@ -363,12 +464,24 @@ pub fn prepare(args: &PrepareArgs) -> Result<()> {
             id: baseline_id,
             splits_sha256: digest(baseline_splits.as_bytes()),
             configure_sha256: Some(digest(baseline_configure.as_bytes())),
+            expected_retail_sha1: baseline_retail.clone(),
+            verified_dol_sha1: verified_dol(
+                args.baseline_dol.as_ref(),
+                &baseline_retail,
+                &args.baseline,
+            )?,
         },
         &baseline_splits,
         Revision {
             id: oracle_id,
             splits_sha256: digest(oracle_splits.as_bytes()),
             configure_sha256: Some(digest(oracle_configure.as_bytes())),
+            expected_retail_sha1: oracle_retail.clone(),
+            verified_dol_sha1: verified_dol(
+                args.oracle_dol.as_ref(),
+                &oracle_retail,
+                &args.oracle,
+            )?,
         },
         &oracle_splits,
         &linkage,
@@ -411,10 +524,16 @@ mod legacy {
         pub target: String,
         #[serde(default)]
         pub stages: BTreeMap<String, Stage>,
+        #[serde(default)]
+        pub published_dol_sha1: String,
     }
 
     #[derive(Debug, Clone, Default, Deserialize)]
     pub struct Stage {
+        /// Present in schema-2+ runs. Older runs retain only the final candidate
+        /// per unit and can provide a lower bound by way of prepared/jobs data.
+        #[serde(default)]
+        pub offered: Option<Vec<Candidate>>,
         #[serde(default)]
         pub accepted: Vec<Candidate>,
         #[serde(default)]
@@ -430,6 +549,26 @@ mod legacy {
         pub name: String,
         #[serde(default)]
         pub evidence: serde_json::Value,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct StoredPreparation {
+        #[serde(default)]
+        pub prepared: Prepared,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct Prepared {
+        #[serde(default)]
+        pub candidates: Vec<Candidate>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct JobResult {
+        #[serde(default)]
+        pub accepted: Vec<Candidate>,
+        #[serde(default)]
+        pub deferred: Vec<Candidate>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -474,6 +613,10 @@ mod legacy {
     #[derive(Debug, Clone, Deserialize)]
     pub struct Change {
         #[serde(default)]
+        pub before_sha256: Option<String>,
+        #[serde(default)]
+        pub after_sha256: Option<String>,
+        #[serde(default)]
         pub before: Option<String>,
         #[serde(default)]
         pub after: Option<String>,
@@ -504,12 +647,20 @@ pub struct RunFacts {
     /// And as it left them.
     pub after: Blocks,
     pub published: bool,
+    published_dol_sha1: Option<String>,
+    /// True only when every stage carried the schema-2 candidate history. Old
+    /// worker and preparation artifacts improve recall, but cannot reconstruct
+    /// coordinator-only intermediate rediscovery rounds.
+    pub proposal_history_complete: bool,
     /// Digest of the target split file before the run started. This is the only
     /// baseline evidence available when publication had no split-file change.
     baseline_splits_sha256: Option<String>,
     /// No journal entry means the run left the split file untouched. In that
     /// case scoring uses the manifest baseline after proving it by digest.
     use_manifest_baseline: bool,
+    /// Reduced fixtures contain parsed primary data rather than the original
+    /// byte-for-byte file. Real run directories must always prove by digest.
+    allow_structural_baseline: bool,
     stages: BTreeMap<String, legacy::Stage>,
 }
 
@@ -530,17 +681,40 @@ impl RunFacts {
             before,
             after,
             published: true,
+            published_dol_sha1: None,
+            proposal_history_complete: true,
             baseline_splits_sha256: None,
             use_manifest_baseline: false,
+            allow_structural_baseline: true,
             stages: BTreeMap::new(),
         }
+    }
+
+    /// Adds the retail digest carried by a reduced fixture whose full
+    /// `result.json` is intentionally not committed.
+    pub fn with_published_dol_sha1(mut self, sha1: impl Into<String>) -> Self {
+        self.published_dol_sha1 = Some(sha1.into());
+        self
+    }
+
+    /// Pins a reduced fixture to the exact baseline file it was distilled from.
+    pub fn with_baseline_splits_sha256(mut self, sha256: impl Into<String>) -> Self {
+        self.baseline_splits_sha256 = Some(sha256.into());
+        self.allow_structural_baseline = false;
+        self
     }
 }
 
 pub fn read_run(run: &Path) -> Result<RunFacts> {
-    let summary: legacy::Summary = read_json(&run.join("result.json"))?;
+    let mut summary: legacy::Summary = read_json(&run.join("result.json"))?;
     let record: legacy::Record = read_json(&run.join("run.json"))?;
     let journal: legacy::Journal = read_json(&run.join("publication.json"))?;
+    if journal.status != "published" {
+        bail!(
+            "The run's publication status is `{}`; only a completed, published run can be scored",
+            journal.status
+        )
+    }
     if !record.source.is_empty() && record.source != summary.source {
         bail!("run.json names source {} but result.json names {}", record.source, summary.source);
     }
@@ -556,27 +730,81 @@ pub fn read_run(run: &Path) -> Result<RunFacts> {
     let key = format!("config/{target}/splits.txt");
     let baseline_splits_sha256 = record.owner.manifest.get(&key).cloned();
     let change = journal.changes.get(&key);
-    let text = |side: Option<&String>| -> Result<Option<Blocks>> {
-        match side {
-            Some(hex) => {
-                let bytes = unhex(hex)?;
-                Ok(Some(Splits::parse(&String::from_utf8(bytes)?)?.blocks))
+    if let Some(change) = change
+        && change.before_sha256.as_ref() != baseline_splits_sha256.as_ref()
+    {
+        bail!("Publication's before-image digest for {key} disagrees with run.json")
+    }
+    let text =
+        |side: Option<&String>, expected: Option<&String>, label: &str| -> Result<Option<Blocks>> {
+            match side {
+                Some(hex) => {
+                    let bytes = unhex(hex)?;
+                    if expected.is_none_or(|expected| digest(&bytes) != *expected) {
+                        bail!("Publication's {label}-image bytes for {key} do not match its digest")
+                    }
+                    Ok(Some(Splits::parse(&String::from_utf8(bytes)?)?.blocks))
+                }
+                None => Ok(None),
             }
-            None => Ok(None),
-        }
-    };
-    let before = text(change.and_then(|c| c.before.as_ref()))?;
-    let after = text(change.and_then(|c| c.after.as_ref()))?;
+        };
+    let before = text(
+        change.and_then(|c| c.before.as_ref()),
+        change.and_then(|c| c.before_sha256.as_ref()),
+        "before",
+    )?;
+    let after = text(
+        change.and_then(|c| c.after.as_ref()),
+        change.and_then(|c| c.after_sha256.as_ref()),
+        "after",
+    )?;
     // A run that changed no splits published the baseline unchanged, which is a
     // real outcome and not a missing one.
     let (before, after, use_manifest_baseline) = match (before, after) {
         (Some(before), Some(after)) => (before, after, false),
-        (Some(before), None) => (before.clone(), before, false),
+        (Some(_), None) => {
+            bail!("Publication deleted {key}; there is no final split state to score")
+        }
         (None, None) => (IndexMap::new(), IndexMap::new(), true),
         (None, Some(_)) => {
             bail!("Publication records an after-image for {key} without a before-image")
         }
     };
+
+    let proposal_history_complete = summary
+        .stages
+        .iter()
+        .filter(|(name, _)| matches!(name.as_str(), "coverage" | "discover"))
+        .all(|(_, stage)| stage.offered.is_some());
+    for (name, stage) in &mut summary.stages {
+        if stage.offered.is_some() {
+            continue;
+        }
+        let mut recovered = Vec::new();
+        let prepared = run.join(name).join("prepared.json");
+        if prepared.is_file() {
+            let stored: legacy::StoredPreparation = read_json(&prepared)?;
+            recovered.extend(stored.prepared.candidates);
+        }
+        let jobs = run.join(name).join("jobs");
+        if jobs.is_dir() {
+            let mut entries: Vec<_> = std::fs::read_dir(&jobs)?.filter_map(Result::ok).collect();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let result = entry.path().join("result.json");
+                if !result.is_file() {
+                    continue;
+                }
+                let job: legacy::JobResult = read_json(&result)?;
+                recovered.extend(job.accepted);
+                recovered.extend(job.deferred);
+            }
+        }
+        recovered.extend(stage.accepted.iter().cloned());
+        recovered.extend(stage.deferred.iter().cloned());
+        deduplicate_candidates(&mut recovered);
+        stage.offered = Some(recovered);
+    }
 
     Ok(RunFacts {
         id: summary.id,
@@ -585,10 +813,26 @@ pub fn read_run(run: &Path) -> Result<RunFacts> {
         before,
         after,
         published: journal.status == "published",
+        published_dol_sha1: (!summary.published_dol_sha1.is_empty())
+            .then_some(summary.published_dol_sha1),
+        proposal_history_complete,
         baseline_splits_sha256,
         use_manifest_baseline,
+        allow_structural_baseline: false,
         stages: summary.stages,
     })
+}
+
+fn deduplicate_candidates(candidates: &mut Vec<legacy::Candidate>) {
+    let mut distinct = Vec::new();
+    for candidate in std::mem::take(candidates) {
+        if !distinct.iter().any(|seen: &legacy::Candidate| {
+            seen.name == candidate.name && seen.evidence == candidate.evidence
+        }) {
+            distinct.push(candidate);
+        }
+    }
+    *candidates = distinct;
 }
 
 /// Every complete replacement body any stage proposed for a unit.
@@ -666,6 +910,12 @@ fn recall_for(name: &str, truth: &Body, found: &Trace, scope: Scope) -> Recall {
     }
 }
 
+fn body_from_lines(name: &str, lines: &[String]) -> Body {
+    let mut one: Blocks = IndexMap::new();
+    one.insert(name.to_string(), lines.to_vec());
+    Body::of(&one, name)
+}
+
 /// What one stage did with one unit, and what it said about it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageTrace {
@@ -687,6 +937,10 @@ pub struct UnitScore {
     pub identification: Identification,
     /// Why the identification says what it says, named rather than scored.
     pub identification_evidence: Vec<String>,
+    /// Complete target range sets carried by the recorded proposals. Keeping
+    /// these in the score makes an identification auditable without reopening
+    /// a multi-megabyte run directory.
+    pub candidate_target_intervals: Vec<Vec<Range>>,
     /// What the run found and what it did with it, judged on code alone and on
     /// the whole body. Separately, because they disagree: seven of the recall
     /// set had a code-exact proposal and only four had a full-body one, and a
@@ -702,6 +956,8 @@ pub struct UnitScore {
     /// which is worth seeing even though the oracle has no opinion about it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<String>,
+    pub code_selection: SelectionQuality,
+    pub full_selection: SelectionQuality,
     pub verification: Verification,
     /// The verdict on what it ended up owning: exact, partial, wrong, unowned,
     /// or unchanged.
@@ -771,6 +1027,12 @@ pub struct Score {
     /// here makes every number below meaningless, so it is recorded rather than
     /// assumed.
     pub baseline_agrees: bool,
+    /// Whether the run's published DOL matches the retail hash declared by the
+    /// immutable revisions. `None` is used only by reduced in-memory fixtures.
+    pub published_retail_agrees: Option<bool>,
+    /// False for legacy runs whose coordinator did not persist intermediate
+    /// rediscovery proposals. Their proposal-recall totals are lower bounds.
+    pub proposal_history_complete: bool,
     pub published: bool,
     pub populations: BTreeMap<String, Population>,
     /// Units the run damaged, by name, and only ones whose oracle answer a
@@ -821,15 +1083,15 @@ pub fn score(manifest: &Manifest, run: &RunFacts) -> Score {
     // carries only the starting file's digest in run.json, so use the manifest
     // body only after that digest proves it is the same baseline.
     let manifest_baseline = manifest.baseline_blocks();
-    let baseline_agrees = if run.use_manifest_baseline {
-        !manifest.baseline.splits_sha256.is_empty()
-            && run.baseline_splits_sha256.as_deref()
-                == Some(manifest.baseline.splits_sha256.as_str())
-    } else {
+    let baseline_agrees = if let Some(recorded) = &run.baseline_splits_sha256 {
+        !manifest.baseline.splits_sha256.is_empty() && recorded == &manifest.baseline.splits_sha256
+    } else if run.allow_structural_baseline {
         manifest
             .units
             .iter()
             .all(|(name, truth)| Body::of(&run.before, name).same_structure(&truth.baseline))
+    } else {
+        false
     };
     let before = if run.use_manifest_baseline { &manifest_baseline } else { &run.before };
     let after = if run.use_manifest_baseline { &manifest_baseline } else { &run.after };
@@ -846,6 +1108,7 @@ pub fn score(manifest: &Manifest, run: &RunFacts) -> Score {
             let changed_full = !held.same_structure(&left);
 
             let found = trace(name, run);
+            let selected_body = found.selected.as_ref().map(|lines| body_from_lines(name, lines));
             UnitScore {
                 unit: name.clone(),
                 trust: truth.trust,
@@ -854,12 +1117,29 @@ pub fn score(manifest: &Manifest, run: &RunFacts) -> Score {
                 needed_code_change: truth.changed_code,
                 identification: identify(found.proposed.len(), &found.proposed),
                 identification_evidence: evidence_names(name, run),
+                candidate_target_intervals: found
+                    .proposed
+                    .iter()
+                    .map(|lines| body_from_lines(name, lines).intervals())
+                    .collect(),
                 code_recall: recall_for(name, &truth.oracle, &found, Scope::Code),
                 full_recall: recall_for(name, &truth.oracle, &found, Scope::Everything),
                 proposals: found.proposed.len(),
                 application: found.application,
                 stage_trace: found.traces,
                 selected: found.selection_id,
+                code_selection: selection_quality(
+                    name,
+                    &oracle,
+                    selected_body.as_ref(),
+                    Scope::Code,
+                ),
+                full_selection: selection_quality(
+                    name,
+                    &oracle,
+                    selected_body.as_ref(),
+                    Scope::Everything,
+                ),
                 verification: verification(name, run),
                 code_outcome: outcome(
                     &code,
@@ -916,6 +1196,11 @@ pub fn score(manifest: &Manifest, run: &RunFacts) -> Score {
         baseline_revision: manifest.baseline.id.clone(),
         oracle_revision: manifest.oracle.id.clone(),
         baseline_agrees,
+        published_retail_agrees: run.published_dol_sha1.as_ref().map(|actual| {
+            actual.eq_ignore_ascii_case(&manifest.baseline.expected_retail_sha1)
+                && actual.eq_ignore_ascii_case(&manifest.oracle.expected_retail_sha1)
+        }),
+        proposal_history_complete: run.proposal_history_complete,
         published: run.published,
         regressions: units
             .iter()
@@ -986,8 +1271,14 @@ struct StageOutcome {
 fn stage_outcome(stage: &str, facts: &legacy::Stage, name: &str) -> Option<StageOutcome> {
     let accepted = facts.accepted.iter().find(|c| c.name == name);
     let deferred = facts.deferred.iter().find(|c| c.name == name);
-    let candidate = accepted.or(deferred)?;
-    let proposed = proposed_bodies(&candidate.evidence);
+    let offered: Vec<&legacy::Candidate> =
+        facts.offered.iter().flatten().filter(|candidate| candidate.name == name).collect();
+    let candidate = accepted.or(deferred).or_else(|| offered.last().copied())?;
+    let mut proposed: Vec<Vec<String>> =
+        offered.into_iter().flat_map(|candidate| proposed_bodies(&candidate.evidence)).collect();
+    if proposed.is_empty() {
+        proposed = proposed_bodies(&candidate.evidence);
+    }
 
     let refused = facts
         .events
@@ -1124,7 +1415,9 @@ struct Trace {
 fn evidence_names(name: &str, run: &RunFacts) -> Vec<String> {
     let mut found: BTreeSet<String> = BTreeSet::new();
     for facts in run.stages.values() {
-        for candidate in facts.accepted.iter().chain(&facts.deferred) {
+        for candidate in
+            facts.offered.iter().flatten().chain(&facts.accepted).chain(&facts.deferred)
+        {
             if candidate.name != name {
                 continue;
             }
@@ -1210,15 +1503,28 @@ fn score_command(args: &ScoreArgs) -> Result<()> {
     std::fs::create_dir_all(&output)?;
     write_json(&output.join("score.json"), &result)?;
     std::fs::write(output.join("score.md"), markdown(&result))?;
+    println!("{}", serde_json::to_string_pretty(&result.populations)?);
+    if !result.baseline_agrees {
+        bail!(
+            "The run did not start from this manifest's exact baseline; diagnostic output was \
+             written to {}, but it is not a valid benchmark",
+            output.display()
+        );
+    }
+    if result.published_retail_agrees != Some(true) {
+        bail!(
+            "The run does not carry a published DOL matching the manifest's retail hash; \
+             diagnostic output was written to {}, but it is not a valid benchmark",
+            output.display()
+        );
+    }
     if let Some(directory) = &args.fixture {
         write_run_fixture(directory, &facts)?;
     }
-
-    println!("{}", serde_json::to_string_pretty(&result.populations)?);
-    if !result.baseline_agrees {
+    if !result.proposal_history_complete {
         println!(
-            "\nWarning: the run did not start from this manifest's baseline, so these numbers \
-             describe two different projects."
+            "\nWarning: this legacy run did not retain coordinator proposal history; proposed-exact \
+             counts are lower bounds."
         );
     }
     if !result.regressions.is_empty() {
@@ -1257,8 +1563,12 @@ fn write_oracle_fixture(
             "target": manifest.target,
             "baseline_revision": manifest.baseline.id,
             "baseline_splits_sha256": manifest.baseline.splits_sha256,
+            "baseline_expected_retail_sha1": manifest.baseline.expected_retail_sha1,
+            "baseline_verified_dol_sha1": manifest.baseline.verified_dol_sha1,
             "oracle_revision": manifest.oracle.id,
             "oracle_splits_sha256": manifest.oracle.splits_sha256,
+            "oracle_expected_retail_sha1": manifest.oracle.expected_retail_sha1,
+            "oracle_verified_dol_sha1": manifest.oracle.verified_dol_sha1,
         }),
     )?;
     println!("Fixture: {}", directory.display());
@@ -1321,9 +1631,31 @@ fn markdown(score: &Score) -> String {
         );
         lines.push(String::new());
     }
+    if score.published_retail_agrees == Some(false) {
+        lines.push(
+            "**The published DOL does not match the retail hash recorded by the manifest.**"
+                .to_string(),
+        );
+        lines.push(String::new());
+    } else if score.published_retail_agrees.is_none() {
+        lines.push(
+            "**The run carries no published DOL digest, so retail equality is unverified.**"
+                .to_string(),
+        );
+        lines.push(String::new());
+    }
+    if !score.proposal_history_complete {
+        lines.push(
+            "**Proposal history is incomplete.** Proposed-exact totals are lower bounds because \
+             this legacy run did not retain coordinator rediscovery rounds."
+                .to_string(),
+        );
+        lines.push(String::new());
+    }
     lines.extend([
         "*Exact* means the unit ends up owning precisely the oracle's ground. *Partial* overlaps \
-         it with a boundary unresolved. *Wrong* holds ground the oracle gives to someone else. \
+         it with a boundary unresolved. *Wrong* means the run newly added ground the oracle gives \
+         to someone else; retained wrong ground remains visible in the byte ledger. \
          *Unchanged* is a unit the run left alone, which for a control is the right answer and \
          for a target is a miss."
             .to_string(),
@@ -1406,19 +1738,21 @@ fn markdown(score: &Score) -> String {
         String::new(),
         "## Recall set".to_string(),
         String::new(),
-        "| Unit | Code | Full | Identification | Code recall | Full recall | Application | Verification |"
+        "| Unit | Code | Full | Identification | Code recall | Full recall | Code selection | Full selection | Application | Verification |"
             .to_string(),
-        "|---|---|---|---|---|---|---|---|".to_string(),
+        "|---|---|---|---|---|---|---|---|---|---|".to_string(),
     ]);
     for row in score.units.iter().filter(|row| row.in_recall_set) {
         lines.push(format!(
-            "| `{}` | {:?} | {:?} | {:?} | {} | {} | {:?} | {:?} |",
+            "| `{}` | {:?} | {:?} | {:?} | {} | {} | {:?} | {:?} | {:?} | {:?} |",
             row.unit,
             row.code_outcome,
             row.full_outcome,
             row.identification,
             recall_label(row.code_recall),
             recall_label(row.full_recall),
+            row.code_selection,
+            row.full_selection,
             row.application,
             row.verification
         ));
@@ -1441,6 +1775,8 @@ fn recall_label(recall: Recall) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_RETAIL: &str = "0000000000000000000000000000000000000000";
 
     fn body(entries: &[(&str, u32, u32)]) -> Body {
         let mut blocks: Blocks = IndexMap::new();
@@ -1519,6 +1855,37 @@ mod tests {
     }
 
     #[test]
+    fn proposal_recall_reads_every_recorded_candidate_version() {
+        let exact = legacy::Candidate {
+            name: "u.cpp".into(),
+            evidence: serde_json::json!({
+                "alternatives": [{
+                    "id": "early-exact",
+                    "lines": ["\t.text       start:0x00001000 end:0x00002000"]
+                }]
+            }),
+        };
+        let final_partial = legacy::Candidate {
+            name: "u.cpp".into(),
+            evidence: serde_json::json!({
+                "alternatives": [{
+                    "id": "later-partial",
+                    "lines": ["\t.text       start:0x00001000 end:0x00001800"]
+                }]
+            }),
+        };
+        let stage = legacy::Stage {
+            offered: Some(vec![exact, final_partial.clone()]),
+            accepted: vec![final_partial],
+            selections: BTreeMap::from([("u.cpp".into(), "later-partial".into())]),
+            ..Default::default()
+        };
+        let found = stage_outcome("coverage", &stage, "u.cpp").unwrap();
+        assert_eq!(found.proposed.len(), 2);
+        assert!(found.proposed.iter().any(|body| body[0].contains("end:0x00002000")));
+    }
+
+    #[test]
     fn an_exact_proposal_from_an_earlier_stage_is_not_a_ranking_failure() {
         let exact = vec!["\t.text       start:0x00001000 end:0x00002000".to_string()];
         let wrong = vec!["\t.text       start:0x00001000 end:0x00001800".to_string()];
@@ -1554,6 +1921,43 @@ mod tests {
         assert_eq!(linked(text, "B").unwrap(), BTreeSet::from(["both.cpp".to_string()]));
     }
 
+    #[test]
+    fn configuring_source_does_not_make_an_unverified_oracle_trusted() {
+        let splits = "Sections:\n\na.cpp:\n\t.text start:0x00001000 end:0x00002000\n";
+        let revision = |id: &str, verified: bool| Revision {
+            id: id.into(),
+            splits_sha256: "splits".into(),
+            configure_sha256: Some("configure".into()),
+            expected_retail_sha1: TEST_RETAIL.into(),
+            verified_dol_sha1: verified.then(|| TEST_RETAIL.into()),
+        };
+        let linkage =
+            Linkage { baseline: BTreeSet::new(), oracle: BTreeSet::from(["a.cpp".to_string()]) };
+        let unverified = build_manifest(
+            "NTSC",
+            "PAL",
+            revision("base", true),
+            splits,
+            revision("oracle", false),
+            splits,
+            &linkage,
+        )
+        .unwrap();
+        assert_eq!(unverified.units["a.cpp"].trust, Trust::Unverified);
+
+        let verified = build_manifest(
+            "NTSC",
+            "PAL",
+            revision("base", true),
+            splits,
+            revision("oracle", true),
+            splits,
+            &linkage,
+        )
+        .unwrap();
+        assert_eq!(verified.units["a.cpp"].trust, Trust::SourceLinked);
+    }
+
     fn manifest(units: &[(&str, Body, Body, bool)]) -> Manifest {
         Manifest {
             schema: MANIFEST_SCHEMA,
@@ -1563,11 +1967,15 @@ mod tests {
                 id: "base".into(),
                 splits_sha256: String::new(),
                 configure_sha256: None,
+                expected_retail_sha1: TEST_RETAIL.into(),
+                verified_dol_sha1: Some(TEST_RETAIL.into()),
             },
             oracle: Revision {
                 id: "oracle".into(),
                 splits_sha256: String::new(),
                 configure_sha256: None,
+                expected_retail_sha1: TEST_RETAIL.into(),
+                verified_dol_sha1: Some(TEST_RETAIL.into()),
             },
             recall_set: units
                 .iter()
@@ -1724,6 +2132,106 @@ mod tests {
         let manifest = manifest(&[("a.cpp", truth.clone(), truth, false)]);
         let run = facts(blocks(&[("a.cpp", 0x1000, 0x1400)]), blocks(&[("a.cpp", 0x1000, 0x2000)]));
         assert!(!score(&manifest, &run).baseline_agrees);
+    }
+
+    #[test]
+    fn a_real_run_must_match_the_exact_recorded_baseline_digest() {
+        let truth = body(&[(".text", 0x1000, 0x2000)]);
+        let mut manifest = manifest(&[("a.cpp", truth.clone(), truth, false)]);
+        manifest.baseline.splits_sha256 = "exact-file".into();
+        let mut run =
+            facts(blocks(&[("a.cpp", 0x1000, 0x2000)]), blocks(&[("a.cpp", 0x1000, 0x2000)]));
+        run.allow_structural_baseline = false;
+        run.baseline_splits_sha256 = Some("same-bodies-different-file".into());
+        assert!(!score(&manifest, &run).baseline_agrees);
+        run.baseline_splits_sha256 = Some("exact-file".into());
+        assert!(score(&manifest, &run).baseline_agrees);
+    }
+
+    #[test]
+    fn a_deleted_published_split_file_is_not_read_as_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("result.json"),
+            r#"{"id":"run","source":"NTSC","target":"PAL","stages":{}}"#,
+        )
+        .unwrap();
+        let before = "Sections:\n\na.cpp:\n\t.text start:0x00001000 end:0x00002000\n";
+        let before_digest = digest(before.as_bytes());
+        std::fs::write(
+            directory.path().join("run.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "source": "NTSC",
+                "target": "PAL",
+                "owner": { "manifest": { "config/PAL/splits.txt": before_digest.clone() } },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let encoded: String = before.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+        std::fs::write(
+            directory.path().join("publication.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "status": "published",
+                "changes": {
+                    "config/PAL/splits.txt": {
+                        "before_sha256": before_digest,
+                        "after_sha256": null,
+                        "before": encoded,
+                        "after": null
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = match read_run(directory.path()) {
+            Ok(_) => panic!("deletion should be rejected"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("deleted config/PAL/splits.txt"));
+    }
+
+    #[test]
+    fn the_command_fails_after_writing_diagnostics_for_a_baseline_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let run = directory.path().join("run");
+        let output = directory.path().join("score");
+        std::fs::create_dir_all(&run).unwrap();
+        let truth = body(&[(".text", 0x1000, 0x2000)]);
+        let mut manifest = manifest(&[("a.cpp", truth.clone(), truth, false)]);
+        manifest.baseline.splits_sha256 = "expected".into();
+        let manifest_path = directory.path().join("manifest.json");
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(
+            run.join("result.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "run",
+                "source": "NTSC",
+                "target": "PAL",
+                "stages": {},
+                "published_dol_sha1": TEST_RETAIL,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("run.json"),
+            r#"{"source":"NTSC","target":"PAL","owner":{"manifest":{"config/PAL/splits.txt":"different"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(run.join("publication.json"), r#"{"status":"published","changes":{}}"#)
+            .unwrap();
+
+        let error = score_command(&ScoreArgs {
+            manifest: manifest_path,
+            run,
+            output: Some(output.clone()),
+            fixture: None,
+        })
+        .expect_err("an invalid comparison must not exit successfully");
+        assert!(format!("{error:#}").contains("exact baseline"));
+        assert!(output.join("score.json").is_file(), "diagnostics should survive the failure");
     }
 
     #[test]

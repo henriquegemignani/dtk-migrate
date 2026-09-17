@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 /// The stages, in the only order they may run in.
 ///
@@ -160,6 +160,12 @@ impl Environment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageResult {
     pub stage: String,
+    /// Every distinct candidate body the stage offered to an evaluator, across
+    /// workers and coordinator rediscovery rounds. `accepted` deliberately
+    /// keeps only the final candidate per unit; this history is what lets an
+    /// audit answer whether an earlier proposal was already correct.
+    #[serde(default)]
+    pub offered: Vec<Candidate>,
     pub accepted: Vec<Candidate>,
     pub deferred: Vec<Candidate>,
     /// Which alternative each accepted candidate was proved with.
@@ -389,6 +395,20 @@ pub fn run_stage(
     }
 
     let mut events: Vec<Event> = outcomes.iter().flat_map(|o| o.events.clone()).collect();
+    let mut offered: Vec<Candidate> = Vec::new();
+    let mut remember = |candidate: &Candidate| {
+        if !offered
+            .iter()
+            .any(|seen| seen.name == candidate.name && seen.evidence == candidate.evidence)
+        {
+            offered.push(candidate.clone());
+        }
+    };
+    for worker in &outcomes {
+        for candidate in worker.accepted.iter().chain(&worker.deferred) {
+            remember(candidate);
+        }
+    }
     // One entry per unit, last acceptance winning: a unit extended twice is one
     // final proposal, not two competing ones.
     let mut accepted: indexmap::IndexMap<String, Candidate> = indexmap::IndexMap::new();
@@ -415,6 +435,9 @@ pub fn run_stage(
         // same workspace.
         if queue.is_empty() && outcome.is_some() {
             break;
+        }
+        for candidate in &queue {
+            remember(candidate);
         }
         let result = stage.evaluate(&ctx, &prepared.prepared, &queue, &preferred)?;
         events.extend(result.events.clone());
@@ -474,6 +497,7 @@ pub fn run_stage(
     selections.retain(|name, _| accepted.contains_key(name));
     let result = StageResult {
         stage: stage_name.to_string(),
+        offered,
         selections,
         accepted: accepted.into_values().collect(),
         deferred: unresolved.into_values().collect(),

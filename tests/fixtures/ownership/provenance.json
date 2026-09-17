@@ -1,8 +1,13 @@
 {
   "baseline_revision": "b65ad2a6f9ae8e400e48f76209d3c015b22b84c0",
+  "baseline_expected_retail_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
+  "baseline_verified_dol_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
   "baseline_splits_sha256": "8502df8399d729613fa93a9b6abdb4daea8013606b8d299d8bafc0025a6f2f5f",
   "oracle_revision": "ca286f453d30c201304a82939fa8929181cc9d30",
+  "oracle_expected_retail_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
+  "oracle_verified_dol_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
   "oracle_splits_sha256": "984253aeb4887e64b9a1086de1ddf60a53db611f865f5fe673ead5c0acce90eb",
+  "run_published_dol_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
   "source": "GM8E01_00",
   "target": "GM8P01_00"
 }
