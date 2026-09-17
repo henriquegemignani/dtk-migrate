@@ -12,4 +12,5 @@ pub mod data_matching;
 pub mod fingerprint;
 pub mod mask;
 pub mod matching;
+pub mod ownership_score;
 pub mod unit_matching;

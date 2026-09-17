@@ -8,6 +8,7 @@ use decomp_toolkit::util::path::check_path_buf;
 use typed_path::Utf8NativePathBuf;
 
 pub mod audit;
+pub mod benchmark;
 pub mod calibrate;
 pub mod configure_hook;
 pub mod derive;

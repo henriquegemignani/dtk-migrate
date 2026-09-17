@@ -31,6 +31,8 @@ enum Command {
     Audit(cli::audit::Args),
     /// Score the coverage policy against a version that already has the answers.
     Calibrate(cli::calibrate::Args),
+    /// Score a finished migration against a later revision of the same project.
+    Benchmark(cli::benchmark::Args),
     /// Work with a version's symbols file.
     Symbols(cli::symbols::Args),
     /// Work with a version's splits file.
@@ -65,6 +67,7 @@ fn main() {
         Command::Derive(c_args) => cli::derive::run(c_args),
         Command::Audit(c_args) => cli::audit::run(c_args),
         Command::Calibrate(c_args) => cli::calibrate::run(c_args),
+        Command::Benchmark(c_args) => cli::benchmark::run(c_args),
         Command::Symbols(c_args) => cli::symbols::run(c_args),
         Command::Splits(c_args) => cli::splits::run(c_args),
         Command::ConfigureHook(c_args) => cli::configure_hook::run(c_args),

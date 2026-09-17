@@ -39,7 +39,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
-use indexmap::IndexMap;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -47,18 +46,24 @@ use crate::{
     analysis::{
         coverage::{CoverageReport, CoverageUnit},
         mask::Scenario,
+        ownership_score::{
+            Blocks, Body, Oracle, Outcome, OwnerEffect, Scope, State, owner_effect,
+            ownership_at_layout, range_state,
+        },
     },
     matching,
-    project::splits::{Range, Splits, parse_range},
-    stages::{
-        coverage::{
-            EVIDENCE_SCHEMA, POLICY_VERSION,
-            alternatives::{self, Alternative, parse_address},
-            apply_alternative, offers_candidate,
-        },
-        discover::CODE_SECTIONS,
+    project::splits::Splits,
+    stages::coverage::{
+        EVIDENCE_SCHEMA, POLICY_VERSION,
+        alternatives::{self, Alternative, parse_address},
+        apply_alternative, offers_candidate,
     },
 };
+
+/// Calibration judges code only: an alternative never claims anything else, so
+/// scoring a unit's data would read as permanently missed ground no policy was
+/// ever asked about.
+const SCOPE: Scope = Scope::Code;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -84,36 +89,6 @@ pub struct Args {
     /// Where to write the result.
     #[arg(long)]
     pub output: Option<PathBuf>,
-}
-
-/// How a proposed range stands against the oracle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum State {
-    /// Both boundaries reproduced: this unit's range, and nothing else.
-    Exact,
-    /// Overlaps this unit and stops short of, or runs past, a boundary.
-    Partial,
-    /// Claims ground the oracle gives to another unit.
-    Incorrect,
-    /// The oracle has nothing to say here.
-    Unknown,
-}
-
-/// What became of the unit the scenario asked about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Outcome {
-    Exact,
-    Partial,
-    Incorrect,
-    /// Landed somewhere the oracle does not place this unit or any other.
-    Unowned,
-    /// Nothing was proposed at all.
-    Abstained,
-    /// Something was proposed and the application refused it, which is not the
-    /// same as proposing nothing.
-    Refused,
 }
 
 /// One unit the policy got wrong, named.
@@ -157,18 +132,6 @@ fn faults(records: &[Record]) -> Vec<Fault> {
             })
         })
         .collect()
-}
-
-/// What an alternative's transaction did to a unit other than the candidate.
-#[derive(Debug, Serialize)]
-struct OwnerEffect {
-    unit: String,
-    /// Correctly owned code this unit gave up.
-    lost_bytes: u32,
-    /// Code it took on that the oracle gives to someone else.
-    wrong_bytes: u32,
-    /// Whether it is left owning precisely what the oracle says it should.
-    exact: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -262,84 +225,6 @@ fn partition(name: &str) -> &'static str {
     if Sha256::digest(name.as_bytes())[0] < 128 { "calibration" } else { "held-out" }
 }
 
-type Blocks = IndexMap<String, Vec<String>>;
-
-/// Every range the oracle gives a unit, in one section or in all of them.
-fn oracle_ranges(oracle: &Blocks, name: &str, section: Option<&str>) -> Vec<Range> {
-    oracle
-        .get(name)
-        .into_iter()
-        .flatten()
-        .filter_map(|line| parse_range(line))
-        .filter(|range| section.is_none_or(|wanted| range.section == wanted))
-        .collect()
-}
-
-/// How much of `a` and `b` is the same ground.
-fn overlap(a: (u32, u32), b: (u32, u32)) -> u32 { a.1.min(b.1).saturating_sub(a.0.max(b.0)) }
-
-/// Whether the oracle gives this range to the unit that claims it, to someone
-/// else, or to nobody.
-///
-/// A range contained in the unit's own is *not* the same answer as the unit's
-/// own: it is the right neighbourhood with at least one boundary still
-/// unresolved, and a measurement that conflates the two cannot see the search
-/// stopping early.
-fn range_state(name: &str, section: &str, start: u32, end: u32, oracle: &Blocks) -> State {
-    let own = oracle_ranges(oracle, name, Some(section));
-    if own.iter().any(|range| range.start == start && range.end == end) {
-        return State::Exact;
-    }
-    // Wrong ownership outranks partial credit: a range that reaches into
-    // another unit is a mistake whatever else it also does.
-    let overlaps_other = oracle
-        .iter()
-        .filter(|(other, _)| other.as_str() != name)
-        .flat_map(|(_, lines)| lines)
-        .filter_map(|line| parse_range(line))
-        .any(|range| range.section == section && start < range.end && range.start < end);
-    if overlaps_other {
-        return State::Incorrect;
-    }
-    if own.iter().any(|range| overlap((start, end), (range.start, range.end)) > 0) {
-        return State::Partial;
-    }
-    // Unowned ground is not a wrong answer: the oracle simply has nothing to
-    // say there, and counting it as an error would punish the policy for
-    // covering what nobody has split yet.
-    State::Unknown
-}
-
-/// Who the oracle says owns each function in the target's layout.
-fn ownership_at_layout(
-    layout: &[crate::analysis::coverage::TargetFunction],
-    oracle: &Blocks,
-) -> BTreeMap<(String, String), Option<String>> {
-    let parsed: Vec<(&str, Range)> = oracle
-        .iter()
-        .flat_map(|(name, lines)| lines.iter().map(move |line| (name.as_str(), line)))
-        .filter_map(|(name, line)| Some((name, parse_range(line)?)))
-        .collect();
-
-    layout
-        .iter()
-        .map(|item| {
-            let address = parse_address(&item.address).unwrap_or(0);
-            let owners: Vec<&str> = parsed
-                .iter()
-                .filter(|(_, range)| {
-                    range.section == item.section && range.start <= address && address < range.end
-                })
-                .map(|(name, _)| *name)
-                .collect();
-            // Two owners means the oracle contradicts itself here, which is no
-            // more usable than no owner at all.
-            let owner = (owners.len() == 1).then(|| owners[0].to_string());
-            ((item.section.clone(), item.address.clone()), owner)
-        })
-        .collect()
-}
-
 pub fn run(args: Args) -> Result<()> {
     let root = std::path::absolute(&args.project_root)?;
     let output = args
@@ -360,7 +245,7 @@ pub fn run(args: Args) -> Result<()> {
         .oracle_splits
         .clone()
         .unwrap_or_else(|| root.join("config").join(&args.target).join("splits.txt"));
-    let oracle = Splits::read(&oracle_path)?.blocks;
+    let oracle = Oracle::of(&Splits::read(&oracle_path)?.blocks);
     let source_blocks =
         Splits::read(&root.join("config").join(&args.source).join("splits.txt"))?.blocks;
 
@@ -445,7 +330,7 @@ fn evidence(root: &Path, args: &Args, path: &Path, scenario: Scenario) -> Result
 /// for it.
 fn score_all(
     masked: &CoverageReport,
-    oracle: &Blocks,
+    oracle: &Oracle,
     source_blocks: &Blocks,
     owners: &BTreeMap<(String, String), Option<String>>,
 ) -> Vec<Record> {
@@ -458,7 +343,7 @@ fn score_all(
         .source_units
         .iter()
         .filter(|unit| !unit.autogenerated)
-        .filter(|unit| oracle.contains_key(&unit.name) && masked.mask.hidden.contains(&unit.name))
+        .filter(|unit| oracle.places(&unit.name) && masked.mask.hidden.contains(&unit.name))
         .collect();
     asked.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -476,7 +361,7 @@ fn score_all(
 fn score(
     unit: &CoverageUnit,
     found: Vec<Alternative>,
-    oracle: &Blocks,
+    oracle: &Oracle,
     visible: &Blocks,
     owners: &BTreeMap<(String, String), Option<String>>,
 ) -> Record {
@@ -515,14 +400,6 @@ fn score(
         })
         .collect();
 
-    // Bytes and boundaries are counted over code only, since code is all an
-    // alternative ever claims; a unit's data would otherwise read as
-    // permanently missed.
-    let truth = merged(code_only(oracle_ranges(oracle, name, None)));
-    let retained = merged(code_only(oracle_ranges(visible, name, None)));
-    let oracle_bytes = truth.iter().map(Range::size).sum();
-    let retained_bytes = truth.iter().map(|range| covered(range, &retained)).sum();
-
     // What the unit would own once the first choice is applied — applied for
     // real, through the same code a trial uses. Modelling it as "the split it
     // has, plus the range proposed" would credit a tail-only proposal with
@@ -543,18 +420,9 @@ fn score(
             blocks = visible.clone();
         }
     }
-    let owned = merged(code_only(oracle_ranges(&blocks, name, None)));
-    let attributed_bytes = truth.iter().map(|range| covered(range, &owned)).sum();
-    // Only ground the proposal *adds* counts against it. The retained split is
-    // the scenario's own bookkeeping, and where that disagrees with the oracle
-    // by a few bytes of padding, the policy did not put it there.
-    let wrong_bytes = oracle
-        .iter()
-        .filter(|(other, _)| other.as_str() != name)
-        .flat_map(|(_, lines)| lines)
-        .filter_map(|line| parse_range(line))
-        .map(|range| covered(&range, &owned).saturating_sub(covered(&range, &retained)))
-        .sum();
+    let before = Body::of(visible, name);
+    let after = Body::of(&blocks, name);
+    let measured = crate::analysis::ownership_score::ledger(name, oracle, &before, &after, SCOPE);
 
     // The outcome is about the unit, not about one of its ranges. A unit with
     // code in both `.init` and `.text` is not recovered because one of the two
@@ -562,10 +430,12 @@ fn score(
     let outcome = match selected {
         None => Outcome::Abstained,
         Some(_) if refused.is_some() => Outcome::Refused,
-        Some(_) if wrong_bytes > 0 => Outcome::Incorrect,
-        Some(_) if owned == truth => Outcome::Exact,
-        Some(_) if attributed_bytes > 0 => Outcome::Partial,
-        Some(_) => Outcome::Unowned,
+        _ => crate::analysis::ownership_score::outcome(
+            &measured,
+            &oracle.body(name).within(SCOPE),
+            &after.within(SCOPE),
+            true,
+        ),
     };
 
     // An alternative that revises its neighbours is one transaction, and a
@@ -580,7 +450,7 @@ fn score(
                 .map(|revision| revision.unit.clone())
                 .collect::<BTreeSet<String>>()
                 .into_iter()
-                .map(|owner| owner_effect(&owner, oracle, visible, &blocks))
+                .map(|owner| owner_effect(&owner, oracle, visible, &blocks, SCOPE))
                 .collect()
         })
         .unwrap_or_default();
@@ -592,69 +462,16 @@ fn score(
         offered: offers_candidate(&found),
         refused,
         disposition: alternatives::disposition(unit, &found, visible.contains_key(name)),
-        oracle_bytes,
-        retained_bytes,
-        attributed_bytes,
-        missed_bytes: oracle_bytes.saturating_sub(attributed_bytes),
-        wrong_bytes,
+        oracle_bytes: measured.oracle_bytes,
+        retained_bytes: measured.retained_bytes,
+        attributed_bytes: measured.attributed_bytes,
+        missed_bytes: measured.missed_bytes,
+        wrong_bytes: measured.newly_wrong_bytes,
         owner_effects,
         selected_alternative: selected.cloned(),
         alternatives: scored,
         anchors,
     }
-}
-
-/// What the transaction did to one of the candidate's neighbours.
-fn owner_effect(owner: &str, oracle: &Blocks, before: &Blocks, after: &Blocks) -> OwnerEffect {
-    let truth = merged(code_only(oracle_ranges(oracle, owner, None)));
-    let held = merged(code_only(oracle_ranges(before, owner, None)));
-    let left = merged(code_only(oracle_ranges(after, owner, None)));
-    let correct =
-        |ranges: &[Range]| -> u32 { truth.iter().map(|range| covered(range, ranges)).sum() };
-    let wrong = |ranges: &[Range]| -> u32 {
-        oracle
-            .iter()
-            .filter(|(other, _)| other.as_str() != owner)
-            .flat_map(|(_, lines)| lines)
-            .filter_map(|line| parse_range(line))
-            .map(|range| covered(&range, ranges))
-            .sum()
-    };
-    OwnerEffect {
-        unit: owner.to_string(),
-        lost_bytes: correct(&held).saturating_sub(correct(&left)),
-        wrong_bytes: wrong(&left).saturating_sub(wrong(&held)),
-        exact: left == truth,
-    }
-}
-
-fn code_only(ranges: Vec<Range>) -> Vec<Range> {
-    ranges.into_iter().filter(|range| CODE_SECTIONS.contains(&range.section.as_str())).collect()
-}
-
-/// How much of `range` the set `owned` covers.
-fn covered(range: &Range, owned: &[Range]) -> u32 {
-    owned
-        .iter()
-        .filter(|other| other.section == range.section)
-        .map(|other| overlap((range.start, range.end), (other.start, other.end)))
-        .sum()
-}
-
-/// One range per run of touching or overlapping ranges, so that a split and the
-/// proposal that continues it read as the one range they would become.
-fn merged(mut ranges: Vec<Range>) -> Vec<Range> {
-    ranges.sort_by(|a, b| a.section.cmp(&b.section).then(a.start.cmp(&b.start)));
-    let mut result: Vec<Range> = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        match result.last_mut() {
-            Some(last) if last.section == range.section && range.start <= last.end => {
-                last.end = last.end.max(range.end);
-            }
-            _ => result.push(range),
-        }
-    }
-    result
 }
 
 /// Measures per half of the population, and within each half, split by whether
@@ -848,9 +665,15 @@ fn markdown(
 
 #[cfg(test)]
 mod tests {
+    use indexmap::IndexMap;
+
     use super::*;
     use crate::stages::coverage::alternatives::OwnerRevision;
 
+    /// The interval arithmetic these tests rest on lives in
+    /// [`crate::analysis::ownership_score`] and is tested there. What is tested
+    /// here is the part calibration owns: applying a unit's first choice for
+    /// real and reporting what that did.
     fn blocks(entries: &[(&str, u32, u32)]) -> Blocks {
         let mut map: Blocks = IndexMap::new();
         for (name, start, end) in entries {
@@ -862,60 +685,11 @@ mod tests {
     }
 
     #[test]
-    fn reproducing_both_boundaries_is_exact() {
-        let oracle = blocks(&[("a.cpp", 0x1000, 0x2000)]);
-        assert_eq!(range_state("a.cpp", ".text", 0x1000, 0x2000, &oracle), State::Exact);
-    }
-
-    #[test]
-    fn a_fragment_inside_the_right_unit_is_partial_rather_than_correct() {
-        let oracle = blocks(&[("a.cpp", 0x1000, 0x2000)]);
-        // The old measure called this correct, which made a search that stops
-        // at the first matching fragment look like a search that finished.
-        assert_eq!(range_state("a.cpp", ".text", 0x1100, 0x1200, &oracle), State::Partial);
-    }
-
-    #[test]
-    fn a_range_overlapping_another_unit_is_incorrect() {
-        let oracle = blocks(&[("a.cpp", 0x1000, 0x2000), ("b.cpp", 0x2000, 0x3000)]);
-        assert_eq!(range_state("a.cpp", ".text", 0x1F00, 0x2100, &oracle), State::Incorrect);
-    }
-
-    #[test]
-    fn overrunning_into_unowned_ground_still_counts_as_partial() {
-        let oracle = blocks(&[("a.cpp", 0x1000, 0x2000)]);
-        assert_eq!(range_state("a.cpp", ".text", 0x1000, 0x2400, &oracle), State::Partial);
-    }
-
-    #[test]
-    fn a_range_nobody_owns_is_unknown_rather_than_wrong() {
-        let oracle = blocks(&[("a.cpp", 0x1000, 0x2000)]);
-        assert_eq!(range_state("a.cpp", ".text", 0x5000, 0x5100, &oracle), State::Unknown);
-    }
-
-    #[test]
-    fn a_range_in_another_section_does_not_collide() {
-        let oracle = blocks(&[("b.cpp", 0x1000, 0x2000)]);
-        assert_eq!(range_state("a.cpp", ".data", 0x1100, 0x1200, &oracle), State::Unknown);
-    }
-
-    #[test]
     fn the_partition_is_stable_and_splits_the_population() {
         assert_eq!(partition("a.cpp"), partition("a.cpp"));
         let names: Vec<String> = (0..200).map(|i| format!("unit{i}.cpp")).collect();
         let calibration = names.iter().filter(|n| partition(n) == "calibration").count();
         assert!((40..160).contains(&calibration), "{calibration} of 200");
-    }
-
-    #[test]
-    fn overlap_measures_shared_ground_only() {
-        assert_eq!(overlap((0x100, 0x200), (0x180, 0x300)), 0x80);
-        assert_eq!(overlap((0x100, 0x200), (0x200, 0x300)), 0);
-        assert_eq!(overlap((0x100, 0x200), (0x000, 0x080)), 0);
-    }
-
-    fn range(section: &str, start: u32, end: u32) -> Range {
-        Range { section: section.to_string(), start, end }
     }
 
     /// A unit carrying no evidence of its own: these tests score the ranges
@@ -967,20 +741,8 @@ mod tests {
         oracle
     }
 
-    #[test]
-    fn a_split_and_the_proposal_continuing_it_merge_into_one_range() {
-        assert_eq!(merged(vec![range(".text", 0x100, 0x180), range(".text", 0x180, 0x200)]), vec![
-            range(".text", 0x100, 0x200)
-        ]);
-        // A gap between them is not closed, and sections never merge.
-        assert_eq!(
-            merged(vec![range(".text", 0x100, 0x180), range(".text", 0x190, 0x200)]).len(),
-            2
-        );
-        assert_eq!(
-            merged(vec![range(".text", 0x100, 0x200), range(".init", 0x100, 0x200)]).len(),
-            2
-        );
+    fn scored(name: &str, found: Vec<Alternative>, oracle: &Blocks, visible: &Blocks) -> Record {
+        score(&unit(name, 0), found, &Oracle::of(oracle), visible, &BTreeMap::new())
     }
 
     /// A unit whose evidence produced nothing, holding a split the scenario cut
@@ -988,7 +750,13 @@ mod tests {
     fn truncated(found: Vec<Alternative>) -> Record {
         let oracle = blocks(&[("CCollidableSphere.cpp", 0x1000, 0x2400)]);
         let visible = blocks(&[("CCollidableSphere.cpp", 0x1000, 0x2380)]);
-        score(&unit("CCollidableSphere.cpp", 0x1400), found, &oracle, &visible, &BTreeMap::new())
+        score(
+            &unit("CCollidableSphere.cpp", 0x1400),
+            found,
+            &Oracle::of(&oracle),
+            &visible,
+            &BTreeMap::new(),
+        )
     }
 
     #[test]
@@ -1040,8 +808,7 @@ mod tests {
     #[test]
     fn getting_one_of_two_code_sections_right_is_not_an_exact_recovery() {
         let found = vec![alternative(".init", 0x1000, 0x1100)];
-        let record =
-            score(&unit("a.cpp", 0), found, &two_sections(), &IndexMap::new(), &BTreeMap::new());
+        let record = scored("a.cpp", found, &two_sections(), &IndexMap::new());
         // `.init` is precisely right and `.text` is missing entirely, which
         // leaves most of the unit unrecovered — the old measure called this
         // exact, because it only ever looked at the first range.
@@ -1059,7 +826,7 @@ mod tests {
             "\t.init        start:0x00001000 end:0x00001100".to_string(),
         ]);
         let found = vec![alternative(".text", 0x2000, 0x2400)];
-        let record = score(&unit("a.cpp", 0), found, &two_sections(), &visible, &BTreeMap::new());
+        let record = scored("a.cpp", found, &two_sections(), &visible);
         assert_eq!(record.outcome, Outcome::Refused);
         assert_eq!(record.retained_bytes, 0x100);
         assert_eq!(record.attributed_bytes, 0x100);
@@ -1073,7 +840,7 @@ mod tests {
             "\t.text        start:0x00003000 end:0x00003200".to_string(),
         ]);
         let found = vec![alternative(".text", 0x2000, 0x2400)];
-        let record = score(&unit("a.cpp", 0), found, &oracle, &IndexMap::new(), &BTreeMap::new());
+        let record = scored("a.cpp", found, &oracle, &IndexMap::new());
         assert_eq!(record.outcome, Outcome::Partial);
         assert_eq!(record.oracle_bytes, 0x600);
         assert_eq!(record.attributed_bytes, 0x400);
@@ -1087,7 +854,7 @@ mod tests {
         // answerable for those bytes.
         let oracle = blocks(&[("a.cpp", 0x1000, 0x2000), ("b.cpp", 0x2000, 0x3000)]);
         let visible = blocks(&[("a.cpp", 0x1F00, 0x2080)]);
-        let record = score(&unit("a.cpp", 0), Vec::new(), &oracle, &visible, &BTreeMap::new());
+        let record = scored("a.cpp", Vec::new(), &oracle, &visible);
         assert_eq!(record.wrong_bytes, 0);
         assert_eq!(record.outcome, Outcome::Abstained);
     }
@@ -1122,7 +889,7 @@ mod tests {
             (0, 0x99),
             (0, 0x50),
         )];
-        let record = score(&unit("a.cpp", 0), found, &oracle, &visible, &BTreeMap::new());
+        let record = scored("a.cpp", found, &oracle, &visible);
         assert_eq!(record.outcome, Outcome::Refused);
         assert!(record.refused.is_some());
         // Nothing moved, so nothing is credited — least of all the range the
@@ -1143,7 +910,7 @@ mod tests {
             (0x2000, 0x3000),
             (0x2100, 0x3000),
         )];
-        let record = score(&unit("a.cpp", 0), found, &oracle, &visible, &BTreeMap::new());
+        let record = scored("a.cpp", found, &oracle, &visible);
         let [effect] = &record.owner_effects[..] else { panic!("{:?}", record.owner_effects) };
         assert_eq!(effect.unit, "b.cpp");
         assert_eq!(effect.lost_bytes, 0x100);
@@ -1156,7 +923,7 @@ mod tests {
     fn claiming_a_neighbours_ground_is_incorrect_whatever_else_it_gets_right() {
         let oracle = blocks(&[("a.cpp", 0x1000, 0x2000), ("b.cpp", 0x2000, 0x3000)]);
         let found = vec![alternative(".text", 0x1000, 0x2100)];
-        let record = score(&unit("a.cpp", 0), found, &oracle, &IndexMap::new(), &BTreeMap::new());
+        let record = scored("a.cpp", found, &oracle, &IndexMap::new());
         assert_eq!(record.outcome, Outcome::Incorrect);
         assert_eq!(record.attributed_bytes, 0x1000);
         assert_eq!(record.wrong_bytes, 0x100);

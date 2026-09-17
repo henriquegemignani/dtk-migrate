@@ -7,7 +7,11 @@
 //! not sorted by address, and re-sorting it would turn every untouched unit into
 //! a diff.
 
-use std::{collections::HashMap, path::Path, sync::LazyLock};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::Path,
+    sync::LazyLock,
+};
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
@@ -29,7 +33,7 @@ static ENTRY: LazyLock<Regex> = LazyLock::new(|| {
 pub const ALIGNMENT_REASON: &str = "split boundary doesn't meet the section's required alignment";
 
 /// One section's address range within a unit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct Range {
     pub section: String,
     pub start: u32,
@@ -48,6 +52,22 @@ pub fn parse_range(line: &str) -> Option<Range> {
         start: u32::from_str_radix(&captures["start"], 16).ok()?,
         end: u32::from_str_radix(&captures["end"], 16).ok()?,
     })
+}
+
+/// The tokens an entry line carries after its address range.
+///
+/// dtk writes per-block attributes there — `align:4`, `common` — and they are
+/// not decoration: `common` says the block is BSS the linker merges, and a
+/// migration that rewrote a block without it would change what the project
+/// means while leaving every address identical. Scoring compares them
+/// separately from the addresses for exactly that reason.
+pub fn parse_attributes(line: &str) -> BTreeSet<String> {
+    let trimmed = line.trim();
+    let Some(captures) = ENTRY.captures(trimmed) else { return BTreeSet::new() };
+    trimmed[captures.get(0).map_or(0, |m| m.end())..]
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Strips a proposal file's leading `#` and trailing `# candidate: ...`
