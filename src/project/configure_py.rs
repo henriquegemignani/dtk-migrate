@@ -117,7 +117,11 @@ impl Configure {
         let mut names: BTreeSet<String> = self
             .declarations
             .iter()
-            .filter(|d| matches!(&d.status, Status::For(versions) if versions.iter().any(|v| v == version)))
+            .filter(|d| match &d.status {
+                Status::Universal => true,
+                Status::For(versions) => versions.iter().any(|v| v == version),
+                Status::None | Status::Unrewritable(_) => false,
+            })
             .map(|d| d.name.clone())
             .collect();
         for block in &self.legacy {
@@ -498,9 +502,13 @@ mod tests {
     fn configured_names_reports_what_is_already_enabled_for_the_target() {
         let configure = parse(
             "    Object(MatchingFor(\"NTSC\", \"PAL\"), \"a.cpp\"),\n\
-             \x20   Object(MatchingFor(\"NTSC\"), \"b.cpp\"),\n",
+             \x20   Object(MatchingFor(\"NTSC\"), \"b.cpp\"),\n\
+             \x20   Object(Matching, \"universal.cpp\"),\n",
         );
-        assert_eq!(configure.configured_names("PAL"), BTreeSet::from(["a.cpp".to_string()]));
+        assert_eq!(
+            configure.configured_names("PAL"),
+            BTreeSet::from(["a.cpp".to_string(), "universal.cpp".to_string()])
+        );
     }
 
     #[test]

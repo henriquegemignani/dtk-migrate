@@ -13,11 +13,11 @@ use serde::Serialize;
 
 use crate::{
     run::{
-        Environment, FrozenTools, ORDER, RunDir, RunRecord, SCHEMA, StageResult, publish,
-        run_stage, write_json,
+        Environment, FrozenTools, ORDER, RepositoryState, RunDir, RunRecord, SCHEMA, StageResult,
+        publish, run_stage, write_json,
     },
     stages::Prepared,
-    workspace::{ProjectLock, Snapshot},
+    workspace::{LOCK_NAME, ProjectLock, Snapshot},
 };
 
 #[derive(ClapArgs, Debug)]
@@ -167,6 +167,16 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
         bail!("--workers and --build-jobs must be positive");
     }
     let stages = resolve_stages(&args.stages)?;
+    // Capture the inputs before creating the run directory or freezing tools,
+    // with Git state on both sides so a concurrent edit cannot be recorded as
+    // belonging to a clean revision. The root lock is already held, so
+    // repository_state excludes that one owned untracked path.
+    let repository_before = repository_state(root)?;
+    let owner = Snapshot::of(root)?;
+    let repository = repository_state(root)?;
+    if repository != repository_before {
+        bail!("The project's Git state changed while its inputs were being captured")
+    }
 
     let id = timestamp_id();
     let dir = RunDir { path: publish::run_directory(root, &id)? };
@@ -184,7 +194,6 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
     let hook = freeze(&std::env::current_exe()?, &tools_dir)?;
     let python = resolve_python(args.python.as_deref())?;
 
-    let owner = Snapshot::of(root)?;
     let source_bytes: u64 = owner
         .manifest
         .keys()
@@ -221,12 +230,38 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
         only: args.only.clone(),
         build_timeout_seconds: Some(args.build_timeout),
         environment: Environment::of(&tools)?,
+        repository,
         tools,
         owner,
     };
     write_json(&dir.path.join("run.json"), &record)?;
     tracing::info!("Run {}: {}", record.id, dir.path.display());
     Ok((dir, record))
+}
+
+fn repository_state(root: &Path) -> Result<Option<RepositoryState>> {
+    let output =
+        std::process::Command::new("git").arg("-C").arg(root).args(["rev-parse", "HEAD"]).output();
+    let Ok(output) = output else { return Ok(None) };
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let head = String::from_utf8(output.stdout)?.trim().to_string();
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=normal"])
+        .output()
+        .context("Failed to inspect the project's Git state")?;
+    if !status.status.success() {
+        bail!("git status failed in {}", root.display())
+    }
+    // The caller already owns this lock, and Prime intentionally does not
+    // ignore it. It is the only worktree change the tool itself made before
+    // recording provenance, so exclude exactly its untracked porcelain entry.
+    let owned_lock = format!("?? {LOCK_NAME}\0");
+    let clean = status.stdout.is_empty() || status.stdout == owned_lock.as_bytes();
+    Ok(Some(RepositoryState { head, clean }))
 }
 
 fn resume(root: &Path, id: &str) -> Result<(RunDir, RunRecord)> {
@@ -381,5 +416,38 @@ mod tests {
         let id = timestamp_id();
         assert!(id.len() >= 12, "{id}");
         assert!(id.chars().all(|c| c.is_ascii_digit() || c == '-'), "{id}");
+    }
+
+    #[test]
+    fn the_tools_own_lock_does_not_make_a_clean_repository_dirty() {
+        let directory = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(directory.path().join("tracked"), "original").unwrap();
+        git(&["add", "tracked"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ]);
+
+        std::fs::write(directory.path().join(LOCK_NAME), "owned").unwrap();
+        assert!(repository_state(directory.path()).unwrap().unwrap().clean);
+
+        std::fs::write(directory.path().join("untracked"), "user input").unwrap();
+        assert!(!repository_state(directory.path()).unwrap().unwrap().clean);
     }
 }

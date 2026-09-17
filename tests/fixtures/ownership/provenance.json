@@ -7,7 +7,6 @@
   "oracle_expected_retail_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
   "oracle_verified_dol_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
   "oracle_splits_sha256": "984253aeb4887e64b9a1086de1ddf60a53db611f865f5fe673ead5c0acce90eb",
-  "run_published_dol_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
   "source": "GM8E01_00",
   "target": "GM8P01_00"
 }

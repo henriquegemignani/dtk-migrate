@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 /// The stages, in the only order they may run in.
 ///
@@ -92,8 +92,19 @@ pub struct RunRecord {
     pub build_timeout_seconds: Option<f64>,
     pub tools: FrozenTools,
     pub environment: Environment,
+    /// Git identity of the owner checkout before any stage ran. Absent for
+    /// projects outside Git; a benchmark may require it when a revision-bound
+    /// build proof matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RepositoryState>,
     /// The owner project's inputs as they were when the run started.
     pub owner: Snapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryState {
+    pub head: String,
+    pub clean: bool,
 }
 
 /// Copies of the binaries a run used, taken so a mid-run upgrade cannot change

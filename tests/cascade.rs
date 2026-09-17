@@ -414,6 +414,9 @@ impl Fixture {
             .args(["--ninja", &self.ninja.display().to_string()])
             .args(["--python", &self.python.display().to_string()])
             .env("DTK_MIGRATE_EVIDENCE_DIR", &self.evidence)
+            // This fixture asserts an INFO-level reuse message. Keep ambient
+            // developer logging preferences from changing the test's contract.
+            .env("RUST_LOG", "info")
             .env_remove("DTK_MIGRATE_FIXTURE_ABORT");
         for pair in extra.chunks(2) {
             command.env(pair[0], pair[1]);

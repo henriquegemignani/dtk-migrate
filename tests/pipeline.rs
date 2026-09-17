@@ -181,6 +181,7 @@ impl Fixture {
             .arg("--project-root")
             .arg(&self.root)
             .args(args)
+            .env("RUST_LOG", "info")
             .output()
             .expect("failed to start dtk-migrate")
     }

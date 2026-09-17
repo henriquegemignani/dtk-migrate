@@ -54,15 +54,15 @@ use crate::{
         SelectionQuality, Verification, ledger, outcome, selection_quality,
     },
     project::{
-        configure_py::{Configure, Status},
+        configure_py::Configure,
         splits::{Range, Splits},
     },
 };
 
 /// Bumped when the manifest's meaning changes. The historical run's own schema
 /// is frozen — see [`legacy`] — so this versions only what `prepare` writes.
-pub const MANIFEST_SCHEMA: u32 = 3;
-pub const SCORE_SCHEMA: u32 = 3;
+pub const MANIFEST_SCHEMA: u32 = 4;
+pub const SCORE_SCHEMA: u32 = 4;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -112,14 +112,19 @@ pub struct PrepareArgs {
     /// A saved oracle `config.yml`, instead of reading the Git blob.
     #[arg(long)]
     pub oracle_config: Option<PathBuf>,
-    /// The baseline revision's built target DOL. Its SHA-1 must equal the
-    /// retail hash declared by that revision before it is recorded as proof.
+    /// A baseline DOL whose SHA-1 is checked against the revision's declared
+    /// retail hash. This proves the artifact's bytes, not its linker inputs.
     #[arg(long)]
     pub baseline_dol: Option<PathBuf>,
-    /// The oracle revision's built target DOL. Without this proof, source-linked
-    /// oracle units remain explicitly unverified.
+    /// An oracle DOL whose SHA-1 is checked against the revision's declared
+    /// retail hash. This proves the artifact's bytes, not its linker inputs.
     #[arg(long)]
     pub oracle_dol: Option<PathBuf>,
+    /// A completed migration run at the oracle revision whose `verify` stage
+    /// proved compiled link inputs and retail bytes. Only units covered by this
+    /// proof are trusted as source-linked oracle answers.
+    #[arg(long, conflicts_with = "oracle_dol")]
+    pub oracle_verification_run: Option<PathBuf>,
     #[arg(long)]
     pub output: PathBuf,
     /// Also write the two revisions' split files and their linkage, small
@@ -168,8 +173,9 @@ pub struct Revision {
     pub configure_sha256: Option<String>,
     /// Retail target hash declared by this revision's `config.yml`.
     pub expected_retail_sha1: String,
-    /// SHA-1 of a DOL actually built from this revision, when supplied and
-    /// checked against `expected_retail_sha1` by `prepare`.
+    /// SHA-1 of a supplied DOL checked against `expected_retail_sha1`. This says
+    /// nothing about which objects were linked into it; source-link trust also
+    /// requires an explicit verified-linkage set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_dol_sha1: Option<String>,
 }
@@ -227,10 +233,17 @@ impl Manifest {
         }
         validate_revision("baseline", &manifest.baseline)?;
         validate_revision("oracle", &manifest.oracle)?;
-        if manifest.units.values().any(|unit| unit.trust == Trust::SourceLinked)
-            && !manifest.oracle.retail_verified()
-        {
-            bail!("Manifest marks source-linked oracle units as trusted without a verified DOL")
+        if manifest.units.values().any(|unit| unit.trust == Trust::SourceLinked) {
+            if !manifest.oracle.retail_verified() {
+                bail!("Manifest marks source-linked oracle units as trusted without a retail DOL")
+            }
+            if manifest
+                .units
+                .values()
+                .any(|unit| unit.trust == Trust::SourceLinked && !unit.oracle_linked)
+            {
+                bail!("Manifest trusts a unit the oracle does not declare source-linked")
+            }
         }
         Ok(manifest)
     }
@@ -299,6 +312,10 @@ fn verified_dol(path: Option<&PathBuf>, expected: &str, revision: &str) -> Resul
 
 /// Reads one path at one revision, without touching the working tree.
 fn blob(root: &Path, revision: &str, path: &str) -> Result<String> {
+    String::from_utf8(blob_bytes(root, revision, path)?).context("Blob is not UTF-8")
+}
+
+fn blob_bytes(root: &Path, revision: &str, path: &str) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -311,7 +328,7 @@ fn blob(root: &Path, revision: &str, path: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    String::from_utf8(output.stdout).context("Blob is not UTF-8")
+    Ok(output.stdout)
 }
 
 /// Either a saved file or a blob, so a manifest can be built from a checkout
@@ -341,6 +358,10 @@ fn source_text(
 pub struct Linkage {
     pub baseline: BTreeSet<String>,
     pub oracle: BTreeSet<String>,
+    /// Oracle declarations whose compiled objects a completed verification run
+    /// proved were real linker inputs while reproducing retail bytes.
+    #[serde(default)]
+    pub verified_oracle: BTreeSet<String>,
 }
 
 /// Builds a manifest from the two revisions' splits and their linkage.
@@ -365,6 +386,12 @@ pub fn build_manifest(
             oracle.expected_retail_sha1
         )
     }
+    if !linkage.verified_oracle.is_subset(&linkage.oracle) {
+        bail!("Verified oracle linkage names units the oracle does not declare source-linked")
+    }
+    if !linkage.verified_oracle.is_empty() && !oracle.retail_verified() {
+        bail!("Verified oracle linkage requires a retail-identical oracle DOL")
+    }
     let before = Splits::parse(baseline_splits)?.blocks;
     let after = Splits::parse(oracle_splits)?.blocks;
 
@@ -382,7 +409,7 @@ pub fn build_manifest(
             oracle: oracle_body,
             baseline_linked: linkage.baseline.contains(name),
             oracle_linked: oracle_links,
-            trust: if oracle_links && oracle.retail_verified() {
+            trust: if linkage.verified_oracle.contains(name) && oracle.retail_verified() {
                 Trust::SourceLinked
             } else {
                 Trust::Unverified
@@ -420,17 +447,127 @@ pub fn build_manifest(
 
 /// Which units a `configure.py` links from source for one version.
 pub fn linked(text: &str, version: &str) -> Result<BTreeSet<String>> {
-    let configure = Configure::parse(text)?;
-    Ok(configure
-        .declarations()
+    Ok(Configure::parse(text)?.configured_names(version))
+}
+
+#[derive(Debug)]
+struct OracleVerification {
+    dol_sha1: String,
+    units: BTreeSet<String>,
+}
+
+fn supported_run_schema(schema: u32) -> bool { matches!(schema, 1..=3) }
+
+const REVISION_BOUND_RUN_SCHEMA: u32 = 3;
+
+struct OracleInputs<'a> {
+    target: &'a str,
+    configure: &'a str,
+    splits: &'a str,
+    config: &'a str,
+    expected_dol_sha1: &'a str,
+    declared: &'a BTreeSet<String>,
+    commit: &'a str,
+}
+
+/// Reads the durable result of the pipeline's verification stage. Unlike a DOL
+/// path, this binds retail bytes to the exact project inputs the run froze and
+/// to the stage that checked every configured unit against Ninja's real link
+/// inputs.
+fn oracle_verification(run: &Path, oracle: &OracleInputs<'_>) -> Result<OracleVerification> {
+    let summary: legacy::Summary = read_json(&run.join("result.json"))?;
+    let record: legacy::Record = read_json(&run.join("run.json"))?;
+    let journal: legacy::Journal = read_json(&run.join("publication.json"))?;
+    validate_run_schemas(summary.schema, record.schema)?;
+    if record.schema < REVISION_BOUND_RUN_SCHEMA {
+        bail!(
+            "Oracle linkage proof requires run schema {REVISION_BOUND_RUN_SCHEMA}, which records \
+             revision-bound repository provenance"
+        )
+    }
+    if summary.id != record.id {
+        bail!("Oracle verification result and run record have different run IDs")
+    }
+    if summary.source != record.source {
+        bail!("Oracle verification result and run record have different source versions")
+    }
+    if summary.target != oracle.target || record.target != oracle.target {
+        bail!("Oracle verification run targets a different version than {}", oracle.target)
+    }
+    if record.stages != ["verify"] {
+        bail!("Oracle linkage proof must come from a verify-only run")
+    }
+    let repository = record
+        .repository
+        .as_ref()
+        .context("Oracle verification run did not record its Git revision")?;
+    if !repository.clean {
+        bail!("Oracle verification run started from a dirty Git checkout")
+    }
+    if !repository.head.eq_ignore_ascii_case(oracle.commit) {
+        bail!("Oracle verification run was not built from oracle revision {}", oracle.commit)
+    }
+    if journal.status != "published" {
+        bail!("Oracle verification run was not published")
+    }
+
+    let expected_inputs = [
+        ("configure.py".to_string(), digest(oracle.configure.as_bytes())),
+        (format!("config/{}/splits.txt", oracle.target), digest(oracle.splits.as_bytes())),
+        (format!("config/{}/config.yml", oracle.target), digest(oracle.config.as_bytes())),
+    ];
+    for (path, expected) in expected_inputs {
+        if record.owner.manifest.get(&path) != Some(&expected) {
+            bail!("Oracle verification run did not freeze the manifest's exact {path}")
+        }
+    }
+
+    let stage = summary
+        .stages
+        .get("verify")
+        .context("Oracle verification run has no verify-stage result")?;
+    if stage.validation != "compiled-link-inputs-and-retail-bytes" {
+        bail!("Oracle verification stage did not certify compiled linker inputs")
+    }
+    if !stage.dol_sha1.eq_ignore_ascii_case(oracle.expected_dol_sha1)
+        || !summary.published_dol_sha1.eq_ignore_ascii_case(oracle.expected_dol_sha1)
+    {
+        bail!("Oracle verification run did not publish the declared retail DOL")
+    }
+    let prepared: legacy::StoredPreparation = read_json(&run.join("verify/prepared.json"))?;
+    let unlinked: BTreeSet<&str> = prepared
+        .prepared
+        .events
         .iter()
-        .filter(|declaration| match &declaration.status {
-            Status::Universal => true,
-            Status::For(versions) => versions.iter().any(|v| v == version),
-            Status::None | Status::Unrewritable(_) => false,
-        })
-        .map(|declaration| declaration.name.clone())
-        .collect())
+        .filter(|event| event.status == "configured-without-split")
+        .map(|event| event.unit.as_str())
+        .collect();
+    let units =
+        oracle.declared.iter().filter(|name| !unlinked.contains(name.as_str())).cloned().collect();
+    Ok(OracleVerification { dol_sha1: stage.dol_sha1.clone(), units })
+}
+
+fn resolve_revision(root: &Path, revision: &str) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--verify", &format!("{revision}^{{commit}}")])
+        .output()
+        .with_context(|| format!("Failed to resolve oracle revision {revision}"))?;
+    if !output.status.success() {
+        bail!("Cannot resolve oracle revision {revision}")
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+fn validate_run_schemas(summary: u32, record: u32) -> Result<()> {
+    if summary != record {
+        bail!("Run schema differs between result.json ({summary}) and run.json ({record})")
+    }
+    if !supported_run_schema(summary) {
+        bail!("Run schema {summary} is unsupported; this scorer accepts only schemas 1, 2 and 3")
+    }
+    Ok(())
 }
 
 pub fn prepare(args: &PrepareArgs) -> Result<()> {
@@ -453,9 +590,32 @@ pub fn prepare(args: &PrepareArgs) -> Result<()> {
     let baseline_retail = retail_sha1(&baseline_config)?;
     let oracle_retail = retail_sha1(&oracle_config)?;
 
+    let baseline_linked = linked(&baseline_configure, &args.target)?;
+    let oracle_linked = linked(&oracle_configure, &args.target)?;
+    let oracle_commit = if args.oracle_verification_run.is_some() {
+        Some(resolve_revision(&root, &args.oracle)?)
+    } else {
+        None
+    };
+    let verification = args
+        .oracle_verification_run
+        .as_deref()
+        .map(|run| {
+            oracle_verification(run, &OracleInputs {
+                target: &args.target,
+                configure: &oracle_configure,
+                splits: &oracle_splits,
+                config: &oracle_config,
+                expected_dol_sha1: &oracle_retail,
+                declared: &oracle_linked,
+                commit: oracle_commit.as_deref().expect("verification implies a resolved oracle"),
+            })
+        })
+        .transpose()?;
     let linkage = Linkage {
-        baseline: linked(&baseline_configure, &args.target)?,
-        oracle: linked(&oracle_configure, &args.target)?,
+        baseline: baseline_linked,
+        oracle: oracle_linked,
+        verified_oracle: verification.as_ref().map(|proof| proof.units.clone()).unwrap_or_default(),
     };
     let manifest = build_manifest(
         &args.source,
@@ -477,11 +637,10 @@ pub fn prepare(args: &PrepareArgs) -> Result<()> {
             splits_sha256: digest(oracle_splits.as_bytes()),
             configure_sha256: Some(digest(oracle_configure.as_bytes())),
             expected_retail_sha1: oracle_retail.clone(),
-            verified_dol_sha1: verified_dol(
-                args.oracle_dol.as_ref(),
-                &oracle_retail,
-                &args.oracle,
-            )?,
+            verified_dol_sha1: match verification {
+                Some(proof) => Some(proof.dol_sha1),
+                None => verified_dol(args.oracle_dol.as_ref(), &oracle_retail, &args.oracle)?,
+            },
         },
         &oracle_splits,
         &linkage,
@@ -516,11 +675,9 @@ mod legacy {
 
     #[derive(Debug, Clone, Deserialize)]
     pub struct Summary {
-        #[serde(default)]
+        pub schema: u32,
         pub id: String,
-        #[serde(default)]
         pub source: String,
-        #[serde(default)]
         pub target: String,
         #[serde(default)]
         pub stages: BTreeMap<String, Stage>,
@@ -542,6 +699,10 @@ mod legacy {
         pub selections: BTreeMap<String, String>,
         #[serde(default)]
         pub events: Vec<Event>,
+        #[serde(default)]
+        pub validation: String,
+        #[serde(default)]
+        pub dol_sha1: String,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -553,6 +714,7 @@ mod legacy {
 
     #[derive(Debug, Clone, Default, Deserialize)]
     pub struct StoredPreparation {
+        #[serde(flatten)]
         #[serde(default)]
         pub prepared: Prepared,
     }
@@ -561,6 +723,8 @@ mod legacy {
     pub struct Prepared {
         #[serde(default)]
         pub candidates: Vec<Candidate>,
+        #[serde(default)]
+        pub events: Vec<Event>,
     }
 
     #[derive(Debug, Clone, Default, Deserialize)]
@@ -588,12 +752,21 @@ mod legacy {
     /// a run which then changed nothing.
     #[derive(Debug, Clone, Deserialize)]
     pub struct Record {
-        #[serde(default)]
+        pub schema: u32,
+        pub id: String,
         pub source: String,
-        #[serde(default)]
         pub target: String,
+        pub stages: Vec<String>,
+        #[serde(default)]
+        pub repository: Option<RepositoryState>,
         #[serde(default)]
         pub owner: Owner,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct RepositoryState {
+        pub head: String,
+        pub clean: bool,
     }
 
     #[derive(Debug, Clone, Default, Deserialize)]
@@ -682,7 +855,10 @@ impl RunFacts {
             after,
             published: true,
             published_dol_sha1: None,
-            proposal_history_complete: true,
+            // A reduced fixture deliberately omits stage evidence. Even when
+            // the source run retained every proposal, this representation
+            // cannot make an exhaustive proposal-recall claim.
+            proposal_history_complete: false,
             baseline_splits_sha256: None,
             use_manifest_baseline: false,
             allow_structural_baseline: true,
@@ -709,6 +885,10 @@ pub fn read_run(run: &Path) -> Result<RunFacts> {
     let mut summary: legacy::Summary = read_json(&run.join("result.json"))?;
     let record: legacy::Record = read_json(&run.join("run.json"))?;
     let journal: legacy::Journal = read_json(&run.join("publication.json"))?;
+    validate_run_schemas(summary.schema, record.schema)?;
+    if record.id != summary.id {
+        bail!("run.json names run {} but result.json names {}", record.id, summary.id)
+    }
     if journal.status != "published" {
         bail!(
             "The run's publication status is `{}`; only a completed, published run can be scored",
@@ -1519,7 +1699,7 @@ fn score_command(args: &ScoreArgs) -> Result<()> {
         );
     }
     if let Some(directory) = &args.fixture {
-        write_run_fixture(directory, &facts)?;
+        write_run_fixture(directory, &facts, &manifest)?;
     }
     if !result.proposal_history_complete {
         println!(
@@ -1576,10 +1756,43 @@ fn write_oracle_fixture(
 }
 
 /// What the run left behind, beside the oracle files `prepare` wrote.
-fn write_run_fixture(directory: &Path, facts: &RunFacts) -> Result<()> {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RunFixtureProvenance {
+    pub schema: u32,
+    pub run_id: String,
+    pub source: String,
+    pub target: String,
+    pub baseline_splits_sha256: String,
+    pub published_splits_sha256: String,
+    pub published_dol_sha1: String,
+    pub source_proposal_history_complete: bool,
+}
+
+fn write_run_fixture(directory: &Path, facts: &RunFacts, manifest: &Manifest) -> Result<()> {
     std::fs::create_dir_all(directory)?;
-    std::fs::write(directory.join("published.splits.txt"), render_splits(&facts.after))?;
+    let published = if facts.use_manifest_baseline {
+        render_splits(&manifest.baseline_blocks())
+    } else {
+        render_splits(&facts.after)
+    };
+    std::fs::write(directory.join("published.splits.txt"), &published)?;
     std::fs::write(directory.join("run-id.txt"), format!("{}\n", facts.id))?;
+    write_json(&directory.join("run-provenance.json"), &RunFixtureProvenance {
+        schema: 1,
+        run_id: facts.id.clone(),
+        source: facts.source.clone(),
+        target: facts.target.clone(),
+        baseline_splits_sha256: facts
+            .baseline_splits_sha256
+            .clone()
+            .context("Run fixture has no frozen baseline split digest")?,
+        published_splits_sha256: digest(published.as_bytes()),
+        published_dol_sha1: facts
+            .published_dol_sha1
+            .clone()
+            .context("Run fixture has no published DOL digest")?,
+        source_proposal_history_complete: facts.proposal_history_complete,
+    })?;
     println!("Fixture: {}", directory.display());
     Ok(())
 }
@@ -1886,6 +2099,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preparation_reads_the_flattened_on_disk_shape() {
+        let stored: legacy::StoredPreparation = serde_json::from_value(serde_json::json!({
+            "candidates": [{ "name": "u.cpp", "evidence": { "lines": ["body"] } }],
+            "events": [{ "unit": "empty.cpp", "status": "configured-without-split" }],
+            "source_fingerprint": "fingerprint"
+        }))
+        .unwrap();
+        assert_eq!(stored.prepared.candidates.len(), 1);
+        assert_eq!(stored.prepared.events.len(), 1);
+    }
+
+    #[test]
     fn an_exact_proposal_from_an_earlier_stage_is_not_a_ranking_failure() {
         let exact = vec!["\t.text       start:0x00001000 end:0x00002000".to_string()];
         let wrong = vec!["\t.text       start:0x00001000 end:0x00001800".to_string()];
@@ -1913,12 +2138,24 @@ mod tests {
                     objects = [\n\
                     \x20   Object(MatchingFor(\"A\"), \"only_a.cpp\"),\n\
                     \x20   Object(Matching, \"both.cpp\"),\n\
-                    \x20   Object(NonMatching, \"neither.cpp\"),\n]\n";
+                    \x20   Object(NonMatching, \"legacy_b.cpp\"),\n]\n\n\
+                    # BEGIN AUTOMATED SOURCE VERIFICATION\n\
+                    # Version: B\n\
+                    if config.version == \"B\":\n\
+                    \x20   _verified_source_units = {\"legacy_b.cpp\"}\n\
+                    \x20   for _verified_lib in config.libs:\n\
+                    \x20       for _verified_obj in _verified_lib['objects']:\n\
+                    \x20           if _verified_obj.name in _verified_source_units:\n\
+                    \x20               _verified_obj.completed = True\n\
+                    # END AUTOMATED SOURCE VERIFICATION\n";
         assert_eq!(
             linked(text, "A").unwrap(),
             BTreeSet::from(["only_a.cpp".to_string(), "both.cpp".to_string()])
         );
-        assert_eq!(linked(text, "B").unwrap(), BTreeSet::from(["both.cpp".to_string()]));
+        assert_eq!(
+            linked(text, "B").unwrap(),
+            BTreeSet::from(["both.cpp".to_string(), "legacy_b.cpp".to_string()])
+        );
     }
 
     #[test]
@@ -1931,8 +2168,11 @@ mod tests {
             expected_retail_sha1: TEST_RETAIL.into(),
             verified_dol_sha1: verified.then(|| TEST_RETAIL.into()),
         };
-        let linkage =
-            Linkage { baseline: BTreeSet::new(), oracle: BTreeSet::from(["a.cpp".to_string()]) };
+        let mut linkage = Linkage {
+            baseline: BTreeSet::new(),
+            oracle: BTreeSet::from(["a.cpp".to_string()]),
+            verified_oracle: BTreeSet::new(),
+        };
         let unverified = build_manifest(
             "NTSC",
             "PAL",
@@ -1945,6 +2185,7 @@ mod tests {
         .unwrap();
         assert_eq!(unverified.units["a.cpp"].trust, Trust::Unverified);
 
+        linkage.verified_oracle.insert("a.cpp".to_string());
         let verified = build_manifest(
             "NTSC",
             "PAL",
@@ -1956,6 +2197,150 @@ mod tests {
         )
         .unwrap();
         assert_eq!(verified.units["a.cpp"].trust, Trust::SourceLinked);
+    }
+
+    #[test]
+    fn oracle_verification_binds_linkage_to_the_frozen_project_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let configure = "configured";
+        let splits = "Sections:\n";
+        let config = "hash: 0000000000000000000000000000000000000000\n";
+        let manifest = serde_json::json!({
+            "configure.py": digest(configure.as_bytes()),
+            "config/PAL/splits.txt": digest(splits.as_bytes()),
+            "config/PAL/config.yml": digest(config.as_bytes()),
+        });
+        std::fs::write(
+            directory.path().join("run.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 3,
+                "id": "proof",
+                "source": "NTSC",
+                "target": "PAL",
+                "stages": ["verify"],
+                "repository": { "head": "oracle-commit", "clean": true },
+                "owner": { "manifest": manifest },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("result.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 3,
+                "id": "proof",
+                "source": "NTSC",
+                "target": "PAL",
+                "published_dol_sha1": TEST_RETAIL,
+                "stages": {
+                    "verify": {
+                        "validation": "compiled-link-inputs-and-retail-bytes",
+                        "dol_sha1": TEST_RETAIL
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("publication.json"),
+            r#"{"status":"published","changes":{}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(directory.path().join("verify")).unwrap();
+        std::fs::write(
+            directory.path().join("verify/prepared.json"),
+            r#"{"candidates":[],"events":[]}"#,
+        )
+        .unwrap();
+
+        let declared = BTreeSet::from(["a.cpp".to_string()]);
+        let proof = oracle_verification(directory.path(), &OracleInputs {
+            target: "PAL",
+            configure,
+            splits,
+            config,
+            expected_dol_sha1: TEST_RETAIL,
+            declared: &declared,
+            commit: "oracle-commit",
+        })
+        .unwrap();
+        assert_eq!(proof.units, declared);
+
+        let result_path = directory.path().join("result.json");
+        let run_path = directory.path().join("run.json");
+        let mut result: serde_json::Value = read_json(&result_path).unwrap();
+        let mut record: serde_json::Value = read_json(&run_path).unwrap();
+        result["schema"] = serde_json::json!(2);
+        record["schema"] = serde_json::json!(2);
+        std::fs::write(&result_path, serde_json::to_vec(&result).unwrap()).unwrap();
+        std::fs::write(&run_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let error = oracle_verification(directory.path(), &OracleInputs {
+            target: "PAL",
+            configure,
+            splits,
+            config,
+            expected_dol_sha1: TEST_RETAIL,
+            declared: &declared,
+            commit: "oracle-commit",
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("requires run schema 3"));
+        result["schema"] = serde_json::json!(3);
+        record["schema"] = serde_json::json!(3);
+        std::fs::write(&result_path, serde_json::to_vec(&result).unwrap()).unwrap();
+        std::fs::write(&run_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        result["source"] = serde_json::json!("OTHER");
+        std::fs::write(&result_path, serde_json::to_vec(&result).unwrap()).unwrap();
+        let error = oracle_verification(directory.path(), &OracleInputs {
+            target: "PAL",
+            configure,
+            splits,
+            config,
+            expected_dol_sha1: TEST_RETAIL,
+            declared: &declared,
+            commit: "oracle-commit",
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("different source versions"));
+        result["source"] = serde_json::json!("NTSC");
+        std::fs::write(&result_path, serde_json::to_vec(&result).unwrap()).unwrap();
+
+        let error = oracle_verification(directory.path(), &OracleInputs {
+            target: "PAL",
+            configure: "different configure",
+            splits,
+            config,
+            expected_dol_sha1: TEST_RETAIL,
+            declared: &declared,
+            commit: "oracle-commit",
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("exact configure.py"));
+
+        record["stages"] = serde_json::json!(["coverage", "verify"]);
+        std::fs::write(&run_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let error = oracle_verification(directory.path(), &OracleInputs {
+            target: "PAL",
+            configure,
+            splits,
+            config,
+            expected_dol_sha1: TEST_RETAIL,
+            declared: &declared,
+            commit: "oracle-commit",
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("verify-only"));
+    }
+
+    #[test]
+    fn an_unknown_run_schema_is_not_read_as_a_known_one() {
+        let error = validate_run_schemas(4, 4).unwrap_err();
+        assert!(format!("{error:#}").contains("unsupported"));
+        assert!(validate_run_schemas(1, 1).is_ok());
+        assert!(validate_run_schemas(2, 2).is_ok());
+        assert!(validate_run_schemas(3, 3).is_ok());
     }
 
     fn manifest(units: &[(&str, Body, Body, bool)]) -> Manifest {
@@ -2153,7 +2538,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join("result.json"),
-            r#"{"id":"run","source":"NTSC","target":"PAL","stages":{}}"#,
+            r#"{"schema":1,"id":"run","source":"NTSC","target":"PAL","stages":{}}"#,
         )
         .unwrap();
         let before = "Sections:\n\na.cpp:\n\t.text start:0x00001000 end:0x00002000\n";
@@ -2161,8 +2546,11 @@ mod tests {
         std::fs::write(
             directory.path().join("run.json"),
             serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
+                "id": "run",
                 "source": "NTSC",
                 "target": "PAL",
+                "stages": [],
                 "owner": { "manifest": { "config/PAL/splits.txt": before_digest.clone() } },
             }))
             .unwrap(),
@@ -2206,6 +2594,7 @@ mod tests {
         std::fs::write(
             run.join("result.json"),
             serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
                 "id": "run",
                 "source": "NTSC",
                 "target": "PAL",
@@ -2217,7 +2606,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             run.join("run.json"),
-            r#"{"source":"NTSC","target":"PAL","owner":{"manifest":{"config/PAL/splits.txt":"different"}}}"#,
+            r#"{"schema":1,"id":"run","source":"NTSC","target":"PAL","stages":[],"owner":{"manifest":{"config/PAL/splits.txt":"different"}}}"#,
         )
         .unwrap();
         std::fs::write(run.join("publication.json"), r#"{"status":"published","changes":{}}"#)
@@ -2242,7 +2631,20 @@ mod tests {
         let mut run = facts(IndexMap::new(), IndexMap::new());
         run.use_manifest_baseline = true;
         run.baseline_splits_sha256 = Some("known-baseline".into());
+        run.published_dol_sha1 = Some(TEST_RETAIL.into());
         assert!(score(&manifest, &run).baseline_agrees);
+
+        let directory = tempfile::tempdir().unwrap();
+        write_run_fixture(directory.path(), &run, &manifest).unwrap();
+        let published =
+            std::fs::read_to_string(directory.path().join("published.splits.txt")).unwrap();
+        assert!(
+            Body::of(&Splits::parse(&published).unwrap().blocks, "a.cpp")
+                .same_structure(&manifest.units["a.cpp"].baseline)
+        );
+        let provenance: RunFixtureProvenance =
+            read_json(&directory.path().join("run-provenance.json")).unwrap();
+        assert_eq!(provenance.published_splits_sha256, digest(published.as_bytes()));
 
         run.baseline_splits_sha256 = Some("different-baseline".into());
         assert!(!score(&manifest, &run).baseline_agrees);

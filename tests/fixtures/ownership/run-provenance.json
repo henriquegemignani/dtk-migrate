@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "run_id": "20713-150344",
+  "source": "GM8E01_00",
+  "target": "GM8P01_00",
+  "baseline_splits_sha256": "8502df8399d729613fa93a9b6abdb4daea8013606b8d299d8bafc0025a6f2f5f",
+  "published_splits_sha256": "7a9ddb0622be5f5a57a97f3c5fee4a121bcde5b4174ab60bc00941636c1b3ffe",
+  "published_dol_sha1": "4d3780c77842ae7fddbdd5732b70bed100df5c65",
+  "source_proposal_history_complete": false
+}

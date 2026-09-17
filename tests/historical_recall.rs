@@ -12,9 +12,10 @@
 //! The numbers below are what the tool did on the day. They are pinned so that
 //! a change to the policy has to move them on purpose, in a diff somebody reads.
 //! **They are not targets that have been met.** One unit of twenty-seven was
-//! recovered exactly and three already-correct units were damaged; the plan this
-//! fixture was built for exists to change both, and this test is how that change
-//! will be believed.
+//! recovered exactly and three build-verified already-correct units were
+//! damaged; the plan this fixture was built for exists to change both, and this
+//! test is how that change will be believed. Further damage against unverified
+//! oracle splits is reported separately rather than silently promoted to truth.
 //!
 //! # The fixture
 //!
@@ -37,7 +38,8 @@ use std::{
 use dtk_migrate::{
     analysis::ownership_score::{Outcome, Scope},
     cli::benchmark::{
-        Linkage, Manifest, Revision, RunFacts, Score, UnitScore, build_manifest, score,
+        Linkage, Manifest, Revision, RunFacts, RunFixtureProvenance, Score, UnitScore,
+        build_manifest, score,
     },
     project::splits::Splits,
 };
@@ -54,7 +56,6 @@ struct Provenance {
     oracle_splits_sha256: String,
     oracle_expected_retail_sha1: String,
     oracle_verified_dol_sha1: Option<String>,
-    run_published_dol_sha1: String,
 }
 
 fn fixture(name: &str) -> String {
@@ -95,16 +96,17 @@ fn manifest() -> Manifest {
 /// fields that need it — proposal recall, per-stage application — are exercised
 /// by unit tests and by the opt-in run below.
 fn run_facts() -> RunFacts {
-    let provenance: Provenance = serde_json::from_str(&fixture("provenance.json")).unwrap();
+    let provenance: RunFixtureProvenance =
+        serde_json::from_str(&fixture("run-provenance.json")).unwrap();
     RunFacts::from_splits(
-        fixture("run-id.txt").trim(),
-        "GM8E01_00",
-        "GM8P01_00",
+        &provenance.run_id,
+        &provenance.source,
+        &provenance.target,
         Splits::parse(&fixture("baseline.splits.txt")).unwrap().blocks,
         Splits::parse(&fixture("published.splits.txt")).unwrap().blocks,
     )
     .with_baseline_splits_sha256(provenance.baseline_splits_sha256)
-    .with_published_dol_sha1(provenance.run_published_dol_sha1)
+    .with_published_dol_sha1(provenance.published_dol_sha1)
 }
 
 fn scored() -> Score { score(&manifest(), &run_facts()) }
@@ -115,6 +117,15 @@ fn by_name(result: &Score) -> BTreeMap<&str, &UnitScore> {
 
 #[test]
 fn the_recall_set_is_the_thirty_five_units_the_later_work_proved() {
+    let linkage: Linkage = serde_json::from_str(&fixture("linkage.json")).unwrap();
+    assert_eq!(
+        linkage.oracle.difference(&linkage.verified_oracle).cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "Kyoto/Animation/CHierarchyPoseBuilder.cpp".to_string(),
+            "dolphin/mtx/vec.c".to_string(),
+        ]),
+        "the historical verifier omitted universal Matching objects from its link-input checks"
+    );
     let manifest = manifest();
     assert_eq!(manifest.recall_set.len(), 35, "{:?}", manifest.recall_set);
     // Derived from the two `configure.py` files, not from the splits: a unit
@@ -131,6 +142,7 @@ fn the_run_started_where_the_fixture_says_it_did() {
     let result = scored();
     assert!(result.baseline_agrees, "the fixture's baseline is not the one the run was given");
     assert_eq!(result.published_retail_agrees, Some(true));
+    assert!(!result.proposal_history_complete, "the reduced fixture carries no stage evidence");
     assert_eq!(result.target, "GM8P01_00");
 }
 
@@ -199,7 +211,7 @@ fn stopping_short_and_taking_a_neighbours_ground_are_not_the_same_failure() {
 }
 
 #[test]
-fn the_three_already_correct_units_the_run_damaged_are_named() {
+fn the_three_build_verified_already_correct_units_the_run_damaged_are_named() {
     // Controls: units the two revisions already agree about, which the run had
     // no business changing. Every one of them should come out unchanged. Three
     // did not, and a total alone could not tell "still the same three" from
@@ -458,6 +470,8 @@ fn the_saved_run_agrees_with_the_fixture_distilled_from_it() {
 #[test]
 fn the_fixture_is_readable_project_data_rather_than_a_saved_verdict() {
     let provenance: Provenance = serde_json::from_str(&fixture("provenance.json")).unwrap();
+    let run: RunFixtureProvenance = serde_json::from_str(&fixture("run-provenance.json")).unwrap();
+    assert_eq!(run.schema, 1);
     assert_eq!(
         format!("{:x}", Sha256::digest(fixture("baseline.splits.txt").as_bytes())),
         provenance.baseline_splits_sha256
@@ -466,6 +480,12 @@ fn the_fixture_is_readable_project_data_rather_than_a_saved_verdict() {
         format!("{:x}", Sha256::digest(fixture("oracle.splits.txt").as_bytes())),
         provenance.oracle_splits_sha256
     );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(fixture("published.splits.txt").as_bytes())),
+        run.published_splits_sha256
+    );
+    assert_eq!(run.baseline_splits_sha256, provenance.baseline_splits_sha256);
+    assert_eq!(run.run_id, fixture("run-id.txt").trim());
     let baseline = Splits::parse(&fixture("baseline.splits.txt")).unwrap();
     let oracle = Splits::parse(&fixture("oracle.splits.txt")).unwrap();
     let published = Splits::parse(&fixture("published.splits.txt")).unwrap();
