@@ -109,7 +109,7 @@ impl Stage for Verify {
         extra.insert("migrated_legacy".into(), serde_json::to_value(&migrated)?);
         // The rendered configuration is the baseline every trial renders from.
         owned.commit();
-        Ok(Prepared { candidates: chosen, baseline, events, extra })
+        Ok(Prepared { candidates: chosen, baseline, events, extra, permitted: Default::default() })
     }
 
     fn evaluate(
@@ -166,6 +166,7 @@ impl Stage for Verify {
         owned.check()?;
         owned.commit();
         Ok(Outcome {
+            tried: Default::default(),
             accepted,
             deferred,
             events,

@@ -63,6 +63,10 @@ pub struct JobResult {
     /// integration can try the same one first.
     #[serde(default)]
     pub selections: Selections,
+    /// What this batch already asked about, so the coordinator does not spend a
+    /// build putting the same question a second time.
+    #[serde(default)]
+    pub tried: crate::stages::Tried,
 }
 
 fn job_fingerprint(
@@ -243,6 +247,7 @@ fn run_one(
         events: outcome.events,
         validation: outcome.validation,
         selections: outcome.selections,
+        tried: outcome.tried,
     };
     accept_stored(&result, spec).context("The stage returned candidates it was not given")?;
     write_json(&result_path, &result)?;
@@ -270,6 +275,7 @@ mod tests {
 
     fn result(accepted: &[&str], deferred: &[&str]) -> JobResult {
         JobResult {
+            tried: Default::default(),
             schema: crate::run::SCHEMA,
             job_id: "00000".into(),
             fingerprint: "job".into(),

@@ -51,6 +51,13 @@ pub const SCHEMA: u32 = 1;
 /// asking once its boundaries are.
 pub const ORDER: [&str; 4] = ["derive", "coverage", "discover", "verify"];
 
+/// How many times a stage may be asked what the last acceptance made possible.
+///
+/// Each round costs the stage a fresh look at the whole project, and the
+/// interesting cascades are short: a unit unblocked by its neighbour usually
+/// settles on the next pass.
+const MAX_REDISCOVERY_ROUNDS: usize = 3;
+
 pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
     Ok(match name {
         "coverage" => Box::new(Coverage),
@@ -111,6 +118,14 @@ pub struct Environment {
     /// Variables the compiler and linker read. A changed `PATH` can select a
     /// different assembler without anything else in the project moving.
     pub build_environment: Vec<(String, Option<String>)>,
+    /// A digest of the injected coverage evidence, when a test is supplying it.
+    ///
+    /// Without this, a run could be executed against injected evidence and
+    /// resumed against the matcher — or against *different* injected evidence —
+    /// and the two halves would be describing different worlds while claiming to
+    /// be one run. Absent in every real migration, which is the normal case.
+    #[serde(default)]
+    pub injected_evidence_sha256: Option<String>,
 }
 
 const BUILD_VARIABLES: [&str; 10] = [
@@ -136,6 +151,7 @@ impl Environment {
                 .iter()
                 .map(|key| ((*key).to_string(), std::env::var(key).ok()))
                 .collect(),
+            injected_evidence_sha256: crate::stages::coverage::injected_evidence_digest()?,
         })
     }
 }
@@ -303,6 +319,13 @@ pub fn run_stage(
             prepared.candidates.retain(|c| run.only.contains(&c.name));
         }
 
+        // Carried into evaluation, where a stage may find work preparation could
+        // not see and still has to respect what this run rules out.
+        prepared.permitted = crate::stages::Permitted {
+            reserved: reserved.iter().cloned().collect(),
+            only: run.only.iter().cloned().collect(),
+        };
+
         let snapshot = Snapshot::of(&baseline_dir)?;
         let stored = StoredPreparation {
             prepared,
@@ -341,43 +364,119 @@ pub fn run_stage(
     crate::workspace::seed_objdiff(&baseline_dir, &integrated)?;
     let ctx = context(&integrated, run, stage_dir.join("integration-evidence"), cancel);
 
-    let worker_accepted: BTreeSet<String> = outcomes
-        .iter()
-        .flat_map(|outcome| outcome.accepted.iter().map(|c| c.name.clone()))
-        .collect();
-    let proposed: Vec<Candidate> =
-        candidates.iter().filter(|c| worker_accepted.contains(&c.name)).cloned().collect();
+    // The candidate as accepted, paired with the selection made against it. A
+    // stage proving a refreshed proposal records an id that exists only in that
+    // one, so looking the name back up in the original list — or taking the
+    // candidate from one worker and the id from another — would hand
+    // publication an id its evidence has never heard of.
+    let mut proposed: Vec<Candidate> = Vec::new();
+    let mut preferred = Selections::new();
+    let mut tried: crate::stages::Tried = crate::stages::Tried::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for worker in &outcomes {
+        for (unit, ids) in &worker.tried {
+            tried.entry(unit.clone()).or_default().extend(ids.iter().cloned());
+        }
+        for candidate in &worker.accepted {
+            if !seen.insert(candidate.name.clone()) {
+                continue;
+            }
+            proposed.push(candidate.clone());
+            if let Some(id) = worker.selections.get(&candidate.name) {
+                preferred.insert(candidate.name.clone(), id.clone());
+            }
+        }
+    }
 
     let mut events: Vec<Event> = outcomes.iter().flat_map(|o| o.events.clone()).collect();
-    // A worker already found an alternative that works for each candidate it
-    // accepted; integration tries that one first rather than rediscovering it.
-    let preferred: Selections = outcomes.iter().flat_map(|o| o.selections.clone()).collect();
-    let mut outcome = stage.evaluate(&ctx, &prepared.prepared, &proposed, &preferred)?;
-    let mut selections = outcome.selections.clone();
-    events.extend(outcome.events.clone());
-    let mut accepted: BTreeSet<String> = outcome.accepted.iter().map(|c| c.name.clone()).collect();
-    let mut pending: Vec<Candidate> =
-        candidates.iter().filter(|c| !accepted.contains(&c.name)).cloned().collect();
+    // One entry per unit, last acceptance winning: a unit extended twice is one
+    // final proposal, not two competing ones.
+    let mut accepted: indexmap::IndexMap<String, Candidate> = indexmap::IndexMap::new();
+    let mut selections = Selections::new();
+    // Handed over and still not settled. Kept apart from the work queue, which
+    // is whatever the next round should look at — reusing the queue as the
+    // deferred result would lose earlier failures the moment rediscovery
+    // replaced it, and would report a just-accepted unit as deferred if the
+    // round limit cut in first.
+    let mut unresolved: indexmap::IndexMap<String, Candidate> =
+        candidates.iter().map(|c| (c.name.clone(), c.clone())).collect();
 
-    while !pending.is_empty() && !accepted.is_empty() {
-        let retry = stage.evaluate(&ctx, &prepared.prepared, &pending, &preferred)?;
-        events.extend(retry.events.clone());
-        let added: BTreeSet<String> = retry.accepted.iter().map(|c| c.name.clone()).collect();
-        outcome = retry;
+    // Integration is itself a round: if every worker's candidate holds, the
+    // workspace has changed and the only work left may be a unit that became
+    // eligible because of it.
+    let mut queue = proposed;
+    let mut outcome = None;
+    for round in 0..=MAX_REDISCOVERY_ROUNDS {
+        // The first round runs even with nothing to try. A stage that found no
+        // candidates, or whose candidates were all rejected by the workers, has
+        // succeeded at finding nothing — and it still owes the run a measured,
+        // unchanged baseline to record. Only a *later* round is pointless when
+        // the queue empties, since the round before it already measured this
+        // same workspace.
+        if queue.is_empty() && outcome.is_some() {
+            break;
+        }
+        let result = stage.evaluate(&ctx, &prepared.prepared, &queue, &preferred)?;
+        events.extend(result.events.clone());
+        for (unit, ids) in &result.tried {
+            tried.entry(unit.clone()).or_default().extend(ids.iter().cloned());
+        }
+        let added: BTreeSet<String> = result.accepted.iter().map(|c| c.name.clone()).collect();
+        for candidate in &result.accepted {
+            accepted.insert(candidate.name.clone(), candidate.clone());
+            unresolved.shift_remove(&candidate.name);
+        }
+        // A unit accepted in an earlier round and merely not extended again is
+        // settled, not deferred.
+        for candidate in &result.deferred {
+            if !accepted.contains_key(&candidate.name) {
+                unresolved.insert(candidate.name.clone(), candidate.clone());
+            }
+        }
+        selections.extend(result.selections.clone());
+        outcome = Some(result);
+
         if added.is_empty() {
             break;
         }
-        accepted.extend(added.iter().cloned());
-        selections.extend(outcome.selections.clone());
-        pending.retain(|c| !added.contains(&c.name));
+        if round == MAX_REDISCOVERY_ROUNDS {
+            // Said out loud: stopping on a budget and stopping because there is
+            // nothing left look identical in a result and mean the opposite.
+            events.push(Event::new("", "rediscovery-limit-reached").because(format!(
+                "stopped after {MAX_REDISCOVERY_ROUNDS} rounds with acceptances still arriving; \
+                 the cascade was not followed to the end"
+            )));
+            break;
+        }
+
+        // Something landed, so ask the stage what that made possible. This is
+        // the only place it happens: one workspace holding every batch's result.
+        let discovered = stage.rediscover(&ctx, &prepared.prepared, &tried)?;
+        if !discovered.is_empty() {
+            events.push(
+                Event::new("", "rediscovered")
+                    .because(format!("{} units with new evidence", discovered.len())),
+            );
+        }
+        // Freshly generated evidence first, then anything still unsettled that
+        // rediscovery had nothing new to say about.
+        let refreshed: BTreeSet<String> = discovered.iter().map(|c| c.name.clone()).collect();
+        queue = discovered;
+        queue.extend(unresolved.values().filter(|c| !refreshed.contains(&c.name)).cloned());
     }
 
-    selections.retain(|name, _| accepted.contains(name));
+    // Round 0 always evaluates, so this holds however the loop left; it is
+    // asserted rather than assumed because the alternative is recording a
+    // stage's result from a measurement that was never taken.
+    let Some(outcome) = outcome else {
+        bail!("{stage_name}: the first evaluation round did not run, so there is nothing to record")
+    };
+    selections.retain(|name, _| accepted.contains_key(name));
     let result = StageResult {
         stage: stage_name.to_string(),
         selections,
-        accepted: candidates.iter().filter(|c| accepted.contains(&c.name)).cloned().collect(),
-        deferred: pending,
+        accepted: accepted.into_values().collect(),
+        deferred: unresolved.into_values().collect(),
         events,
         validation: outcome.validation.clone(),
         dol_sha1: ctx.dol_sha1()?,

@@ -35,7 +35,7 @@ const VALIDATION: &str =
     "objdiff matched code; retail hash checks split integrity, not candidate source linkage";
 
 /// Sections whose ranges a code candidate may claim.
-const CODE_SECTIONS: [&str; 2] = [".text", ".init"];
+pub const CODE_SECTIONS: [&str; 2] = [".text", ".init"];
 
 /// What a discovery candidate proposes: a complete replacement body for a unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,7 +340,7 @@ impl Stage for Discover {
 
         let mut extra = serde_json::Map::new();
         extra.insert("starting".into(), serde_json::to_value(&starting)?);
-        Ok(Prepared { candidates, baseline, events, extra })
+        Ok(Prepared { candidates, baseline, events, extra, permitted: Default::default() })
     }
 
     fn evaluate(
@@ -383,6 +383,7 @@ impl Stage for Discover {
         let deferred: Vec<Candidate> =
             candidates.iter().filter(|c| !state.accepted.contains(&c.name)).cloned().collect();
         Ok(Outcome {
+            tried: Default::default(),
             accepted,
             deferred,
             events: state.events,

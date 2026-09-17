@@ -64,6 +64,7 @@ pub fn run(args: Args) -> Result<()> {
         min_confidence: args.min_confidence,
         max_rounds: args.max_rounds,
         validate: args.validate,
+        mask: Default::default(),
         outputs: Outputs {
             report: args.output,
             renames: args.renames,

@@ -32,16 +32,16 @@ use crate::{
         transaction::Owned,
     },
     stages::{
-        Candidate, Event, Outcome, Prepared, Selections, Stage,
-        coverage::alternatives::{Alternative, OwnerRevision, parse_address},
+        Candidate, Event, Outcome, Permitted, Prepared, Selections, Stage, Tried,
+        coverage::alternatives::{Alternative, OwnerRevision, body_bytes, parse_address},
     },
 };
 
 pub struct Coverage;
 
 /// The evidence schema this stage understands.
-pub const EVIDENCE_SCHEMA: u32 = 8;
-pub const POLICY_VERSION: u32 = 8;
+pub const EVIDENCE_SCHEMA: u32 = 9;
+pub const POLICY_VERSION: u32 = 9;
 
 const VALIDATION: &str = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-required-extracts-and-extracted-link-inputs-and-retail-bytes";
 
@@ -64,7 +64,17 @@ pub struct Inventory {
     pub source_units: usize,
     pub baseline_represented: usize,
     pub missing: usize,
-    /// Every missing unit and why it did or did not produce a candidate.
+    /// Candidates that extend a unit which already holds a block, rather than
+    /// giving one to a unit with none.
+    #[serde(default)]
+    pub refinements: usize,
+    /// What each unit owned when this stage started, in bytes across every
+    /// section. The immutable reference for the whole run: a unit given a block
+    /// in round one and extended in round three is one new unit and one total
+    /// gain, not a new unit and then a refinement of somebody else's work.
+    #[serde(default)]
+    pub baseline_bytes: BTreeMap<String, u32>,
+    /// Every unit and why it did or did not produce a candidate.
     pub dispositions: BTreeMap<String, String>,
 }
 
@@ -96,15 +106,26 @@ impl Stage for Coverage {
         let missing: Vec<&&CoverageUnit> =
             source_units.iter().filter(|unit| !target_blocks.contains_key(&unit.name)).collect();
 
+        // Every unit, not only the ones with no block at all. A unit holding a
+        // short or wrong split is the case a cross-version migration produces
+        // most often, and skipping it meant the first fragment a unit ever
+        // claimed was also its last. What keeps this honest is that an
+        // alternative now carries the unit's complete body and has to claim
+        // ground it does not already hold, so a unit with nothing to gain
+        // produces nothing to try.
         let mut dispositions = BTreeMap::new();
         let mut candidates: Vec<(Candidate, u32)> = Vec::new();
-        for unit in &missing {
+        let mut refinements = 0;
+        for unit in &source_units {
             let found = alternatives::build(unit, &target_blocks, &by_name, &source_blocks);
-            dispositions.insert(unit.name.clone(), alternatives::disposition(unit, &found));
+            let represented = target_blocks.contains_key(&unit.name);
+            dispositions
+                .insert(unit.name.clone(), alternatives::disposition(unit, &found, represented));
             if found.is_empty() {
                 continue;
             }
-            let widest = found.iter().map(|a| a.covered_bytes).max().unwrap_or(0);
+            refinements += usize::from(represented);
+            let widest = found.iter().map(|a| a.gained_bytes).max().unwrap_or(0);
             let proposal = Proposal {
                 policy_version: POLICY_VERSION,
                 source_code_bytes: unit.code_bytes,
@@ -116,7 +137,8 @@ impl Stage for Coverage {
                 widest,
             ));
         }
-        // Widest claim first: the most ground covered per build.
+        // Most new ground first. For a unit being extended that is the growth,
+        // not the whole range, since the rest is already its.
         candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
         let mut chosen: Vec<Candidate> = candidates.into_iter().map(|(c, _)| c).collect();
         if let Some(limit) = limit {
@@ -132,6 +154,11 @@ impl Stage for Coverage {
             source_units: source_units.len(),
             baseline_represented: represented,
             missing: missing.len(),
+            refinements,
+            baseline_bytes: target_blocks
+                .iter()
+                .map(|(name, lines)| (name.clone(), body_bytes(lines)))
+                .collect(),
             dispositions,
         };
 
@@ -150,7 +177,13 @@ impl Stage for Coverage {
         extra.insert("inventory".into(), serde_json::to_value(&inventory)?);
         extra.insert("policy".into(), serde_json::to_value(&evidence.policy)?);
         extra.insert("stunted_splits".into(), serde_json::to_value(&stunted)?);
-        Ok(Prepared { candidates: chosen, baseline, events: Vec::new(), extra })
+        Ok(Prepared {
+            candidates: chosen,
+            baseline,
+            events: Vec::new(),
+            extra,
+            permitted: Default::default(),
+        })
     }
 
     fn evaluate(
@@ -173,10 +206,17 @@ impl Stage for Coverage {
         let mut report = ctx.build(None)?;
         let starting_complete = report.measures.complete_code;
         let mut accepted: Vec<Candidate> = Vec::new();
-        let mut deferred: Vec<Candidate> = Vec::new();
         let mut selections = Selections::new();
         let mut events: Vec<Event> = Vec::new();
+        // Every alternative each unit has already been asked about, so that a
+        // later round can tell a genuinely new proposal from the one that was
+        // just refused.
+        let mut tried: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
+        // One pass over exactly what was handed over. Finding *new* work is the
+        // coordinator's to ask for, between rounds, in the one workspace that
+        // holds every batch's result — a worker that went looking here would be
+        // deciding the fate of units another worker is holding at the time.
         for candidate in candidates {
             let proposal = proposal_of(candidate)?;
             // A rollback point for the configuration, in case none of this
@@ -196,8 +236,10 @@ impl Stage for Coverage {
                 ordered.sort_by_key(|alternative| &alternative.id != wanted);
             }
 
+            let seen = tried.entry(candidate.name.clone()).or_default();
             let mut chosen: Option<&Alternative> = None;
             for alternative in ordered {
+                seen.insert(alternative.id.clone());
                 let restore = splits.clone();
                 match try_alternative(
                     ctx,
@@ -231,20 +273,23 @@ impl Stage for Coverage {
                     accepted.push(candidate.clone());
                     selections.insert(candidate.name.clone(), alternative.id.clone());
                     events.push(Event::new(&candidate.name, "accepted").because(format!(
-                        "{} covering {} bytes",
-                        alternative.evidence, alternative.covered_bytes
+                        "{} gaining {} bytes",
+                        alternative.evidence, alternative.gained_bytes
                     )));
                 }
                 None => {
                     // Take back this candidate's extract entries; nothing needs
                     // them now.
                     config_owned.write(&config_before)?;
-                    deferred.push(candidate.clone());
                 }
             }
         }
-
         write(&mut splits_owned, &splits)?;
+
+        let taken: BTreeSet<&str> = accepted.iter().map(|c| c.name.as_str()).collect();
+        let deferred: Vec<Candidate> =
+            candidates.iter().filter(|c| !taken.contains(c.name.as_str())).cloned().collect();
+
         let final_report = self.validate_selected(ctx, &accepted, &selections)?;
         if regresses(&report, &final_report) {
             bail!("Final coverage report regressed after validation");
@@ -254,11 +299,21 @@ impl Stage for Coverage {
         Ok(Outcome {
             accepted,
             deferred,
+            tried,
             selections,
             events,
             report: final_report,
             validation: VALIDATION.to_string(),
         })
+    }
+
+    fn rediscover(
+        &self,
+        ctx: &BuildContext,
+        prepared: &Prepared,
+        tried: &Tried,
+    ) -> Result<Vec<Candidate>> {
+        revisit(ctx, &prepared.permitted, tried)
     }
 
     fn validate(
@@ -350,9 +405,8 @@ fn try_alternative(
     baseline: &Report,
     starting_complete: u64,
 ) -> Result<Report> {
-    apply_owner_revisions(&mut splits.blocks, &alternative.owner_revisions)?;
     let is_new = !splits.blocks.contains_key(&candidate.name);
-    splits.blocks.insert(candidate.name.clone(), alternative.lines.clone());
+    apply_alternative(&mut splits.blocks, &candidate.name, alternative)?;
     if is_new {
         splits.place_new_units(std::slice::from_ref(&candidate.name))?;
     }
@@ -371,6 +425,192 @@ fn try_alternative(
         bail!(ValidationError("coverage candidate reduces source-linked code".into()));
     }
     Ok(tested)
+}
+
+/// Whether the stage would offer this unit a candidate.
+///
+/// One rule, used by preparation, by the revisit loop, and by calibration —
+/// which otherwise measures a population the pipeline does not have. It used to
+/// be "has no block at all"; a unit holding a short block is now eligible too,
+/// and the only thing that makes a unit ineligible is having nothing left to
+/// claim.
+pub fn offers_candidate(alternatives: &[Alternative]) -> bool { !alternatives.is_empty() }
+
+/// Regenerates evidence after something was accepted, and returns every unit
+/// that now has a proposal nobody has refused yet.
+///
+/// The cascade this exists for runs in both directions. A unit refused because
+/// the ground it wanted was unaccounted for, or because its run had no boundary
+/// either side, may be answerable once a neighbour lands — and so may a unit
+/// that was *never a candidate*, because the boundary that gives it its first
+/// usable evidence only came into existence just now. A unit that was accepted
+/// with part of itself can likewise be extended again. All three are facts
+/// about the neighbourhood, and the neighbourhood is what just changed, so the
+/// whole eligible set is reconsidered rather than only the list that failed.
+///
+/// What keeps it from looping: a unit whose alternatives are all ids that were
+/// already refused is dropped. Nothing about it changed, and rebuilding the
+/// project to learn that again is the one thing a revisit loop must not do.
+fn revisit(
+    ctx: &BuildContext,
+    permitted: &Permitted,
+    tried: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<Vec<Candidate>> {
+    let evidence = generate_evidence(ctx)?;
+    let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
+    let source_blocks =
+        Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
+    let by_name: BTreeMap<String, &CoverageUnit> = evidence
+        .source_units
+        .iter()
+        .filter(|unit| !unit.autogenerated)
+        .map(|unit| (unit.name.clone(), unit))
+        .collect();
+
+    let mut next = Vec::new();
+    for (name, unit) in &by_name {
+        if !permitted.allows(name) {
+            continue;
+        }
+        let found = alternatives::build(unit, &target_blocks, &by_name, &source_blocks);
+        let refused = tried.get(name);
+        if found.is_empty()
+            || found.iter().all(|a| refused.is_some_and(|seen| seen.contains(&a.id)))
+        {
+            continue;
+        }
+        let proposal = Proposal {
+            policy_version: POLICY_VERSION,
+            source_code_bytes: unit.code_bytes,
+            required_extracts: unit.required_extracts.clone(),
+            alternatives: found,
+        };
+        next.push(Candidate { name: name.clone(), evidence: serde_json::to_value(proposal)? });
+    }
+    // Most new ground first, as in preparation.
+    next.sort_by_key(|candidate| {
+        let widest = proposal_of(candidate)
+            .ok()
+            .and_then(|p| p.alternatives.iter().map(|a| a.gained_bytes).max())
+            .unwrap_or(0);
+        (std::cmp::Reverse(widest), candidate.name.clone())
+    });
+    Ok(next)
+}
+
+/// Writes one alternative into a set of split blocks, as a trial would.
+///
+/// The unit's body is *replaced*, not added to: an alternative carries the whole
+/// of what the unit would claim, so a range it does not mention is a range the
+/// unit stops owning. Calibration applies proposals through this rather than
+/// modelling it, because a measured recovery is only worth reporting if it is a
+/// recovery the migration could actually perform.
+pub fn apply_alternative(
+    blocks: &mut IndexMap<String, Vec<String>>,
+    unit: &str,
+    alternative: &Alternative,
+) -> Result<()> {
+    let before = ownership(blocks);
+    apply_owner_revisions(blocks, &alternative.owner_revisions)?;
+    blocks.insert(unit.to_string(), alternative.lines.clone());
+    refuse_unevidenced_losses(&before, &ownership(blocks), &alternative.owner_revisions)
+}
+
+/// Which addresses each unit owns in each section.
+fn ownership(
+    blocks: &IndexMap<String, Vec<String>>,
+) -> BTreeMap<(String, String), Vec<(u32, u32)>> {
+    let mut owned: BTreeMap<(String, String), Vec<(u32, u32)>> = BTreeMap::new();
+    for (name, lines) in blocks {
+        for range in lines.iter().filter_map(|line| parse_range(line)) {
+            owned.entry((name.clone(), range.section)).or_default().push((range.start, range.end));
+        }
+    }
+    owned.values_mut().for_each(|ranges| *ranges = merge_intervals(std::mem::take(ranges)));
+    owned
+}
+
+fn merge_intervals(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    ranges.sort_unstable();
+    let mut result: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match result.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => result.push((start, end)),
+        }
+    }
+    result
+}
+
+/// The parts of `from` that `by` does not cover.
+fn subtract(from: &[(u32, u32)], by: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut result = Vec::new();
+    for &(start, end) in from {
+        let mut at = start;
+        for &(other_start, other_end) in by.iter().filter(|(s, e)| *s < end && *e > start) {
+            if other_start > at {
+                result.push((at, other_start));
+            }
+            at = at.max(other_end);
+        }
+        if at < end {
+            result.push((at, end));
+        }
+    }
+    result
+}
+
+/// Refuses a change that takes ground away from a unit without saying so.
+///
+/// `regresses` compares *matched* code, so a unit quietly losing a range that
+/// nothing had matched yet passes it untouched — the loss only surfaces later,
+/// as a unit that mysteriously stopped owning half of itself. Ownership is the
+/// thing this stage changes, so ownership is the thing it has to account for.
+///
+/// Addresses, not totals. A body swapping `0x100..0x200` for `0x200..0x300`
+/// keeps the byte count exactly and has still given up every address the unit
+/// owned, so the comparison is between the intervals themselves — and each
+/// interval let go has to be one the matching revision actually gave up, rather
+/// than merely one that some revision named this unit somewhere.
+fn refuse_unevidenced_losses(
+    before: &BTreeMap<(String, String), Vec<(u32, u32)>>,
+    after: &BTreeMap<(String, String), Vec<(u32, u32)>>,
+    revisions: &[OwnerRevision],
+) -> Result<()> {
+    // What each revision says its owner stops holding: the head and the tail it
+    // gives up, and nothing else.
+    let mut allowed: BTreeMap<(&str, &str), Vec<(u32, u32)>> = BTreeMap::new();
+    for revision in revisions {
+        let (Some(original_start), Some(original_end), Some(revised_start), Some(revised_end)) = (
+            parse_address(&revision.original_start),
+            parse_address(&revision.original_end),
+            parse_address(&revision.revised_start),
+            parse_address(&revision.revised_end),
+        ) else {
+            continue;
+        };
+        let entry = allowed.entry((revision.unit.as_str(), revision.section.as_str())).or_default();
+        entry.push((original_start, revised_start.min(original_end)));
+        entry.push((revised_end.max(original_start), original_end));
+    }
+
+    for (key, held) in before {
+        let left = after.get(key).map(Vec::as_slice).unwrap_or_default();
+        let lost = subtract(held, left);
+        if lost.is_empty() {
+            continue;
+        }
+        let empty = Vec::new();
+        let given_up = allowed.get(&(key.0.as_str(), key.1.as_str())).unwrap_or(&empty);
+        let unevidenced = subtract(&lost, &merge_intervals(given_up.clone()));
+        if let Some((start, end)) = unevidenced.first() {
+            bail!(ValidationError(format!(
+                "{} would lose {} {:#010X}..{:#010X} with nothing saying it should",
+                key.0, key.1, start, end
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Shrinks an adjacent owner to the range the evidence says it keeps.
@@ -554,14 +794,66 @@ fn failure_category(error: &anyhow::Error) -> &'static str {
     }
 }
 
+/// A directory of prepared coverage evidence, standing in for the matcher.
+///
+/// A testing seam, and deliberately a narrow one: everything else in this stage
+/// — the trials, the ownership gates, worker batching, publication, resume —
+/// runs exactly as it does in a real migration. What it replaces is the one part
+/// that needs two analysable binaries to say anything at all, so that the
+/// cascade a boundary landing sets off can be exercised without a fixture that
+/// reimplements decomp-toolkit.
+///
+/// Evidence is chosen by how many units the target's splits already name, which
+/// is what makes a cascade expressible: `0.json` is what the matcher would say
+/// before anything landed, `1.json` what it says once one unit has a block, and
+/// so on. A run using this records a digest of the whole directory in its frozen
+/// environment, so execution and resume cannot quietly disagree about which
+/// world they are in.
+const EVIDENCE_DIRECTORY: &str = "DTK_MIGRATE_EVIDENCE_DIR";
+
+fn injected() -> Option<std::path::PathBuf> {
+    std::env::var_os(EVIDENCE_DIRECTORY)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// A digest over every prepared evidence file, or `None` in a real migration.
+pub fn injected_evidence_digest() -> Result<Option<String>> {
+    let Some(directory) = injected() else { return Ok(None) };
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&directory)
+        .with_context(|| format!("Failed to read {}", directory.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    names.sort();
+    let mut digest = <sha2::Sha256 as sha2::Digest>::new();
+    for path in names {
+        sha2::Digest::update(&mut digest, path.file_name().unwrap_or_default().as_encoded_bytes());
+        sha2::Digest::update(&mut digest, std::fs::read(&path)?);
+    }
+    Ok(Some(format!("{:x}", sha2::Digest::finalize(digest))))
+}
+
 fn generate_evidence(ctx: &BuildContext) -> Result<CoverageReport> {
     let path = ctx.output.join("coverage-evidence.json");
-    let mut request = crate::matching::Request::new(
-        crate::stages::discover::config_path(ctx, &ctx.source),
-        crate::stages::discover::config_path(ctx, &ctx.target),
-    );
-    request.outputs.coverage = Some(path.clone());
-    crate::matching::run(&request)?;
+    match injected() {
+        Some(directory) => {
+            // Which world the fixture is in: how much the target already owns.
+            let named = Splits::read(&splits_path(ctx))?.blocks.len();
+            let prepared = directory.join(format!("{named}.json"));
+            std::fs::create_dir_all(&ctx.output)?;
+            std::fs::copy(&prepared, &path).with_context(|| {
+                format!("Failed to read injected evidence {}", prepared.display())
+            })?;
+        }
+        None => {
+            let mut request = crate::matching::Request::new(
+                crate::stages::discover::config_path(ctx, &ctx.source),
+                crate::stages::discover::config_path(ctx, &ctx.target),
+            );
+            request.outputs.coverage = Some(path.clone());
+            crate::matching::run(&request)?;
+        }
+    }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     serde_json::from_str(&text).context("Failed to parse the coverage evidence")
@@ -640,6 +932,9 @@ pub struct Summary {
     pub baseline_represented: usize,
     pub final_represented: usize,
     pub newly_supported_units: usize,
+    /// Units that already had a block and had a boundary moved. Not new TUs.
+    #[serde(default)]
+    pub refined_units: usize,
     pub newly_assigned_code_bytes: u32,
     pub selected: BTreeMap<String, Alternative>,
     pub dispositions: BTreeMap<String, String>,
@@ -701,6 +996,20 @@ pub fn summarize(prepared: &Prepared, result: &crate::run::StageResult) -> Resul
             selected.insert(candidate.name.clone(), alternative);
         }
     }
+    // Against the stage's own starting point, never against the workspace as it
+    // stands. A unit given a block in one round and grown in the next holds a
+    // proposal whose `gained_bytes` measures only that last step, and whose
+    // surroundings by then say it was already represented — both of which would
+    // report a new translation unit as somebody else's refinement.
+    let refined: BTreeSet<&String> =
+        selected.keys().filter(|name| inventory.baseline_bytes.contains_key(*name)).collect();
+    let gained: u32 = selected
+        .iter()
+        .map(|(name, alternative)| {
+            let started_with = inventory.baseline_bytes.get(name).copied().unwrap_or(0);
+            body_bytes(&alternative.lines).saturating_sub(started_with)
+        })
+        .sum();
 
     let mut dispositions = inventory.dispositions.clone();
     for name in selected.keys() {
@@ -720,7 +1029,10 @@ pub fn summarize(prepared: &Prepared, result: &crate::run::StageResult) -> Resul
         );
     }
 
-    let final_represented = inventory.baseline_represented + selected.len();
+    // A refinement moves a boundary on a unit the project already had; only a
+    // unit that had no block at baseline is newly represented.
+    let newly_supported = selected.len() - refined.len();
+    let final_represented = inventory.baseline_represented + newly_supported;
     Ok(Summary {
         schema: EVIDENCE_SCHEMA,
         source: inventory.source.clone(),
@@ -728,8 +1040,9 @@ pub fn summarize(prepared: &Prepared, result: &crate::run::StageResult) -> Resul
         source_units: inventory.source_units,
         baseline_represented: inventory.baseline_represented,
         final_represented,
-        newly_supported_units: selected.len(),
-        newly_assigned_code_bytes: selected.values().map(|a| a.covered_bytes).sum(),
+        newly_supported_units: newly_supported,
+        refined_units: refined.len(),
+        newly_assigned_code_bytes: gained,
         metrics: Metrics {
             representation: Representation {
                 baseline_tus: inventory.baseline_represented,
@@ -769,7 +1082,8 @@ pub fn markdown(value: &Summary) -> String {
             value.baseline_represented, value.final_represented, value.source_units
         ),
         format!("- Newly supported TUs: {}", value.newly_supported_units),
-        format!("- Newly assigned code bytes: {}", value.newly_assigned_code_bytes),
+        format!("- Refined TUs (boundary moved, already represented): {}", value.refined_units),
+        format!("- Newly owned code bytes: {}", value.newly_assigned_code_bytes),
         format!("- Validation: `{}`", value.validation),
         String::new(),
         "This stage certifies only the newly selected ranges; pre-existing ownership is not \
@@ -922,6 +1236,141 @@ mod tests {
         assert!(error.to_string().contains("evidenced"), "{error}");
     }
 
+    /// One alternative claiming `start..end`, carrying `lines` as its body.
+    fn body(section: &str, start: u32, end: u32, lines: Vec<String>) -> Alternative {
+        Alternative {
+            id: "test".into(),
+            evidence: "exact-body".into(),
+            support_group: None,
+            section: section.into(),
+            start: format_address(start),
+            end: format_address(end),
+            covered_bytes: end - start,
+            gained_bytes: end - start,
+            lines,
+            anchors: Vec::new(),
+            owner_revisions: Vec::new(),
+        }
+    }
+
+    fn line(section: &str, start: u32, end: u32) -> String {
+        format!("\t{section:11} start:0x{start:08X} end:0x{end:08X}")
+    }
+
+    #[test]
+    fn a_truncated_split_gains_its_tail_without_losing_its_prefix() {
+        let mut map = blocks(&[("a.cpp", 0x8000_0100, 0x8000_0200)]);
+        let complete =
+            body(".text", 0x8000_0200, 0x8000_0300, vec![line(".text", 0x8000_0100, 0x8000_0300)]);
+        apply_alternative(&mut map, "a.cpp", &complete).unwrap();
+        assert_eq!(single_range(&map, "a.cpp", ".text"), Some((0x8000_0100, 0x8000_0300)));
+    }
+
+    #[test]
+    fn a_body_that_would_drop_a_section_is_refused_without_changing_anyone() {
+        let mut map: IndexMap<String, Vec<String>> = IndexMap::new();
+        map.insert("a.cpp".into(), vec![
+            line(".text", 0x8000_0100, 0x8000_0200),
+            line(".rodata", 0x8030_0000, 0x8030_0040),
+        ]);
+        map.insert("b.cpp".into(), vec![line(".text", 0x8000_0200, 0x8000_0300)]);
+        let before = map.clone();
+
+        // A `.text` body that forgets `.rodata` costs the unit that section.
+        let lossy =
+            body(".text", 0x8000_0100, 0x8000_0200, vec![line(".text", 0x8000_0100, 0x8000_0200)]);
+        let error = apply_alternative(&mut map, "a.cpp", &lossy).unwrap_err();
+        assert!(error.to_string().contains(".rodata"), "{error}");
+        // `apply_alternative` reports the loss rather than hiding it; the caller
+        // restores, and neither owner is left changed.
+        assert_eq!(before["b.cpp"], map["b.cpp"]);
+    }
+
+    #[test]
+    fn a_body_that_moves_a_range_keeping_its_size_is_refused() {
+        // 0x100..0x200 and 0x200..0x300 are both 256 bytes, so a gate counting
+        // bytes sees nothing wrong while every address the unit owned is gone.
+        let mut map = blocks(&[("a.cpp", 0x8000_0100, 0x8000_0200)]);
+        let moved =
+            body(".text", 0x8000_0200, 0x8000_0300, vec![line(".text", 0x8000_0200, 0x8000_0300)]);
+        let error = apply_alternative(&mut map, "a.cpp", &moved).unwrap_err();
+        assert!(error.to_string().contains("0x80000100..0x80000200"), "{error}");
+    }
+
+    fn held(entries: &[(&str, &str, u32, u32)]) -> BTreeMap<(String, String), Vec<(u32, u32)>> {
+        let mut map: BTreeMap<(String, String), Vec<(u32, u32)>> = BTreeMap::new();
+        for (unit, section, start, end) in entries {
+            map.entry(((*unit).to_string(), (*section).to_string()))
+                .or_default()
+                .push((*start, *end));
+        }
+        map
+    }
+
+    #[test]
+    fn a_revision_authorises_only_the_addresses_it_gives_up() {
+        // The revision gives up `owner.cpp`'s `.text` head. That says nothing
+        // about its `.rodata`, which this change would take away entirely.
+        let before = held(&[
+            ("owner.cpp", ".text", 0x8000_0100, 0x8000_0400),
+            ("owner.cpp", ".rodata", 0x8030_0000, 0x8030_0040),
+        ]);
+        let after = held(&[("owner.cpp", ".text", 0x8000_0200, 0x8000_0400)]);
+        let gives_up_the_head = [revision((0x8000_0100, 0x8000_0400), (0x8000_0200, 0x8000_0400))];
+
+        let error = refuse_unevidenced_losses(&before, &after, &gives_up_the_head).unwrap_err();
+        assert!(error.to_string().contains(".rodata"), "{error}");
+
+        // With `.rodata` left alone, the same `.text` loss is exactly what the
+        // revision consented to.
+        let kept = held(&[
+            ("owner.cpp", ".text", 0x8000_0200, 0x8000_0400),
+            ("owner.cpp", ".rodata", 0x8030_0000, 0x8030_0040),
+        ]);
+        refuse_unevidenced_losses(&before, &kept, &gives_up_the_head).unwrap();
+    }
+
+    #[test]
+    fn interval_subtraction_keeps_only_what_is_left_over() {
+        assert_eq!(subtract(&[(0, 0x100)], &[(0x40, 0x80)]), vec![(0, 0x40), (0x80, 0x100)]);
+        assert_eq!(subtract(&[(0, 0x100)], &[(0, 0x100)]), vec![]);
+        assert_eq!(subtract(&[(0, 0x100)], &[(0x100, 0x200)]), vec![(0, 0x100)]);
+    }
+
+    #[test]
+    fn a_conflicting_extension_leaves_both_owners_alone() {
+        let mut map =
+            blocks(&[("a.cpp", 0x8000_0100, 0x8000_0200), ("b.cpp", 0x8000_0200, 0x8000_0300)]);
+        let before = map.clone();
+        // a.cpp reaching into b.cpp without a revision saying b.cpp gives it up.
+        let grabbing =
+            body(".text", 0x8000_0100, 0x8000_0280, vec![line(".text", 0x8000_0100, 0x8000_0280)]);
+        // Nothing here takes b.cpp's *block* away, so the loss gate passes; what
+        // refuses this is the build, which is why the stage restores the splits
+        // it cloned before trying. The gate's job is only the silent losses.
+        apply_alternative(&mut map, "a.cpp", &grabbing).unwrap();
+        assert_eq!(single_range(&map, "b.cpp", ".text"), Some((0x8000_0200, 0x8000_0300)));
+        assert_eq!(before["b.cpp"], map["b.cpp"]);
+    }
+
+    #[test]
+    fn calibration_and_a_trial_apply_an_alternative_identically() {
+        // Both go through `apply_alternative`, which is the point: a measured
+        // recovery has to be the recovery the trial would perform.
+        let start = blocks(&[("a.cpp", 0x8000_0100, 0x8000_0200)]);
+        let complete =
+            body(".text", 0x8000_0200, 0x8000_0300, vec![line(".text", 0x8000_0100, 0x8000_0300)]);
+
+        let mut scored = start.clone();
+        apply_alternative(&mut scored, "a.cpp", &complete).unwrap();
+
+        let mut splits = Splits { header: String::new(), blocks: start };
+        let is_new = !splits.blocks.contains_key("a.cpp");
+        apply_alternative(&mut splits.blocks, "a.cpp", &complete).unwrap();
+        assert!(!is_new);
+        assert_eq!(scored, splits.blocks);
+    }
+
     #[test]
     fn a_revision_that_changes_nothing_is_refused() {
         let mut map = blocks(&[("owner.cpp", 0x8000_0100, 0x8000_0400)]);
@@ -1001,6 +1450,157 @@ mod tests {
         assert_eq!(strip_extension("no_extension"), "no_extension");
     }
 
+    /// One candidate carrying a proposal with a single alternative.
+    fn candidate_for(name: &str, alternative: &Alternative) -> Candidate {
+        let proposal = Proposal {
+            policy_version: POLICY_VERSION,
+            source_code_bytes: 0x1000,
+            required_extracts: Vec::new(),
+            alternatives: vec![alternative.clone()],
+        };
+        Candidate { name: name.into(), evidence: serde_json::to_value(proposal).unwrap() }
+    }
+
+    fn stage_result(accepted: Vec<Candidate>, selections: Selections) -> crate::run::StageResult {
+        crate::run::StageResult {
+            stage: "coverage".into(),
+            accepted,
+            deferred: Vec::new(),
+            selections,
+            events: Vec::new(),
+            validation: VALIDATION.into(),
+            dol_sha1: String::new(),
+            baseline: Default::default(),
+            final_measures: Default::default(),
+            reserved_by_earlier_stage: Vec::new(),
+            eligible_excluded_by_only: Vec::new(),
+            seconds: 0.0,
+        }
+    }
+
+    fn prepared_with(inventory: Inventory) -> Prepared {
+        let mut extra = serde_json::Map::new();
+        extra.insert("inventory".into(), serde_json::to_value(&inventory).unwrap());
+        Prepared {
+            candidates: Vec::new(),
+            baseline: empty_report(),
+            events: Vec::new(),
+            extra,
+            permitted: Default::default(),
+        }
+    }
+
+    fn empty_report() -> Report {
+        Report { measures: Default::default(), units: Vec::new(), rest: BTreeMap::new() }
+    }
+
+    /// `held` is what each unit owned when the stage started.
+    fn inventory_with(held: &[(&str, u32)]) -> Inventory {
+        Inventory {
+            evidence_schema: EVIDENCE_SCHEMA,
+            source: "NTSC".into(),
+            target: "PAL".into(),
+            source_units: 10,
+            baseline_represented: 4,
+            missing: 6,
+            refinements: 0,
+            baseline_bytes: held.iter().map(|(n, b)| ((*n).to_string(), *b)).collect(),
+            dispositions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_revisited_selection_needs_the_proposal_it_was_proved_against() {
+        // A revisit rebuilds a unit's evidence, so the alternative it accepts
+        // exists only in the refreshed proposal. Carrying the *original*
+        // candidate forward leaves the id pointing at nothing, which is how a
+        // cascade turns into "Unknown coverage alternative" at publication.
+        let stale =
+            body(".text", 0x8000_0100, 0x8000_0200, vec![line(".text", 0x8000_0100, 0x8000_0200)]);
+        let mut fresh =
+            body(".text", 0x8000_0100, 0x8000_0300, vec![line(".text", 0x8000_0100, 0x8000_0300)]);
+        fresh.id = "refreshed".into();
+        fresh.gained_bytes = 0x200;
+        let selections = Selections::from([("a.cpp".to_string(), fresh.id.clone())]);
+
+        let carried_forward = summarize(
+            &prepared_with(inventory_with(&[])),
+            &stage_result(vec![candidate_for("a.cpp", &fresh)], selections.clone()),
+        )
+        .unwrap();
+        assert_eq!(carried_forward.selected["a.cpp"].id, "refreshed");
+        assert_eq!(carried_forward.newly_assigned_code_bytes, 0x200);
+
+        // The original candidate has never heard of that alternative.
+        let looked_up_by_name = summarize(
+            &prepared_with(inventory_with(&[])),
+            &stage_result(vec![candidate_for("a.cpp", &stale)], selections),
+        )
+        .unwrap();
+        assert!(looked_up_by_name.selected.is_empty());
+    }
+
+    #[test]
+    fn a_refinement_is_not_counted_as_a_newly_represented_unit() {
+        let extended =
+            body(".text", 0x8000_0200, 0x8000_0300, vec![line(".text", 0x8000_0100, 0x8000_0300)]);
+        let selections = Selections::from([("a.cpp".to_string(), extended.id.clone())]);
+        // a.cpp already held 0x100 bytes when the stage started.
+        let summary = summarize(
+            &prepared_with(inventory_with(&[("a.cpp", 0x100)])),
+            &stage_result(vec![candidate_for("a.cpp", &extended)], selections),
+        )
+        .unwrap();
+
+        assert_eq!(summary.refined_units, 1);
+        assert_eq!(summary.newly_supported_units, 0);
+        // The project did not gain a translation unit, only 0x100 bytes of one.
+        assert_eq!(summary.final_represented, summary.baseline_represented);
+        assert_eq!(summary.newly_assigned_code_bytes, 0x100);
+    }
+
+    #[test]
+    fn a_unit_created_then_grown_in_one_run_is_new_and_counts_its_whole_gain() {
+        // Round one gave a.cpp 0x100..0x200; round three grew it to 0x300. The
+        // final proposal's own `gained_bytes` is only that second step, and by
+        // then the workspace says a.cpp was already represented — so measuring
+        // either against the workspace would report the unit this stage created
+        // as a refinement of somebody else's work, worth half its bytes.
+        let grown =
+            body(".text", 0x8000_0200, 0x8000_0300, vec![line(".text", 0x8000_0100, 0x8000_0300)]);
+        let selections = Selections::from([("a.cpp".to_string(), grown.id.clone())]);
+        let summary = summarize(
+            // a.cpp owned nothing when the stage started.
+            &prepared_with(inventory_with(&[])),
+            &stage_result(vec![candidate_for("a.cpp", &grown)], selections),
+        )
+        .unwrap();
+
+        assert_eq!(summary.newly_supported_units, 1);
+        assert_eq!(summary.refined_units, 0);
+        assert_eq!(summary.final_represented, summary.baseline_represented + 1);
+        assert_eq!(summary.newly_assigned_code_bytes, 0x200, "both rounds, not just the last");
+    }
+
+    #[test]
+    fn a_run_narrowed_with_only_does_not_pick_up_new_units_on_revisit() {
+        let permitted = Permitted {
+            reserved: BTreeSet::from(["reserved.cpp".to_string()]),
+            only: BTreeSet::from(["wanted.cpp".to_string()]),
+        };
+        assert!(permitted.allows("wanted.cpp"));
+        assert!(!permitted.allows("newly-eligible.cpp"));
+        assert!(!permitted.allows("reserved.cpp"));
+
+        // With no narrowing, anything not reserved is fair game.
+        let open = Permitted {
+            reserved: BTreeSet::from(["reserved.cpp".to_string()]),
+            only: BTreeSet::new(),
+        };
+        assert!(open.allows("newly-eligible.cpp"));
+        assert!(!open.allows("reserved.cpp"));
+    }
+
     #[test]
     fn the_markdown_report_keeps_the_four_measures_apart() {
         let summary = Summary {
@@ -1011,6 +1611,7 @@ mod tests {
             baseline_represented: 40,
             final_represented: 42,
             newly_supported_units: 2,
+            refined_units: 1,
             newly_assigned_code_bytes: 4096,
             selected: BTreeMap::new(),
             dispositions: BTreeMap::from([("a.cpp".into(), "accepted".into())]),

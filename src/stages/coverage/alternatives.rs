@@ -92,7 +92,14 @@ pub struct Alternative {
     pub start: String,
     pub end: String,
     pub covered_bytes: u32,
-    /// The `splits.txt` lines this alternative would write.
+    /// Bytes the unit would own that it does not own already. For a unit with
+    /// no block this is the whole claim; for one being extended it is only the
+    /// new ground, which is what a build actually buys.
+    #[serde(default)]
+    pub gained_bytes: u32,
+    /// The `splits.txt` lines this alternative would write. A complete body:
+    /// applying an alternative replaces the unit's block outright, so anything
+    /// missing from here is something the unit stops owning.
     pub lines: Vec<String>,
     /// The evidence records behind it, kept as written so the run's report can
     /// show exactly what was believed.
@@ -150,6 +157,9 @@ fn alternative(
         start: format_address(start),
         end: format_address(end),
         covered_bytes: end - start,
+        // Filled in by `complete`, which is the only place that knows what the
+        // unit already holds.
+        gained_bytes: end - start,
         lines: vec![split_line(section, start, end)],
         anchors,
         owner_revisions,
@@ -158,12 +168,91 @@ fn alternative(
 
 type Blocks = IndexMap<String, Vec<String>>;
 
-fn overlaps_existing(section: &str, start: u32, end: u32, blocks: &Blocks) -> bool {
+/// Whether the range is ground some *other* unit already claims.
+///
+/// A unit's own block is not an obstacle to its own boundary moving — that is
+/// the whole of what refining a split means. Every other unit's is.
+fn overlaps_other(unit: &str, section: &str, start: u32, end: u32, blocks: &Blocks) -> bool {
     blocks
-        .values()
-        .flatten()
+        .iter()
+        .filter(|(name, _)| name.as_str() != unit)
+        .flat_map(|(_, lines)| lines)
         .filter_map(|line| parse_range(line))
         .any(|range| range.section == section && start < range.end && range.start < end)
+}
+
+/// Total bytes a body claims, across every section.
+pub fn body_bytes(lines: &[String]) -> u32 {
+    lines.iter().filter_map(|line| parse_range(line)).map(|range| range.size()).sum()
+}
+
+/// The complete body a unit would have if it also claimed `start..end`.
+///
+/// Applying an alternative replaces the unit's block outright, so the body has
+/// to carry everything the unit keeps: its other sections verbatim, and this
+/// section's range enlarged rather than overwritten.
+///
+/// `None` when the claim cannot be justified as part of this unit. A range
+/// disconnected from what the unit already owns in that section is a second
+/// fragment, not a boundary moving, and spanning from the lowest start to the
+/// highest end would swallow everything in between on no evidence at all.
+fn complete_body(existing: &[String], section: &str, start: u32, end: u32) -> Option<Vec<String>> {
+    let mut here: Vec<(u32, u32)> = Vec::new();
+    let mut elsewhere: Vec<String> = Vec::new();
+    let mut insert_at: Option<usize> = None;
+    for line in existing {
+        match parse_range(line) {
+            Some(range) if range.section == section => {
+                insert_at.get_or_insert(elsewhere.len());
+                here.push((range.start, range.end));
+            }
+            // Anything else is another section, or a line this parser does not
+            // claim to understand; either way it is kept exactly as found.
+            _ => elsewhere.push(line.clone()),
+        }
+    }
+    // Touching counts: a tail that begins where the split ends is the same
+    // range continuing, not a fragment somewhere else.
+    if !here.is_empty() && !here.iter().any(|&(a, b)| start <= b && a <= end) {
+        return None;
+    }
+
+    here.push((start, end));
+    here.sort_unstable();
+    let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(here.len());
+    for (a, b) in here {
+        match ranges.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => ranges.push((a, b)),
+        }
+    }
+
+    let at = insert_at.unwrap_or(elsewhere.len());
+    let mut lines = elsewhere;
+    for (offset, (a, b)) in ranges.into_iter().enumerate() {
+        lines.insert(at + offset, split_line(section, a, b));
+    }
+    Some(lines)
+}
+
+/// Gives each alternative the complete body it would write, and drops the ones
+/// that would write nothing new.
+fn complete(alternatives: Vec<Alternative>, existing: &[String]) -> Vec<Alternative> {
+    let held = body_bytes(existing);
+    alternatives
+        .into_iter()
+        .filter_map(|mut item| {
+            let start = parse_address(&item.start)?;
+            let end = parse_address(&item.end)?;
+            let lines = complete_body(existing, &item.section, start, end)?;
+            // A claim the unit already covers is not a refinement, and offering
+            // it would have the stage rebuild the project to learn nothing.
+            let gained = body_bytes(&lines).checked_sub(held).filter(|&gained| gained > 0)?;
+            item.gained_bytes = gained;
+            item.lines = lines;
+            Some(item)
+        })
+        .collect()
 }
 
 /// The one range a unit claims in a section, when it claims exactly one.
@@ -338,7 +427,7 @@ pub fn build(
         .filter_map(|anchor| {
             let start = parse_address(&anchor.target_address)?;
             let end = parse_address(&anchor.target_end)?;
-            (!overlaps_existing(&anchor.section, start, end, target_blocks)).then(|| {
+            (!overlaps_other(&unit.name, &anchor.section, start, end, target_blocks)).then(|| {
                 alternative(
                     &anchor.section,
                     start,
@@ -383,17 +472,19 @@ pub fn build(
         .filter_map(|anchors| {
             let start = parse_address(&anchors[0].target_address)?;
             let end = parse_address(&anchors[anchors.len() - 1].target_end)?;
-            (!overlaps_existing(&anchors[0].section, start, end, target_blocks)).then(|| {
-                alternative(
-                    &anchors[0].section,
-                    start,
-                    end,
-                    anchors.iter().map(value).collect(),
-                    "exact-body",
-                    None,
-                    vec![],
-                )
-            })
+            (!overlaps_other(&unit.name, &anchors[0].section, start, end, target_blocks)).then(
+                || {
+                    alternative(
+                        &anchors[0].section,
+                        start,
+                        end,
+                        anchors.iter().map(value).collect(),
+                        "exact-body",
+                        None,
+                        vec![],
+                    )
+                },
+            )
         })
         .collect();
     sort_alternatives(&mut combined);
@@ -419,10 +510,17 @@ pub fn build(
 
     // Strongest kind first, and within a kind the biggest range first. A range
     // reached two ways is listed once.
+    //
+    // `combined` before `individual` is deliberate. Both rest on the same exact
+    // bodies, so neither is better supported than the other — and when the
+    // evidence is equal the whole run is the better answer to try first. Taking
+    // one anchor of it would leave a unit that looks represented, which is the
+    // state hardest to get out of. The single-anchor claims stay as fallbacks
+    // for when the run turns out not to hold.
     let mut result: Vec<Alternative> = Vec::new();
     let mut seen: BTreeSet<(String, String, String, String)> = BTreeSet::new();
     for item in
-        adjacent.into_iter().chain(sequences).chain(shifted).chain(individual).chain(combined)
+        adjacent.into_iter().chain(sequences).chain(shifted).chain(combined).chain(individual)
     {
         let key = (
             item.section.clone(),
@@ -434,7 +532,9 @@ pub fn build(
             result.push(item);
         }
     }
-    result
+    // Last, because only here is it known what the unit already holds: every
+    // surviving alternative carries the complete body it would write.
+    complete(result, target_blocks.get(&unit.name).map(Vec::as_slice).unwrap_or_default())
 }
 
 /// Ranges claimed by a group of functions that differ only where a member
@@ -486,7 +586,7 @@ fn layout_shift_alternatives(unit: &CoverageUnit, target_blocks: &Blocks) -> Vec
             continue;
         }
         let section = anchors[0].section.clone();
-        if overlaps_existing(&section, start, end, target_blocks) {
+        if overlaps_other(&unit.name, &section, start, end, target_blocks) {
             continue;
         }
         found.push(alternative(
@@ -514,7 +614,7 @@ fn sequence_alternative(
         || sequence.section != ".text"
         || end <= start
         || sequence.target_bytes != end - start
-        || overlaps_existing(&sequence.section, start, end, target_blocks)
+        || overlaps_other(&unit.name, &sequence.section, start, end, target_blocks)
     {
         return None;
     }
@@ -1051,9 +1151,14 @@ fn adjacent_owner_alternative(
 ///
 /// Every missing unit gets one, so the report accounts for all of them rather
 /// than only the ones something could be done about.
-pub fn disposition(unit: &CoverageUnit, alternatives: &[Alternative]) -> String {
+pub fn disposition(unit: &CoverageUnit, alternatives: &[Alternative], represented: bool) -> String {
     if !alternatives.is_empty() {
         return "eligible".into();
+    }
+    // Said before the evidence reasons below, which would otherwise describe a
+    // unit that is simply finished as though something had gone wrong with it.
+    if represented {
+        return "represented-and-unextendable".into();
     }
     if unit.code_bytes == 0 {
         return "zero-code".into();
@@ -1162,18 +1267,22 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_anchors_also_offer_the_merged_range() {
+    fn adjacent_anchors_yield_their_combined_range_first() {
         let found = build(
             &unit(vec![anchor(0x8000_0100, 0x8000_0200), anchor(0x8000_0200, 0x8000_0300)]),
             &IndexMap::new(),
             &BTreeMap::new(),
             &IndexMap::new(),
         );
-        assert_eq!(found.len(), 3, "each anchor alone, and the merged range");
-        // Narrow claims are tried before the wide one: a single anchor is the
-        // least that has to be right for the range to be kept.
-        assert_eq!(found[0].covered_bytes, 0x100);
-        assert_eq!(found[2].covered_bytes, 0x200);
+        assert_eq!(found.len(), 3, "the merged range, and each anchor alone");
+        // Both rest on the same exact bodies, so neither is better supported.
+        // With equal evidence the whole run is what to try: stopping at one
+        // anchor leaves a unit that looks represented and is not.
+        assert_eq!(found[0].covered_bytes, 0x200);
+        assert_eq!(found[0].lines, [split_line(".text", 0x8000_0100, 0x8000_0300)]);
+        // And the narrower claims survive as fallbacks.
+        assert_eq!(found[1].covered_bytes, 0x100);
+        assert_eq!(found[2].covered_bytes, 0x100);
     }
 
     #[test]
@@ -1186,6 +1295,76 @@ mod tests {
         );
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|a| a.covered_bytes == 0x100));
+    }
+
+    #[test]
+    fn a_truncated_split_gains_its_tail_and_keeps_its_prefix() {
+        // The unit holds 0x100..0x200 and the evidence places a function at
+        // 0x200..0x300 — the split's missing tail.
+        let existing = blocks(&[("a.cpp", 0x8000_0100, 0x8000_0200)]);
+        let found = build(
+            &unit(vec![anchor(0x8000_0200, 0x8000_0300)]),
+            &existing,
+            &BTreeMap::new(),
+            &IndexMap::new(),
+        );
+        assert_eq!(found.len(), 1);
+        // One enlarged range, not the tail on its own: applying an alternative
+        // replaces the block, so a tail-only body would drop the prefix.
+        assert_eq!(found[0].lines, [split_line(".text", 0x8000_0100, 0x8000_0300)]);
+        assert_eq!(found[0].gained_bytes, 0x100);
+    }
+
+    #[test]
+    fn extending_one_section_preserves_every_other() {
+        let mut existing: Blocks = IndexMap::new();
+        existing.insert("a.cpp".to_string(), vec![
+            split_line(".init", 0x8000_0000, 0x8000_0080),
+            split_line(".text", 0x8000_0100, 0x8000_0200),
+            split_line(".rodata", 0x8030_0000, 0x8030_0040),
+            split_line(".bss", 0x8040_0000, 0x8040_0010),
+        ]);
+        let found = build(
+            &unit(vec![anchor(0x8000_0200, 0x8000_0300)]),
+            &existing,
+            &BTreeMap::new(),
+            &IndexMap::new(),
+        );
+        assert_eq!(found[0].lines, [
+            split_line(".init", 0x8000_0000, 0x8000_0080),
+            split_line(".text", 0x8000_0100, 0x8000_0300),
+            split_line(".rodata", 0x8030_0000, 0x8030_0040),
+            split_line(".bss", 0x8040_0000, 0x8040_0010),
+        ]);
+        // Only the `.text` growth is new ground.
+        assert_eq!(found[0].gained_bytes, 0x100);
+    }
+
+    #[test]
+    fn a_claim_disconnected_from_the_split_is_not_an_extension() {
+        // 0x400..0x500 does not touch 0x100..0x200. Taking the span between
+        // them would claim 0x200..0x400 on no evidence whatsoever.
+        let existing = blocks(&[("a.cpp", 0x8000_0100, 0x8000_0200)]);
+        let found = build(
+            &unit(vec![anchor(0x8000_0400, 0x8000_0500)]),
+            &existing,
+            &BTreeMap::new(),
+            &IndexMap::new(),
+        );
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn repeating_a_finished_refinement_offers_nothing() {
+        // The unit already covers everything the evidence supports.
+        let existing = blocks(&[("a.cpp", 0x8000_0100, 0x8000_0300)]);
+        let found = build(
+            &unit(vec![anchor(0x8000_0100, 0x8000_0200), anchor(0x8000_0200, 0x8000_0300)]),
+            &existing,
+            &BTreeMap::new(),
+            &IndexMap::new(),
+        );
+        assert!(found.is_empty(), "{found:#?}");
     }
 
     #[test]
@@ -1254,11 +1433,11 @@ mod tests {
     fn a_unit_with_no_code_is_dispositioned_as_such() {
         let mut empty = unit(vec![]);
         empty.code_bytes = 0;
-        assert_eq!(disposition(&empty, &[]), "zero-code");
+        assert_eq!(disposition(&empty, &[], false), "zero-code");
         empty.code_bytes = 100;
-        assert_eq!(disposition(&empty, &[]), "tiny-code");
+        assert_eq!(disposition(&empty, &[], false), "tiny-code");
         empty.code_bytes = 4096;
-        assert_eq!(disposition(&empty, &[]), "no-qualifying-anchor");
+        assert_eq!(disposition(&empty, &[], false), "no-qualifying-anchor");
     }
 
     #[test]
@@ -1266,13 +1445,22 @@ mod tests {
         let mut blocked = anchor(0x8000_0100, 0x8000_0200);
         blocked.eligible = false;
         blocked.reasons = vec!["target range is owned by another explicit unit".into()];
-        assert_eq!(disposition(&unit(vec![blocked]), &[]), "overlap");
+        assert_eq!(disposition(&unit(vec![blocked]), &[], false), "overlap");
+    }
+
+    #[test]
+    fn a_finished_unit_is_not_reported_as_lacking_evidence() {
+        // It has a block and nothing left to claim, which is not the same as
+        // its evidence having failed a gate.
+        let mut empty = unit(vec![]);
+        empty.code_bytes = 4096;
+        assert_eq!(disposition(&empty, &[], true), "represented-and-unextendable");
     }
 
     #[test]
     fn a_unit_with_an_alternative_is_eligible() {
         let one = alternative(".text", 0x100, 0x200, vec![], "exact-body", None, vec![]);
-        assert_eq!(disposition(&unit(vec![]), std::slice::from_ref(&one)), "eligible");
+        assert_eq!(disposition(&unit(vec![]), std::slice::from_ref(&one), false), "eligible");
     }
 
     #[test]

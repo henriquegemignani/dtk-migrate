@@ -7,7 +7,9 @@
 
 pub mod callgraph;
 pub mod coverage;
+pub mod coverage_fixture;
 pub mod data_matching;
 pub mod fingerprint;
+pub mod mask;
 pub mod matching;
 pub mod unit_matching;

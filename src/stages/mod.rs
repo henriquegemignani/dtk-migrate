@@ -14,7 +14,7 @@
 //! None of them keeps anything on the strength of a proposal alone, and none of
 //! them is allowed to conclude something the build did not show.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,32 @@ pub struct Prepared {
     /// Stage-specific state that `evaluate` and the run's record need.
     #[serde(default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
+    /// What the run will let this stage touch, filled in after preparation.
+    #[serde(default)]
+    pub permitted: Permitted,
+}
+
+/// The units a run allows a stage to change.
+///
+/// A stage that finds new work while evaluating — a unit whose evidence only
+/// exists once its neighbour lands — still has to honour what the run set aside
+/// for another stage or narrowed down with `--only`. Preparation cannot apply
+/// those limits itself, because they are the run's to apply and are imposed on
+/// the candidate list afterwards.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Permitted {
+    /// Names reserved by an earlier stage. Never touch these.
+    #[serde(default)]
+    pub reserved: BTreeSet<String>,
+    /// When a run was narrowed, the only names it may touch.
+    #[serde(default)]
+    pub only: BTreeSet<String>,
+}
+
+impl Permitted {
+    pub fn allows(&self, name: &str) -> bool {
+        !self.reserved.contains(name) && (self.only.is_empty() || self.only.contains(name))
+    }
 }
 
 /// What a stage concluded after trying them.
@@ -101,6 +127,10 @@ pub struct Outcome {
     /// Rejected here, but not ruled out: a different batch, boundary or
     /// baseline can change the answer, which is why this is not a blacklist.
     pub deferred: Vec<Candidate>,
+    /// Every alternative this pass actually asked about, accepted or not, so a
+    /// later round does not spend a build re-asking.
+    #[serde(default)]
+    pub tried: Tried,
     #[serde(default)]
     pub events: Vec<Event>,
     pub report: Report,
@@ -109,11 +139,35 @@ pub struct Outcome {
     pub validation: String,
 }
 
+/// Alternative ids a unit has already been asked about, so that rediscovery can
+/// tell a genuinely new proposal from the one that was just refused.
+pub type Tried = BTreeMap<String, BTreeSet<String>>;
+
 pub trait Stage {
     fn name(&self) -> &'static str;
 
     /// Builds the baseline and works out what is worth trying.
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared>;
+
+    /// Work the stage could not see until something was accepted.
+    ///
+    /// A boundary landing can give a unit its first usable evidence, and that
+    /// unit may never have been a candidate. Only the coordinator calls this,
+    /// between evaluation rounds: a worker proves the candidates it was handed
+    /// in its own workspace, and a batch that invented new ones would be
+    /// reporting on units another batch is holding at the same time.
+    ///
+    /// Must honour [`Prepared::permitted`], and must not return a proposal made
+    /// only of alternatives listed in `tried` — that is the same question
+    /// again, and answering it costs a build.
+    fn rediscover(
+        &self,
+        _ctx: &BuildContext,
+        _prepared: &Prepared,
+        _tried: &Tried,
+    ) -> Result<Vec<Candidate>> {
+        Ok(Vec::new())
+    }
 
     /// Tries the given candidates against the prepared baseline.
     ///

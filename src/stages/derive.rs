@@ -118,7 +118,7 @@ impl Stage for Derive {
         extra.insert("corrections".into(), serde_json::to_value(&corrections)?);
         extra.insert("proposed".into(), serde_json::to_value(result.proposed)?);
         extra.insert("units".into(), serde_json::to_value(result.units)?);
-        Ok(Prepared { candidates, baseline, events, extra })
+        Ok(Prepared { candidates, baseline, events, extra, permitted: Default::default() })
     }
 
     fn evaluate(
@@ -208,6 +208,7 @@ impl Stage for Derive {
         }
         owned.commit();
         Ok(Outcome {
+            tried: Default::default(),
             accepted: candidates.iter().filter(|c| accepted.contains(&c.name)).cloned().collect(),
             deferred: candidates.iter().filter(|c| !accepted.contains(&c.name)).cloned().collect(),
             selections: Selections::new(),

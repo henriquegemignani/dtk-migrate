@@ -11,11 +11,15 @@ use crate::analysis::{
     callgraph::{FunctionNode, NodeIndex},
     data_matching::match_data_pairs,
     fingerprint::{LayoutShiftBody, layout_shift_body, normalized_body},
+    mask::Masked,
     matching::{MatchResult, MatchTarget, MatchTier},
 };
 
-pub const COVERAGE_SCHEMA: u32 = 8;
-pub const POLICY_VERSION: u32 = 8;
+pub const COVERAGE_SCHEMA: u32 = 9;
+/// Kept in step with [`crate::stages::coverage::POLICY_VERSION`], which gates
+/// the proposals this evidence produces; the two are checked against each other
+/// on every read, so they have to move together.
+pub const POLICY_VERSION: u32 = 9;
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
 pub const MIN_LAYOUT_SHIFT_CHANGED_ACCESSES: u32 = 4;
@@ -60,7 +64,10 @@ pub struct CoverageReport {
     pub policy: CoveragePolicy,
     pub source: String,
     pub target: String,
-    pub target_ownership_masked: bool,
+    /// What was hidden from the analysis that produced this, and from whom.
+    /// The masking happened to the object, so every generator below saw the
+    /// same world — there is no second, unmasked view for one of them to read.
+    pub mask: Masked,
     pub source_units: Vec<CoverageUnit>,
     pub target_layout: Vec<TargetFunction>,
 }
@@ -68,6 +75,17 @@ pub struct CoverageReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoveragePolicy {
     pub version: u32,
+    /// Every alternative carries the unit's whole body, and must claim ground
+    /// the unit does not already hold.
+    pub complete_replacement_bodies: bool,
+    /// A unit already holding a block may still be extended into unowned space.
+    pub refine_represented_units: bool,
+    /// Where a run of exact anchors and its members are equally supported, the
+    /// whole run is offered before any single anchor of it.
+    pub prefer_combined_exact_anchors: bool,
+    /// A change may not take ground from any unit without an owner revision
+    /// saying so.
+    pub refuse_unevidenced_ownership_loss: bool,
     pub minimum_anchor_bytes: u32,
     pub normalized_body_must_be_unique: bool,
     pub confirm_normalized_bytes_after_hash: bool,
@@ -409,11 +427,103 @@ pub struct SequenceFunction {
     pub primary: bool,
 }
 
+/// The policy as this build of the tool applies it.
+///
+/// One constructor, because the report, the stage and the tests all have to
+/// agree about what the rules currently are — three copies of the literal
+/// drifted apart once already.
+pub fn current_policy() -> CoveragePolicy {
+    CoveragePolicy {
+        version: POLICY_VERSION,
+        complete_replacement_bodies: true,
+        refine_represented_units: true,
+        prefer_combined_exact_anchors: true,
+        refuse_unevidenced_ownership_loss: true,
+        minimum_anchor_bytes: MIN_ANCHOR_BYTES,
+        normalized_body_must_be_unique: true,
+        confirm_normalized_bytes_after_hash: true,
+        require_relocation_layout: true,
+        require_known_extents: true,
+        require_explicit_whole_source_ownership: true,
+        reject_weak_symbols: true,
+        reject_template_anchors: true,
+        reject_conflicting_target_ownership: true,
+        require_split_alignment: true,
+        infer_this_relative_layout_shifts: true,
+        minimum_layout_shift_functions: MIN_LAYOUT_SHIFT_FUNCTIONS,
+        minimum_layout_shift_changed_accesses: MIN_LAYOUT_SHIFT_CHANGED_ACCESSES,
+        minimum_layout_shift_bytes: MIN_LAYOUT_SHIFT_BYTES,
+        maximum_layout_shift_segments: 2,
+        infer_boundary_constrained_sequences: true,
+        minimum_sequence_functions: MIN_SEQUENCE_FUNCTIONS,
+        minimum_sequence_match_ratio: MIN_SEQUENCE_MATCH_RATIO,
+        minimum_sequence_order_ratio: MIN_SEQUENCE_ORDER_RATIO,
+        minimum_sequence_matched_bytes: MIN_SEQUENCE_MATCHED_BYTES,
+        minimum_sequence_target_coverage: MIN_SEQUENCE_TARGET_COVERAGE,
+        minimum_sequence_strong_functions: MIN_SEQUENCE_STRONG_FUNCTIONS,
+        minimum_sequence_direct_anchors: MIN_SEQUENCE_DIRECT_ANCHORS,
+        allow_small_exact_sequence_anchors: true,
+        minimum_sequence_alignment_margin: MIN_SEQUENCE_ALIGNMENT_MARGIN,
+        minimum_sequence_size_ratio: 0.5,
+        maximum_sequence_size_ratio: 1.5,
+        require_explicit_sequence_neighbors: true,
+        reject_sequence_runner_up: true,
+        infer_boundary_data_matches: true,
+        preserve_target_extract_extents: true,
+        infer_layout_corroborated_boundaries: true,
+        minimum_layout_boundary_functions: MIN_LAYOUT_BOUNDARY_FUNCTIONS,
+        minimum_layout_boundary_bytes: MIN_LAYOUT_BOUNDARY_BYTES,
+        minimum_layout_boundary_changed_accesses: MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES,
+        maximum_layout_boundary_size_delta: MAX_LAYOUT_BOUNDARY_SIZE_DELTA,
+        maximum_layout_boundary_function_delta: MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA,
+        infer_vtable_corroborated_boundaries: true,
+        minimum_vtable_boundary_functions: MIN_VTABLE_BOUNDARY_FUNCTIONS,
+        minimum_vtable_boundary_match_ratio: MIN_VTABLE_BOUNDARY_MATCH_RATIO,
+        minimum_vtable_boundary_target_coverage: MIN_VTABLE_BOUNDARY_TARGET_COVERAGE,
+        minimum_vtable_boundary_matched_slots: MIN_VTABLE_BOUNDARY_MATCHED_SLOTS,
+        minimum_vtable_boundary_unit_slots: MIN_VTABLE_BOUNDARY_UNIT_SLOTS,
+        maximum_vtable_boundary_size_delta: MAX_VTABLE_BOUNDARY_SIZE_DELTA,
+        maximum_vtable_boundary_function_delta: MAX_VTABLE_BOUNDARY_FUNCTION_DELTA,
+        maximum_vtable_boundary_gap_helpers: MAX_VTABLE_BOUNDARY_GAP_HELPERS,
+        maximum_vtable_size_padding: MAX_VTABLE_SIZE_PADDING,
+        infer_ownership_transition_boundaries: true,
+        minimum_ownership_transition_functions: MIN_OWNERSHIP_TRANSITION_FUNCTIONS,
+        minimum_ownership_transition_strong_functions: MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS,
+        minimum_ownership_transition_edge_strong_functions:
+            MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS,
+        maximum_ownership_transition_size_delta: MAX_OWNERSHIP_TRANSITION_SIZE_DELTA,
+        require_complete_ownership_transition_sequence: true,
+        require_nonempty_ownership_transition_correction: true,
+        infer_adjacent_owner_transition_boundaries: true,
+        minimum_adjacent_owner_transition_functions: MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS,
+        minimum_adjacent_owner_transition_strong_functions:
+            MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS,
+        minimum_adjacent_owner_transition_direct_anchors:
+            MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS,
+        minimum_adjacent_owner_support_functions: MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS,
+        minimum_adjacent_owner_support_strong_functions:
+            MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS,
+        maximum_adjacent_owner_size_delta: MAX_ADJACENT_OWNER_SIZE_DELTA,
+        maximum_adjacent_owner_gap_helpers: MAX_ADJACENT_OWNER_GAP_HELPERS,
+        require_complete_adjacent_owner_sequences: true,
+        require_atomic_adjacent_owner_revision: true,
+    }
+}
+
+/// Turns two analysed executables into the evidence a coverage policy reasons
+/// over.
+///
+/// `hide_target_names` and `mask` are two different kinds of ignorance, and a
+/// migration has both: the target's symbol names are meaningless until matching
+/// supplies them, and its split ownership does not exist yet. They are kept
+/// apart because the evidence needs them apart — a function's identity and the
+/// linker's choice of owner are established by different observations.
 pub fn build_report(
     source: &MatchTarget,
     target: &MatchTarget,
     matches: &MatchResult,
-    mask_target_ownership: bool,
+    hide_target_names: bool,
+    mask: &Masked,
     source_extracts: &[ExtractSpec],
     target_extracts: &[ExtractSpec],
 ) -> CoverageReport {
@@ -484,9 +594,9 @@ pub fn build_report(
         let a = source.graph.node(source_node);
         let b = target.graph.node(target_node);
         let target_name = target.symbol_name(target_node);
-        let target_owner = (!mask_target_ownership)
-            .then(|| target.unit_of(target_node).map(str::to_string))
-            .flatten();
+        // Whatever a scenario hid is already gone from the object, so this is
+        // the ownership the analysis is entitled to see.
+        let target_owner = target.unit_of(target_node).map(str::to_string);
         let owner_auto =
             target_owner.as_deref().is_some_and(|name| target.obj.is_unit_autogenerated(name));
         let source_body = normalized_body(&source.obj, a);
@@ -543,7 +653,7 @@ pub fn build_report(
             .push(CoverageAnchor {
                 source_name: source_name.to_string(),
                 source_address: hex(a.address),
-                target_name: if mask_target_ownership {
+                target_name: if hide_target_names {
                     String::new()
                 } else {
                     target_name.to_string()
@@ -573,7 +683,7 @@ pub fn build_report(
             });
     }
 
-    add_layout_shift_evidence(source, target, mask_target_ownership, &mut units);
+    add_layout_shift_evidence(source, target, hide_target_names, &mut units);
     add_boundary_sequence_evidence(
         source,
         target,
@@ -603,9 +713,7 @@ pub fn build_report(
         .iter()
         .map(|&index| {
             let node = target.graph.node(index);
-            let owner = (!mask_target_ownership)
-                .then(|| target.unit_of(index).map(str::to_string))
-                .flatten();
+            let owner = target.unit_of(index).map(str::to_string);
             TargetFunction {
                 address: hex(node.address),
                 end: hex(node.address + node.size),
@@ -620,81 +728,10 @@ pub fn build_report(
 
     CoverageReport {
         schema: COVERAGE_SCHEMA,
-        policy: CoveragePolicy {
-            version: POLICY_VERSION,
-            minimum_anchor_bytes: MIN_ANCHOR_BYTES,
-            normalized_body_must_be_unique: true,
-            confirm_normalized_bytes_after_hash: true,
-            require_relocation_layout: true,
-            require_known_extents: true,
-            require_explicit_whole_source_ownership: true,
-            reject_weak_symbols: true,
-            reject_template_anchors: true,
-            reject_conflicting_target_ownership: true,
-            require_split_alignment: true,
-            infer_this_relative_layout_shifts: true,
-            minimum_layout_shift_functions: MIN_LAYOUT_SHIFT_FUNCTIONS,
-            minimum_layout_shift_changed_accesses: MIN_LAYOUT_SHIFT_CHANGED_ACCESSES,
-            minimum_layout_shift_bytes: MIN_LAYOUT_SHIFT_BYTES,
-            maximum_layout_shift_segments: 2,
-            infer_boundary_constrained_sequences: true,
-            minimum_sequence_functions: MIN_SEQUENCE_FUNCTIONS,
-            minimum_sequence_match_ratio: MIN_SEQUENCE_MATCH_RATIO,
-            minimum_sequence_order_ratio: MIN_SEQUENCE_ORDER_RATIO,
-            minimum_sequence_matched_bytes: MIN_SEQUENCE_MATCHED_BYTES,
-            minimum_sequence_target_coverage: MIN_SEQUENCE_TARGET_COVERAGE,
-            minimum_sequence_strong_functions: MIN_SEQUENCE_STRONG_FUNCTIONS,
-            minimum_sequence_direct_anchors: MIN_SEQUENCE_DIRECT_ANCHORS,
-            allow_small_exact_sequence_anchors: true,
-            minimum_sequence_alignment_margin: MIN_SEQUENCE_ALIGNMENT_MARGIN,
-            minimum_sequence_size_ratio: 0.5,
-            maximum_sequence_size_ratio: 1.5,
-            require_explicit_sequence_neighbors: true,
-            reject_sequence_runner_up: true,
-            infer_boundary_data_matches: true,
-            preserve_target_extract_extents: true,
-            infer_layout_corroborated_boundaries: true,
-            minimum_layout_boundary_functions: MIN_LAYOUT_BOUNDARY_FUNCTIONS,
-            minimum_layout_boundary_bytes: MIN_LAYOUT_BOUNDARY_BYTES,
-            minimum_layout_boundary_changed_accesses: MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES,
-            maximum_layout_boundary_size_delta: MAX_LAYOUT_BOUNDARY_SIZE_DELTA,
-            maximum_layout_boundary_function_delta: MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA,
-            infer_vtable_corroborated_boundaries: true,
-            minimum_vtable_boundary_functions: MIN_VTABLE_BOUNDARY_FUNCTIONS,
-            minimum_vtable_boundary_match_ratio: MIN_VTABLE_BOUNDARY_MATCH_RATIO,
-            minimum_vtable_boundary_target_coverage: MIN_VTABLE_BOUNDARY_TARGET_COVERAGE,
-            minimum_vtable_boundary_matched_slots: MIN_VTABLE_BOUNDARY_MATCHED_SLOTS,
-            minimum_vtable_boundary_unit_slots: MIN_VTABLE_BOUNDARY_UNIT_SLOTS,
-            maximum_vtable_boundary_size_delta: MAX_VTABLE_BOUNDARY_SIZE_DELTA,
-            maximum_vtable_boundary_function_delta: MAX_VTABLE_BOUNDARY_FUNCTION_DELTA,
-            maximum_vtable_boundary_gap_helpers: MAX_VTABLE_BOUNDARY_GAP_HELPERS,
-            maximum_vtable_size_padding: MAX_VTABLE_SIZE_PADDING,
-            infer_ownership_transition_boundaries: true,
-            minimum_ownership_transition_functions: MIN_OWNERSHIP_TRANSITION_FUNCTIONS,
-            minimum_ownership_transition_strong_functions:
-                MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS,
-            minimum_ownership_transition_edge_strong_functions:
-                MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS,
-            maximum_ownership_transition_size_delta: MAX_OWNERSHIP_TRANSITION_SIZE_DELTA,
-            require_complete_ownership_transition_sequence: true,
-            require_nonempty_ownership_transition_correction: true,
-            infer_adjacent_owner_transition_boundaries: true,
-            minimum_adjacent_owner_transition_functions: MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS,
-            minimum_adjacent_owner_transition_strong_functions:
-                MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS,
-            minimum_adjacent_owner_transition_direct_anchors:
-                MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS,
-            minimum_adjacent_owner_support_functions: MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS,
-            minimum_adjacent_owner_support_strong_functions:
-                MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS,
-            maximum_adjacent_owner_size_delta: MAX_ADJACENT_OWNER_SIZE_DELTA,
-            maximum_adjacent_owner_gap_helpers: MAX_ADJACENT_OWNER_GAP_HELPERS,
-            require_complete_adjacent_owner_sequences: true,
-            require_atomic_adjacent_owner_revision: true,
-        },
+        policy: current_policy(),
         source: source.name.clone(),
         target: target.name.clone(),
-        target_ownership_masked: mask_target_ownership,
+        mask: mask.clone(),
         source_units: units.into_values().collect(),
         target_layout,
     }
@@ -2252,7 +2289,7 @@ struct LayoutPair {
 fn add_layout_shift_evidence(
     source: &MatchTarget,
     target: &MatchTarget,
-    mask_target_ownership: bool,
+    hide_target_names: bool,
     units: &mut BTreeMap<String, CoverageUnit>,
 ) {
     let source_bodies: Vec<LayoutShiftBody> = (0..source.graph.len() as NodeIndex)
@@ -2293,9 +2330,7 @@ fn add_layout_shift_evidence(
             && normalized_body(&source.obj, a).len() == a.size as usize;
         let target_extent_known = target.obj.symbols[b.symbol].size_known
             && normalized_body(&target.obj, b).len() == b.size as usize;
-        let target_owner = (!mask_target_ownership)
-            .then(|| target.unit_of(target_node).map(str::to_string))
-            .flatten();
+        let target_owner = target.unit_of(target_node).map(str::to_string);
         let owner_auto =
             target_owner.as_deref().is_some_and(|name| target.obj.is_unit_autogenerated(name));
         let source_unit_explicit = !source.obj.is_unit_autogenerated(unit);
@@ -2399,9 +2434,7 @@ fn add_layout_shift_evidence(
             let target_body = &target_bodies[pair.target as usize];
             let source_name = source.symbol_name(pair.source);
             let target_name = target.symbol_name(pair.target);
-            let target_owner = (!mask_target_ownership)
-                .then(|| target.unit_of(pair.target).map(str::to_string))
-                .flatten();
+            let target_owner = target.unit_of(pair.target).map(str::to_string);
             let owner_auto =
                 target_owner.as_deref().is_some_and(|name| target.obj.is_unit_autogenerated(name));
             let section = &target.obj.sections[b.section];
@@ -2420,7 +2453,7 @@ fn add_layout_shift_evidence(
                 .push(LayoutShiftAnchor {
                     source_name: source_name.to_string(),
                     source_address: hex(a.address),
-                    target_name: if mask_target_ownership {
+                    target_name: if hide_target_names {
                         String::new()
                     } else {
                         target_name.to_string()
@@ -2807,6 +2840,10 @@ mod tests {
             schema: COVERAGE_SCHEMA,
             policy: CoveragePolicy {
                 version: POLICY_VERSION,
+                complete_replacement_bodies: true,
+                refine_represented_units: true,
+                prefer_combined_exact_anchors: true,
+                refuse_unevidenced_ownership_loss: true,
                 minimum_anchor_bytes: MIN_ANCHOR_BYTES,
                 normalized_body_must_be_unique: true,
                 confirm_normalized_bytes_after_hash: true,
@@ -2880,7 +2917,7 @@ mod tests {
             },
             source: "source".into(),
             target: "target".into(),
-            target_ownership_masked: true,
+            mask: Masked::default(),
             source_units: Vec::new(),
             target_layout: Vec::new(),
         };

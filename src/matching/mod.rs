@@ -16,6 +16,7 @@ use crate::{
     analysis::{
         coverage::build_report as build_coverage_report,
         data_matching::match_data,
+        mask::{self, Scenario},
         matching::{MatchOptions, MatchTarget, MatchTier, match_functions},
         unit_matching::propose_units,
     },
@@ -52,6 +53,10 @@ pub struct Request {
     /// Ignore the target's existing names while matching, then score against
     /// them. Used to measure accuracy on a version that is already named.
     pub validate: bool,
+    /// Hide some of the target's split ownership before analysing it, so
+    /// calibration can ask for boundaries the project already has. A migration
+    /// leaves this at [`Scenario::Nothing`]: it has nothing to hide.
+    pub mask: Scenario,
     pub outputs: Outputs,
 }
 
@@ -65,6 +70,7 @@ impl Request {
             min_confidence: 0.5,
             max_rounds: 100,
             validate: false,
+            mask: Scenario::Nothing,
             outputs: Outputs::default(),
         }
     }
@@ -80,8 +86,19 @@ pub fn run(request: &Request) -> Result<()> {
 
     let (source_config, source_obj) =
         load_analyzed(&request.source_config, request.source_root.as_deref(), "--source-root")?;
-    let (target_config, target_obj) =
+    let (target_config, mut target_obj) =
         load_analyzed(&request.target_config, request.target_root.as_deref(), "--target-root")?;
+
+    // Before anything reads the target: a scenario that hid ownership after the
+    // fact would only be hiding it from whichever reader remembered to ask.
+    let masked = mask::apply(&mut target_obj, request.mask);
+    if masked.hides_anything() {
+        info!(
+            "Hid {} of the target's units, scenario {}",
+            masked.hidden.len(),
+            masked.scenario.as_str()
+        );
+    }
 
     let source = MatchTarget::new(request.source_config.to_string(), source_obj);
     let target = MatchTarget::new(request.target_config.to_string(), target_obj);
@@ -142,6 +159,7 @@ pub fn run(request: &Request) -> Result<()> {
             &target,
             &result,
             request.validate,
+            &masked,
             &source_extracts,
             &target_extracts,
         );
