@@ -467,7 +467,7 @@ struct OracleVerification {
     units: BTreeSet<String>,
 }
 
-fn supported_run_schema(schema: u32) -> bool { matches!(schema, 1..=3) }
+fn supported_run_schema(schema: u32) -> bool { matches!(schema, 1..=4) }
 
 const REVISION_BOUND_RUN_SCHEMA: u32 = 3;
 
@@ -576,7 +576,7 @@ fn validate_run_schemas(summary: u32, record: u32) -> Result<()> {
         bail!("Run schema differs between result.json ({summary}) and run.json ({record})")
     }
     if !supported_run_schema(summary) {
-        bail!("Run schema {summary} is unsupported; this scorer accepts only schemas 1, 2 and 3")
+        bail!("Run schema {summary} is unsupported; this scorer accepts only schemas 1 to 4")
     }
     Ok(())
 }
@@ -714,6 +714,22 @@ mod legacy {
         pub validation: String,
         #[serde(default)]
         pub dol_sha1: String,
+        /// Schema 4: every ownership transaction integration applied, in
+        /// order, including ones a later refinement superseded. Absent — and
+        /// empty — in older runs.
+        #[serde(default)]
+        pub applied: Vec<Applied>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    pub struct Applied {
+        #[serde(default)]
+        pub id: String,
+        /// Every unit it wrote, the candidate's neighbours included.
+        #[serde(default)]
+        pub units: Vec<String>,
+        #[serde(default)]
+        pub record: serde_json::Value,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -754,6 +770,9 @@ mod legacy {
         pub status: String,
         #[serde(default)]
         pub reason: Option<String>,
+        /// Schema 4: the alternative (transaction) the event concerns.
+        #[serde(default)]
+        pub alternative: Option<String>,
     }
 
     /// `run.json`: what the run froze before it did anything.
@@ -1612,9 +1631,16 @@ fn refusal_kind(stage: &str, status: &str) -> Option<Application> {
 
 /// Coverage refusals that happened before a build, told apart by reason text
 /// because coverage records one status for both.
+///
+/// The first group is what run schemas 1–3 wrote and must keep meaning what it
+/// meant; the second is how atomic ownership transactions (schema 4) phrase a
+/// change refused before anything was built.
 fn is_preflight(reason: &str) -> bool {
     let text = reason.to_lowercase();
-    text.contains("with nothing saying it should")
+    text.contains("stale precondition")
+        || text.contains("transaction refused")
+        || text.contains("which this run does not permit")
+        || text.contains("with nothing saying it should")
         || text.contains("no longer has its exact evidenced")
         || text.contains("not uniquely revisable")
         || text.contains("malformed adjacent-owner revision")
@@ -1633,22 +1659,69 @@ struct StageOutcome {
 }
 
 /// What one stage did with one unit, read in that stage's own vocabulary.
+///
+/// Before run schema 4 a unit's only record is its own candidate. From schema
+/// 4 a coverage transaction may also write units that are not candidates at all
+/// — the neighbour an adjacent-owner transition narrows — and a later
+/// transaction may write a unit after its own selection. So a unit is also
+/// credited with every body another candidate's transaction proposed for it,
+/// and what it finally holds is whatever the last applied transaction to write
+/// it left there, whichever candidate carried that transaction.
 fn stage_outcome(stage: &str, facts: &legacy::Stage, name: &str) -> Option<StageOutcome> {
     let accepted = facts.accepted.iter().find(|c| c.name == name);
     let deferred = facts.deferred.iter().find(|c| c.name == name);
     let offered: Vec<&legacy::Candidate> =
         facts.offered.iter().flatten().filter(|candidate| candidate.name == name).collect();
-    let candidate = accepted.or(deferred).or_else(|| offered.last().copied())?;
-    let mut proposed: Vec<Vec<String>> =
-        offered.into_iter().flat_map(|candidate| proposed_bodies(&candidate.evidence)).collect();
-    if proposed.is_empty() {
-        proposed = proposed_bodies(&candidate.evidence);
+    let own = accepted.or(deferred).or_else(|| offered.last().copied());
+    let writers: Vec<&legacy::Candidate> = facts
+        .offered
+        .iter()
+        .flatten()
+        .chain(&facts.accepted)
+        .chain(&facts.deferred)
+        .filter(|candidate| {
+            candidate.name != name && !member_bodies(&candidate.evidence, name).is_empty()
+        })
+        .collect();
+    let last_write = facts.applied.iter().rev().find(|entry| entry.units.iter().any(|u| u == name));
+    if own.is_none() && writers.is_empty() && last_write.is_none() {
+        return None;
     }
 
+    let mut proposed: Vec<Vec<String>> =
+        offered.into_iter().flat_map(|candidate| proposed_bodies(&candidate.evidence)).collect();
+    if proposed.is_empty()
+        && let Some(own) = own
+    {
+        proposed = proposed_bodies(&own.evidence);
+    }
+    // The same neighbour body is carried by every recorded version of the
+    // proposing candidate; it is one proposal, not several.
+    let mut borrowed: Vec<Vec<String>> = Vec::new();
+    for body in writers.iter().flat_map(|candidate| member_bodies(&candidate.evidence, name)) {
+        if !proposed.contains(&body) && !borrowed.contains(&body) {
+            borrowed.push(body);
+        }
+    }
+    proposed.extend(borrowed);
+
+    // Refusals are recorded against the candidate that carried a change. A
+    // unit with no candidate of its own was refused only when the transaction
+    // actually attempted would have written it: a candidate's other
+    // alternatives may leave it alone, and an event that does not say which
+    // alternative it was about cannot be attributed to a neighbour at all.
+    let concerns = |event: &legacy::Event| match own {
+        Some(_) => event.unit == name,
+        None => event.alternative.as_deref().is_some_and(|id| {
+            writers.iter().any(|candidate| {
+                candidate.name == event.unit && alternative_writes(&candidate.evidence, id, name)
+            })
+        }),
+    };
     let refused = facts
         .events
         .iter()
-        .filter(|event| event.unit == name)
+        .filter(|event| concerns(event))
         .filter_map(|event| {
             let kind = refusal_kind(stage, &event.status)?;
             let reason = event.reason.clone().or_else(|| Some(event.status.clone()));
@@ -1656,7 +1729,7 @@ fn stage_outcome(stage: &str, facts: &legacy::Stage, name: &str) -> Option<Stage
         })
         .next_back();
 
-    let application = match (accepted.is_some(), &refused) {
+    let application = match (accepted.is_some() || last_write.is_some(), &refused) {
         (true, _) => Application::Accepted,
         (false, Some((Application::BuildRefused, reason)))
             if reason.as_deref().is_some_and(is_preflight) =>
@@ -1667,9 +1740,15 @@ fn stage_outcome(stage: &str, facts: &legacy::Stage, name: &str) -> Option<Stage
         (false, None) => Application::NotAttempted,
     };
 
-    let selection_id = facts.selections.get(name).cloned();
-    let selected =
-        accepted.and_then(|candidate| selected_body(&candidate.evidence, selection_id.as_deref()));
+    let (selected, selection_id) = match last_write {
+        Some(entry) => (applied_body(entry, name), Some(entry.id.clone())),
+        None => {
+            let selection_id = facts.selections.get(name).cloned();
+            let selected = accepted
+                .and_then(|candidate| selected_body(&candidate.evidence, selection_id.as_deref()));
+            (selected, selection_id)
+        }
+    };
     Some(StageOutcome {
         application,
         reason: refused.and_then(|(_, reason)| reason),
@@ -1677,6 +1756,49 @@ fn stage_outcome(stage: &str, facts: &legacy::Stage, name: &str) -> Option<Stage
         selected,
         selection_id,
     })
+}
+
+/// The complete bodies a candidate's transactions would give `unit`, which
+/// need not be the candidate. Kept apart from [`proposed_bodies`] on purpose:
+/// transaction members are stored under `after`, never `lines`, so a
+/// neighbour's body is never mistaken for the candidate's own.
+fn member_bodies(evidence: &serde_json::Value, unit: &str) -> Vec<Vec<String>> {
+    evidence
+        .get("alternatives")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|alternative| alternative.get("transaction")?.get("members")?.as_array())
+        .flatten()
+        .filter(|member| member.get("unit").and_then(|v| v.as_str()) == Some(unit))
+        .filter_map(|member| lines_of(member.get("after")?))
+        .collect()
+}
+
+/// Whether the alternative `id` in a candidate's evidence writes `unit`.
+fn alternative_writes(evidence: &serde_json::Value, id: &str, unit: &str) -> bool {
+    evidence
+        .get("alternatives")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|alternative| alternative.get("id").and_then(|v| v.as_str()) == Some(id))
+        .filter_map(|alternative| alternative.get("transaction")?.get("members")?.as_array())
+        .flatten()
+        .any(|member| member.get("unit").and_then(|v| v.as_str()) == Some(unit))
+}
+
+/// What an applied transaction wrote for `unit`.
+fn applied_body(entry: &legacy::Applied, unit: &str) -> Option<Vec<String>> {
+    entry
+        .record
+        .get("alternative")?
+        .get("transaction")?
+        .get("members")?
+        .as_array()?
+        .iter()
+        .find(|member| member.get("unit").and_then(|v| v.as_str()) == Some(unit))
+        .and_then(|member| lines_of(member.get("after")?))
 }
 
 /// The one body a stage proved, rather than any body it considered.
@@ -2426,6 +2548,14 @@ mod tests {
         assert!(is_preflight(
             "CFoo.cpp would lose .text 0x1000..0x2000 with nothing saying it should"
         ));
+        for transactional in [
+            "stale-precondition: stale precondition: neighbour CBar.cpp changed since transaction x",
+            "ownership-preflight: transaction refused: CFoo.cpp would overlap CBar.cpp",
+            "dependency-not-permitted: CFoo.cpp requires changing CBar.cpp, which this run does \
+             not permit",
+        ] {
+            assert!(is_preflight(transactional), "{transactional}");
+        }
         assert!(!is_preflight("retail-mismatch: Retail DOL bytes differ"));
     }
 
@@ -2441,6 +2571,7 @@ mod tests {
                 unit: "u.cpp".into(),
                 status: "failed-source-link-or-hash".into(),
                 reason: Some("ninja failed".into()),
+                alternative: None,
             }],
             ..Default::default()
         };
@@ -2484,6 +2615,185 @@ mod tests {
         let found = stage_outcome("coverage", &stage, "u.cpp").unwrap();
         assert_eq!(found.proposed.len(), 2);
         assert!(found.proposed.iter().any(|body| body[0].contains("end:0x00002000")));
+    }
+
+    /// A coverage alternative whose transaction writes `members`, the first of
+    /// which is the candidate.
+    fn joint(id: &str, members: &[(&str, &str)]) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "lines": [members[0].1],
+            "transaction": {
+                "id": id,
+                "members": members
+                    .iter()
+                    .map(|(unit, line)| serde_json::json!({ "unit": unit, "after": [line] }))
+                    .collect::<Vec<_>>(),
+            },
+        })
+    }
+
+    fn applied(alternative: &serde_json::Value) -> legacy::Applied {
+        legacy::Applied {
+            id: alternative["id"].as_str().unwrap().into(),
+            units: alternative["transaction"]["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["unit"].as_str().unwrap().to_string())
+                .collect(),
+            record: serde_json::json!({ "alternative": alternative }),
+        }
+    }
+
+    const A_TEXT: &str = "\t.text       start:0x00001100 end:0x00001300";
+    const A_INIT: &str = "\t.init       start:0x00000100 end:0x00000180";
+    const B_KEPT: &str = "\t.text       start:0x00001300 end:0x00001500";
+
+    #[test]
+    fn a_neighbour_written_only_by_another_candidates_transaction_is_attributed() {
+        let together = joint("joint", &[("A.cpp", A_TEXT), ("B.cpp", B_KEPT)]);
+        // A later refinement for A.cpp alone supersedes the joint transaction
+        // for A.cpp; B.cpp still holds what the joint one wrote.
+        let refined = serde_json::json!({
+            "id": "refined",
+            "lines": [A_TEXT, A_INIT],
+            "transaction": {
+                "id": "refined",
+                "members": [{ "unit": "A.cpp", "after": [A_TEXT, A_INIT] }],
+            },
+        });
+        let first = legacy::Candidate {
+            name: "A.cpp".into(),
+            evidence: serde_json::json!({ "alternatives": [together.clone()] }),
+        };
+        let last = legacy::Candidate {
+            name: "A.cpp".into(),
+            evidence: serde_json::json!({ "alternatives": [refined.clone()] }),
+        };
+        let stage = legacy::Stage {
+            offered: Some(vec![first, last.clone()]),
+            accepted: vec![last],
+            selections: BTreeMap::from([("A.cpp".into(), "refined".into())]),
+            applied: vec![applied(&together), applied(&refined)],
+            ..Default::default()
+        };
+
+        let neighbour = stage_outcome("coverage", &stage, "B.cpp").expect("B.cpp was written");
+        assert_eq!(neighbour.application, Application::Accepted);
+        assert_eq!(neighbour.selected, Some(vec![B_KEPT.to_string()]));
+        assert_eq!(neighbour.selection_id.as_deref(), Some("joint"));
+        assert_eq!(neighbour.proposed, [vec![B_KEPT.to_string()]]);
+
+        let candidate = stage_outcome("coverage", &stage, "A.cpp").unwrap();
+        assert_eq!(candidate.selected, Some(vec![A_TEXT.to_string(), A_INIT.to_string()]));
+        assert_eq!(candidate.selection_id.as_deref(), Some("refined"));
+        // The candidate's own bodies only: B.cpp's never counts as A.cpp's.
+        assert_eq!(candidate.proposed.len(), 2);
+    }
+
+    #[test]
+    fn a_later_transaction_decides_a_selected_units_final_body() {
+        // C.cpp's transaction narrows A.cpp after A.cpp's own selection.
+        let own = joint("own", &[("A.cpp", A_TEXT)]);
+        let narrowed = "\t.text       start:0x00001100 end:0x00001200";
+        let later = joint("later", &[
+            ("C.cpp", "\t.text       start:0x00001200 end:0x00001300"),
+            ("A.cpp", narrowed),
+        ]);
+        let a = legacy::Candidate {
+            name: "A.cpp".into(),
+            evidence: serde_json::json!({ "alternatives": [own.clone()] }),
+        };
+        let c = legacy::Candidate {
+            name: "C.cpp".into(),
+            evidence: serde_json::json!({ "alternatives": [later.clone()] }),
+        };
+        let stage = legacy::Stage {
+            offered: Some(vec![a.clone(), c.clone()]),
+            accepted: vec![a, c],
+            selections: BTreeMap::from([
+                ("A.cpp".into(), "own".into()),
+                ("C.cpp".into(), "later".into()),
+            ]),
+            applied: vec![applied(&own), applied(&later)],
+            ..Default::default()
+        };
+        let found = stage_outcome("coverage", &stage, "A.cpp").unwrap();
+        assert_eq!(found.selected, Some(vec![narrowed.to_string()]));
+        assert_eq!(found.selection_id.as_deref(), Some("later"));
+        assert!(found.proposed.contains(&vec![narrowed.to_string()]));
+    }
+
+    #[test]
+    fn a_neighbour_of_a_refused_transaction_carries_the_refusal() {
+        let together = joint("joint", &[("A.cpp", A_TEXT), ("B.cpp", B_KEPT)]);
+        let stage = legacy::Stage {
+            deferred: vec![legacy::Candidate {
+                name: "A.cpp".into(),
+                evidence: serde_json::json!({ "alternatives": [together] }),
+            }],
+            events: vec![legacy::Event {
+                unit: "A.cpp".into(),
+                status: "rejected".into(),
+                reason: Some(
+                    "dependency-not-permitted: A.cpp requires changing B.cpp, which this run \
+                     does not permit"
+                        .into(),
+                ),
+                alternative: Some("joint".into()),
+            }],
+            ..Default::default()
+        };
+        let neighbour = stage_outcome("coverage", &stage, "B.cpp").unwrap();
+        assert_eq!(neighbour.application, Application::PreflightRefused);
+        assert_eq!(neighbour.selected, None);
+        assert_eq!(neighbour.proposed, [vec![B_KEPT.to_string()]]);
+        // A unit nothing proposed anything for is still not offered.
+        assert!(stage_outcome("coverage", &stage, "Q.cpp").is_none());
+    }
+
+    #[test]
+    fn a_neighbour_is_not_refused_by_an_alternative_that_would_not_have_written_it() {
+        // A.cpp's first alternative writes only A.cpp and is refused; its
+        // second, also A.cpp-only, is accepted; a third that would have
+        // narrowed B.cpp was never tried.
+        let alone = joint("alone", &[("A.cpp", A_TEXT)]);
+        let smaller =
+            joint("smaller", &[("A.cpp", "\t.text       start:0x00001100 end:0x00001200")]);
+        let together = joint("joint", &[("A.cpp", A_TEXT), ("B.cpp", B_KEPT)]);
+        let a = legacy::Candidate {
+            name: "A.cpp".into(),
+            evidence: serde_json::json!({ "alternatives": [alone, smaller.clone(), together] }),
+        };
+        let refusal = |alternative: Option<&str>| legacy::Event {
+            unit: "A.cpp".into(),
+            status: "rejected".into(),
+            reason: Some("build-timeout: timed out after 120s".into()),
+            alternative: alternative.map(str::to_string),
+        };
+        let mut stage = legacy::Stage {
+            offered: Some(vec![a.clone()]),
+            accepted: vec![a],
+            selections: BTreeMap::from([("A.cpp".into(), "smaller".into())]),
+            events: vec![refusal(Some("alone"))],
+            applied: vec![applied(&smaller)],
+            ..Default::default()
+        };
+        let neighbour = stage_outcome("coverage", &stage, "B.cpp").unwrap();
+        assert_eq!(neighbour.application, Application::NotAttempted);
+        assert_eq!(neighbour.proposed, [vec![B_KEPT.to_string()]], "still proposed");
+
+        // An event that does not name its alternative is not evidence about
+        // the neighbour either.
+        stage.events = vec![refusal(None)];
+        let neighbour = stage_outcome("coverage", &stage, "B.cpp").unwrap();
+        assert_eq!(neighbour.application, Application::NotAttempted);
+
+        // The joint alternative being refused is.
+        stage.events = vec![refusal(Some("joint"))];
+        let neighbour = stage_outcome("coverage", &stage, "B.cpp").unwrap();
+        assert_eq!(neighbour.application, Application::BuildRefused);
     }
 
     #[test]
@@ -2724,11 +3034,14 @@ mod tests {
 
     #[test]
     fn an_unknown_run_schema_is_not_read_as_a_known_one() {
-        let error = validate_run_schemas(4, 4).unwrap_err();
+        let error = validate_run_schemas(5, 5).unwrap_err();
         assert!(format!("{error:#}").contains("unsupported"));
-        assert!(validate_run_schemas(1, 1).is_ok());
-        assert!(validate_run_schemas(2, 2).is_ok());
-        assert!(validate_run_schemas(3, 3).is_ok());
+        for schema in 1..=4 {
+            assert!(validate_run_schemas(schema, schema).is_ok(), "{schema}");
+        }
+        // The scorer has to follow the tool: a run this build writes must be
+        // one it can score.
+        assert!(validate_run_schemas(crate::run::SCHEMA, crate::run::SCHEMA).is_ok());
     }
 
     fn manifest(units: &[(&str, Body, Body, bool)]) -> Manifest {

@@ -119,14 +119,18 @@ pub fn run(args: Args) -> Result<()> {
     let mut current = root.clone();
     let mut reserved: BTreeSet<String> = BTreeSet::new();
     let mut results: BTreeMap<String, (StageResult, Prepared)> = BTreeMap::new();
+    let mut resolved: BTreeSet<String> = BTreeSet::new();
     for stage in &record.stages {
         let (integrated, result) = run_stage(&dir, &record, stage, &current, &reserved, None)?;
         // A unit this stage certified is its own for the rest of the run: a
         // later stage extending the same unit would invalidate the certificate
         // and cost every stage its publication.
-        reserved.extend(result.accepted.iter().map(|c| c.name.clone()));
+        // That includes a neighbour a transaction narrowed: it was certified
+        // as part of that transaction, not left for anyone to extend.
+        reserved.extend(result.changed_units().map(str::to_string));
         let prepared: crate::run::StoredPreparation =
             crate::run::read_json(&dir.stage(stage).join("prepared.json"))?;
+        resolved.extend(prepared.only_resolved.iter().cloned());
         tracing::info!(
             "{stage}: accepted {}, deferred {}",
             result.accepted.len(),
@@ -136,6 +140,7 @@ pub fn run(args: Args) -> Result<()> {
         current = integrated;
     }
 
+    crate::run::check_only_resolved(&record.only, &resolved)?;
     let report = publish::publish(&root, &current, &dir, &record, &results)?;
     let summary = Summary {
         schema: SCHEMA,

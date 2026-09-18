@@ -495,6 +495,7 @@ impl Stage for Discover {
             events: state.events,
             report: final_report,
             validation: VALIDATION.to_string(),
+            applied: Vec::new(),
             selections: Selections::new(),
         })
     }
@@ -505,6 +506,7 @@ impl Stage for Discover {
         accepted: &[Candidate],
         _prepared: &Prepared,
         _selections: &Selections,
+        _applied: &[crate::stages::Applied],
     ) -> Result<Report> {
         let blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;

@@ -7,11 +7,12 @@ established widens what the later stages can propose. Measured on the Metroid
 Prime PAL target, naming first took discovery from a frontier of roughly 29
 candidates to 349, of which 156 were accepted.
 
-A unit an earlier stage accepted is reserved for the rest of the run. Coverage
-records the exact range it validated and re-checks it at publication, so a later
-stage extending the same unit would invalidate that certificate and cost the
-whole run its publication — every other stage's work included. Leaving the unit
-to the next run is far cheaper.
+A unit an earlier stage changed is reserved for the rest of the run — including
+a neighbour that coverage narrowed as part of another unit's transaction.
+Coverage records the exact bodies it validated and re-checks them at
+publication, so a later stage extending the same unit would invalidate that
+certificate and cost the whole run its publication — every other stage's work
+included. Leaving the unit to the next run is far cheaper.
 
 ## derive — symbol names
 
@@ -33,10 +34,10 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 9, evidence schema 10. Evidence comes from `match --coverage`;
-each *alternative* is
-one complete way a unit could claim a range, tried strongest first until one
-survives a build.
+Policy version 11, evidence schema 11. Evidence comes from `match --coverage`;
+each *alternative* is one complete way a unit could claim a range, tried
+strongest first until one survives a build. Every alternative is one
+[ownership transaction](#ownership-transactions) over all the units it changes.
 
 The evidence also carries the complete `match --identifications` inventory.
 Function attribution and TU identification are observations made before byte
@@ -52,9 +53,10 @@ corroborated while an edge remains unresolved, or may have a complete observed
 sequence that cannot yet be applied because ownership is contested. The summary
 includes every source split unit even when `--only` limits the mutations.
 
-**Accepted when** the evidence holds on re-derivation, the range is nobody
-else's, the build reproduces retail bytes, the unit is still linked from its
-extracted original, and no existing unit lost matched code. Acceptance
+**Accepted when** the evidence holds on re-derivation, the transaction's
+preconditions still hold and its change is nobody else's ground, the build
+reproduces retail bytes, every unit it wrote is still linked from its extracted
+original, and no existing unit lost matched code. Acceptance
 deliberately does **not** require any gain in matched code, and the candidate's
 source object stays disabled throughout — this stage has no evidence about
 whether that source is right.
@@ -96,6 +98,41 @@ own minimums:
 a prefix or suffix of an adjacent unit's declared range, that unit shrinks and
 the candidate takes what it gives up, in one transaction. Both range changes
 apply together for every trial and roll back together on failure.
+
+### Ownership transactions
+
+A transaction (`src/project/ownership_transaction.rs`) is the only form in which
+coverage changes ownership, in trials, integration, calibration and
+publication alike. It carries:
+
+- every written unit's **exact before-state** and **complete after-body**;
+- the **read set**: every other unit whose ranges touch the changed ones, with
+  the body it had when the evidence was gathered;
+- the **transfers** — which addresses move from which unit to which — derived
+  from the bodies and re-checked against them on every use;
+- any **release** of ground to nobody, which must be declared with a reason
+  (coverage never declares one, so it never shrinks a unit without a receiver);
+- the evidence references, the observation digest, a digest of the policy and
+  the required extracts, and a SHA-256 **identity** over all of it. A selection
+  records this identity.
+
+Applying one builds and checks the whole resulting split map before replacing
+anything: identity and transfers, split attributes and unparsed lines on every
+retained range, no member overlapping any unit, and no new link-order cycle.
+Growth is a metric, not a gate — a boundary move with zero net bytes is a valid
+change. Refusals made without a build are reported by category:
+
+| Category | Meaning |
+|---|---|
+| `stale-precondition` | A written or read unit changed, or unowned ground was claimed, since the transaction was derived. The coordinator regenerates it; it is never patched into place. |
+| `ownership-preflight` | The change itself is inconsistent: an overlap, an unexplained loss, dropped attributes. |
+| `link-order-cycle` | It would make dtk's link order unsatisfiable. |
+| `dependency-not-permitted` | It must write a unit that `--only` or an earlier stage's reservation excludes. The whole transaction is refused; its candidate half alone would be a different change. |
+
+Candidates whose transactions read or write a common unit, or claim touching
+ground, form one conflict component and are always evaluated in the same worker,
+in candidate order. `coverage.json` lists every applied transaction with its
+per-unit gains and losses, including ones a later refinement superseded.
 
 When functions in an eligible sequence identify data symbols the source version
 extracts as assets, equivalent extraction entries are added to the target's
@@ -172,7 +209,9 @@ anything a candidate did.
 
 One rejected proposal does not permanently rule a unit out. A different boundary,
 a neighbouring split, a symbol map or a tool revision can change the answer, which
-is why a deferred candidate is deferred and not blacklisted.
+is why a deferred candidate is deferred and not blacklisted. A stale transaction
+in particular is a question asked of a world that no longer exists: its
+regenerated successor has a different identity and is asked afresh.
 
 A failed trial also does not rule out a mutually dependent group: two files that
 only link together will both fail alone.

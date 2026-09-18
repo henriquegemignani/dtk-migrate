@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 3;
+pub const SCHEMA: u32 = 4;
 
 /// The stages, in the only order they may run in.
 ///
@@ -191,7 +191,22 @@ pub struct StageResult {
     pub reserved_by_earlier_stage: Vec<String>,
     #[serde(default)]
     pub eligible_excluded_by_only: Vec<String>,
+    /// Every change integration applied, in order, including ones a later
+    /// round superseded. What publication replays.
+    #[serde(default)]
+    pub applied: Vec<crate::stages::Applied>,
     pub seconds: f64,
+}
+
+impl StageResult {
+    /// Every unit this stage changed: its accepted candidates, and every
+    /// neighbour a transaction wrote alongside them.
+    pub fn changed_units(&self) -> impl Iterator<Item = &str> {
+        self.accepted
+            .iter()
+            .map(|candidate| candidate.name.as_str())
+            .chain(self.applied.iter().flat_map(|entry| entry.units.iter().map(String::as_str)))
+    }
 }
 
 /// Where a run keeps everything it produced.
@@ -318,22 +333,19 @@ pub fn run_stage(
         prepared.candidates.retain(|c| !reserved.contains(&c.name));
 
         let mut excluded: Vec<String> = Vec::new();
+        let mut resolved: Vec<String> = Vec::new();
         if !run.only.is_empty() {
-            let available: BTreeSet<&str> =
-                prepared.candidates.iter().map(|c| c.name.as_str()).collect();
-            let missing: Vec<&String> =
-                run.only.iter().filter(|name| !available.contains(name.as_str())).collect();
-            if !missing.is_empty() {
-                bail!("Requested {stage_name} candidates were not proposed: {missing:?}");
+            let focused = focus(stage.as_ref(), &prepared.candidates, &run.only, reserved)?;
+            let elsewhere: Vec<&String> =
+                run.only.iter().filter(|name| !focused.resolved.contains(*name)).collect();
+            if !elsewhere.is_empty() {
+                // Not an error here: a later stage may propose them. The run
+                // checks the whole pipeline before it publishes.
+                tracing::info!("{stage_name}: requested units not involved here: {elsewhere:?}");
             }
-            // Report what a focused run skipped, so an untested proposal is not
-            // mistaken for an ineligible one.
-            excluded = available
-                .iter()
-                .filter(|n| !run.only.contains(&n.to_string()))
-                .map(|n| n.to_string())
-                .collect();
-            prepared.candidates.retain(|c| run.only.contains(&c.name));
+            prepared.candidates = focused.roots;
+            excluded = focused.skipped;
+            resolved = focused.resolved.into_iter().collect();
         }
 
         // Carried into evaluation, where a stage may find work preparation could
@@ -350,6 +362,7 @@ pub fn run_stage(
             symbol_mappings: snapshot.mappings.clone(),
             reserved_by_earlier_stage: reserved_here,
             eligible_excluded_by_only: excluded,
+            only_resolved: resolved,
         };
         write_json(&manifest_path, &snapshot.manifest)?;
         write_json(&prepared_path, &stored)?;
@@ -357,7 +370,11 @@ pub fn run_stage(
     };
 
     let candidates = prepared.prepared.candidates.clone();
-    let batches = jobs::batches(&candidates, run.batch_size);
+    let footprints = candidates
+        .iter()
+        .map(|candidate| stage.footprint(candidate))
+        .collect::<Result<Vec<_>>>()?;
+    let batches = jobs::batches(&candidates, run.batch_size, &footprints);
     tracing::info!("{stage_name}: {} candidates in {} batches", candidates.len(), batches.len());
 
     let outcomes = jobs::execute(
@@ -424,6 +441,7 @@ pub fn run_stage(
     // final proposal, not two competing ones.
     let mut accepted: indexmap::IndexMap<String, Candidate> = indexmap::IndexMap::new();
     let mut selections = Selections::new();
+    let mut applied: Vec<crate::stages::Applied> = Vec::new();
     // Handed over and still not settled. Kept apart from the work queue, which
     // is whatever the next round should look at — reusing the queue as the
     // deferred result would lose earlier failures the moment rediscovery
@@ -468,6 +486,7 @@ pub fn run_stage(
             }
         }
         selections.extend(result.selections.clone());
+        applied.extend(result.applied.clone());
         outcome = Some(result);
 
         if added.is_empty() {
@@ -519,6 +538,7 @@ pub fn run_stage(
         final_measures: outcome.report.measures.clone(),
         reserved_by_earlier_stage: prepared.reserved_by_earlier_stage.clone(),
         eligible_excluded_by_only: prepared.eligible_excluded_by_only.clone(),
+        applied,
         seconds: started.elapsed().as_secs_f64(),
     };
     write_json(&stage_dir.join("result.json"), &result)?;
@@ -526,6 +546,49 @@ pub fn run_stage(
         std::fs::write(stage_dir.join(name), contents)?;
     }
     Ok((integrated, result))
+}
+
+/// What `--only` means for one stage.
+struct Focus {
+    /// Requested candidates this stage proposed, to be evaluated.
+    roots: Vec<Candidate>,
+    /// Every other candidate it proposed, so a focused run does not make an
+    /// untested proposal look ineligible.
+    skipped: Vec<String>,
+    /// Requested names this stage accounts for.
+    resolved: BTreeSet<String>,
+}
+
+/// Narrows a stage's candidates to what `--only` names.
+///
+/// A requested name is a *root* when this stage proposed it, and is evaluated.
+/// It is a *dependency* when some requested root's change must also write it —
+/// the neighbour a transaction narrows — and naming it permits that write
+/// without making it a candidate. It is *already handled* when an earlier stage
+/// changed it and reserved it. Anything else is simply not this stage's: the
+/// pipeline decides whether it was a mistake, see [`check_only_resolved`].
+fn focus(
+    stage: &dyn Stage,
+    candidates: &[Candidate],
+    only: &[String],
+    reserved: &BTreeSet<String>,
+) -> Result<Focus> {
+    let requested: BTreeSet<&str> = only.iter().map(String::as_str).collect();
+    let roots: Vec<Candidate> =
+        candidates.iter().filter(|c| requested.contains(c.name.as_str())).cloned().collect();
+    let mut involved: BTreeSet<String> = reserved.clone();
+    for root in &roots {
+        involved.insert(root.name.clone());
+        involved.extend(stage.writes(root)?);
+    }
+    let resolved =
+        requested.iter().filter(|name| involved.contains(**name)).map(|n| n.to_string()).collect();
+    let skipped: BTreeSet<String> = candidates
+        .iter()
+        .filter(|c| !requested.contains(c.name.as_str()))
+        .map(|c| c.name.clone())
+        .collect();
+    Ok(Focus { roots, skipped: skipped.into_iter().collect(), resolved })
 }
 
 /// A stage's preparation as stored on disk, with what it was derived from.
@@ -539,7 +602,138 @@ pub struct StoredPreparation {
     pub reserved_by_earlier_stage: Vec<String>,
     #[serde(default)]
     pub eligible_excluded_by_only: Vec<String>,
+    /// The `--only` names this stage accounted for: its candidate roots, the
+    /// units their changes write, and names an earlier stage already changed.
+    /// Stored so a resumed run checks the same thing the original did.
+    #[serde(default)]
+    pub only_resolved: Vec<String>,
+}
+
+/// Refuses to publish a focused run that never involved a requested name.
+///
+/// Each stage resolves only the names it can: coverage cannot know what
+/// discovery will propose, and discovery never sees a unit coverage already
+/// changed. Whether a name was a mistake is therefore a question about the
+/// whole pipeline, answered once every stage has had its turn and before
+/// anything reaches the user's checkout.
+pub fn check_only_resolved<'a>(
+    only: &[String],
+    resolved: impl IntoIterator<Item = &'a String>,
+) -> Result<()> {
+    let resolved: BTreeSet<&String> = resolved.into_iter().collect();
+    let missing: Vec<&String> = only.iter().filter(|name| !resolved.contains(name)).collect();
+    if !missing.is_empty() {
+        bail!(
+            "Requested units were neither proposed by any stage nor written by a requested \
+             candidate's change, so nothing was published: {missing:?}"
+        );
+    }
+    Ok(())
 }
 
 /// A digest of the manifest, used as a baseline identity in job records.
 pub fn baseline_fingerprint(manifest: &Manifest) -> Result<String> { fingerprint(manifest) }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::{
+        project::report::Report,
+        stages::{Applied, Outcome, Prepared, Selections},
+    };
+
+    /// A stage whose only behaviour is which units each candidate writes.
+    struct Writes(BTreeMap<&'static str, &'static [&'static str]>);
+
+    impl Stage for Writes {
+        fn name(&self) -> &'static str { "fixture" }
+
+        fn prepare(&self, _: &BuildContext, _: Option<usize>) -> Result<Prepared> { unreachable!() }
+
+        fn writes(&self, candidate: &Candidate) -> Result<BTreeSet<String>> {
+            Ok(self.0[candidate.name.as_str()].iter().map(|u| u.to_string()).collect())
+        }
+
+        fn evaluate(
+            &self,
+            _: &BuildContext,
+            _: &Prepared,
+            _: &[Candidate],
+            _: &Selections,
+        ) -> Result<Outcome> {
+            unreachable!()
+        }
+
+        fn validate(
+            &self,
+            _: &BuildContext,
+            _: &[Candidate],
+            _: &Prepared,
+            _: &Selections,
+            _: &[Applied],
+        ) -> Result<Report> {
+            unreachable!()
+        }
+    }
+
+    fn stage() -> Writes {
+        Writes(BTreeMap::from([("A.cpp", &["A.cpp", "B.cpp"][..]), ("Q.cpp", &["Q.cpp"][..])]))
+    }
+
+    fn candidates() -> Vec<Candidate> { vec![Candidate::new("A.cpp"), Candidate::new("Q.cpp")] }
+
+    fn only(names: &[&str]) -> Vec<String> { names.iter().map(|n| n.to_string()).collect() }
+
+    fn none() -> BTreeSet<String> { BTreeSet::new() }
+
+    #[test]
+    fn a_required_neighbour_may_be_permitted_without_being_a_candidate() {
+        let focused = focus(&stage(), &candidates(), &only(&["A.cpp", "B.cpp"]), &none()).unwrap();
+        assert_eq!(focused.roots.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["A.cpp"]);
+        assert_eq!(focused.skipped, ["Q.cpp"]);
+        assert_eq!(focused.resolved, BTreeSet::from(["A.cpp".into(), "B.cpp".into()]));
+    }
+
+    #[test]
+    fn a_dependency_counts_only_for_a_requested_root() {
+        // B.cpp is written only by A.cpp's change, which was not asked for.
+        let focused = focus(&stage(), &candidates(), &only(&["Q.cpp", "B.cpp"]), &none()).unwrap();
+        assert_eq!(focused.resolved, BTreeSet::from(["Q.cpp".into()]));
+        let error = check_only_resolved(&only(&["Q.cpp", "B.cpp"]), &focused.resolved).unwrap_err();
+        assert!(error.to_string().contains("B.cpp"), "{error}");
+    }
+
+    #[test]
+    fn a_later_stage_accepts_names_an_earlier_stage_already_changed() {
+        // Coverage changed A.cpp and B.cpp and reserved them; discovery has no
+        // candidate for either and must not treat the request as a mistake.
+        let reserved = BTreeSet::from(["A.cpp".to_string(), "B.cpp".to_string()]);
+        let focused = focus(&stage(), &[], &only(&["A.cpp", "B.cpp"]), &reserved).unwrap();
+        assert!(focused.roots.is_empty());
+        assert_eq!(focused.resolved.len(), 2);
+    }
+
+    #[test]
+    fn a_name_is_checked_against_every_stage_together() {
+        // Coverage resolves A.cpp; only discovery proposes D.cpp.
+        let coverage = focus(&stage(), &candidates(), &only(&["A.cpp", "D.cpp"]), &none()).unwrap();
+        assert!(!coverage.resolved.contains("D.cpp"));
+        let discover = focus(
+            &Writes(BTreeMap::from([("D.cpp", &["D.cpp"][..])])),
+            &[Candidate::new("D.cpp")],
+            &only(&["A.cpp", "D.cpp"]),
+            &BTreeSet::from(["A.cpp".to_string(), "B.cpp".to_string()]),
+        )
+        .unwrap();
+        check_only_resolved(
+            &only(&["A.cpp", "D.cpp"]),
+            coverage.resolved.iter().chain(&discover.resolved),
+        )
+        .unwrap();
+        let error =
+            check_only_resolved(&only(&["A.cpp", "nowhere.cpp"]), &coverage.resolved).unwrap_err();
+        assert!(error.to_string().contains("nowhere.cpp"), "{error}");
+    }
+}

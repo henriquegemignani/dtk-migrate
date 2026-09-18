@@ -13,9 +13,19 @@
 //! it. That looks redundant when both sides are the same program, and it is not
 //! quite: a resumed run reads the evidence back from disk, and a policy that
 //! only ever checks itself is a policy nobody can audit.
+//!
+//! Generators produce drafts: a claimed range, its evidence, and whatever a
+//! neighbour has to give up for it. [`build`] turns each draft into one
+//! [`OwnershipTransaction`] over every unit it touches, previews it against the
+//! current splits, certifies every unit that receives ground, and offers only
+//! what survives all of that.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+};
 
+use anyhow::Result;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,11 +38,14 @@ use crate::{
             MIN_LAYOUT_SHIFT_CHANGED_ACCESSES, MIN_LAYOUT_SHIFT_FUNCTIONS,
             MIN_SEQUENCE_ALIGNMENT_MARGIN, MIN_SEQUENCE_DIRECT_ANCHORS, MIN_SEQUENCE_FUNCTIONS,
             MIN_SEQUENCE_MATCH_RATIO, MIN_SEQUENCE_MATCHED_BYTES, MIN_SEQUENCE_STRONG_FUNCTIONS,
-            MIN_SEQUENCE_TARGET_COVERAGE, SequenceFunction,
+            MIN_SEQUENCE_TARGET_COVERAGE, SequenceFunction, current_policy,
         },
-        ownership::{ObservationIndex, OwnershipAssessment},
+        ownership::{ClaimClass, ObservationIndex, OwnershipAssessment},
     },
-    project::splits::parse_range,
+    project::{
+        ownership_transaction::{MODULE, OwnershipTransaction, Provenance},
+        splits::{entry_line, entry_suffix, parse_range},
+    },
 };
 
 fn exact_anchor_eligible(
@@ -162,7 +175,9 @@ pub const MAX_ADJACENT_OWNER_GAP_HELPERS: usize = 1;
 /// choice between them is arbitrary.
 const MIN_ALIGNMENT_MARGIN: f32 = 0.1;
 
-/// A change to a unit other than the candidate, applied with it or not at all.
+/// What a generator says a neighbour gives up: one contiguous range narrowed
+/// at one end. Only generation reads this; it becomes the neighbour's complete
+/// after-body in the transaction, which is what is applied and checked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerRevision {
     pub unit: String,
@@ -176,8 +191,8 @@ pub struct OwnerRevision {
 /// One complete way a unit could claim a target range.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alternative {
-    /// A stable digest of everything that makes this range what it is, so a
-    /// worker and the coordinator can agree on which one was proved.
+    /// The identity of `transaction`, which is what a worker and the
+    /// coordinator agree on and what a selection records.
     pub id: String,
     pub evidence: String,
     pub support_group: Option<String>,
@@ -187,23 +202,86 @@ pub struct Alternative {
     pub covered_bytes: u32,
     /// Bytes the unit would own that it does not own already. For a unit with
     /// no block this is the whole claim; for one being extended it is only the
-    /// new ground, which is what a build actually buys.
+    /// new ground, which is what a build actually buys. A metric, not a gate.
     #[serde(default)]
     pub gained_bytes: u32,
-    /// The `splits.txt` lines this alternative would write. A complete body:
-    /// applying an alternative replaces the unit's block outright, so anything
-    /// missing from here is something the unit stops owning.
+    /// The candidate unit's complete body after the transaction, repeated from
+    /// it so that readers of the candidate's own proposal need not dig.
     pub lines: Vec<String>,
     /// The evidence records behind it, kept as written so the run's report can
     /// show exactly what was believed.
     pub anchors: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub owner_revisions: Vec<OwnerRevision>,
-    /// Address-level certificate for the complete body in `lines`. This is
+    /// Address-level certificate for the candidate's complete body. This is
     /// recomputed from the canonical observation index before trial and again
     /// before publication; it is recorded here for diagnosis and ranking.
     #[serde(default)]
     pub ownership: OwnershipAssessment,
+    /// The same certificate for every *other* unit the transaction gives
+    /// ground to. Units that only give ground up have nothing to certify: the
+    /// transaction names who receives each address they lose.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub receiver_ownership: BTreeMap<String, OwnershipAssessment>,
+    /// Everything that applying this alternative changes, with its exact
+    /// preconditions. The only thing ever applied.
+    pub transaction: OwnershipTransaction,
+}
+
+impl Alternative {
+    /// An alternative for a hand-written complete body, derived against
+    /// `blocks` but neither previewed nor certified. For tools and tests that
+    /// need to apply a specific change the way a trial would.
+    pub fn uncertified(
+        unit: &str,
+        claim: (&str, u32, u32),
+        lines: Vec<String>,
+        others: Vec<(String, Vec<String>)>,
+        blocks: &Blocks,
+    ) -> Result<Self> {
+        let (section, start, end) = claim;
+        let transaction = OwnershipTransaction::build(
+            blocks,
+            std::iter::once((unit.to_string(), lines.clone())).chain(others),
+            Provenance {
+                policy: policy_digest(),
+                observation_sha256: String::new(),
+                evidence: vec!["uncertified".into()],
+                ..Default::default()
+            },
+        )?;
+        Ok(Self {
+            id: transaction.id.clone(),
+            evidence: "uncertified".into(),
+            support_group: None,
+            section: section.into(),
+            start: format_address(start),
+            end: format_address(end),
+            covered_bytes: end - start,
+            gained_bytes: transaction.gained_bytes(unit),
+            lines,
+            anchors: Vec::new(),
+            ownership: OwnershipAssessment::default(),
+            receiver_ownership: BTreeMap::new(),
+            transaction,
+        })
+    }
+}
+
+/// What a generator proposes, before it is a transaction.
+#[derive(Debug, Clone)]
+struct Draft {
+    evidence: String,
+    support_group: Option<String>,
+    section: String,
+    start: u32,
+    end: u32,
+    anchors: Vec<serde_json::Value>,
+    owner_revisions: Vec<OwnerRevision>,
+}
+
+/// A digest of the coverage policy a transaction was derived under.
+pub fn policy_digest() -> String {
+    let policy = serde_json::to_vec(&current_policy()).unwrap_or_default();
+    format!("coverage/{:x}", Sha256::digest(policy))
 }
 
 pub fn parse_address(text: &str) -> Option<u32> {
@@ -213,6 +291,7 @@ pub fn parse_address(text: &str) -> Option<u32> {
 
 pub fn format_address(value: u32) -> String { format!("0x{value:08X}") }
 
+#[cfg(test)]
 fn split_line(section: &str, start: u32, end: u32) -> String {
     format!("\t{section:11} start:0x{start:08X} end:0x{end:08X}")
 }
@@ -225,43 +304,15 @@ fn alternative(
     evidence: &str,
     group: Option<String>,
     owner_revisions: Vec<OwnerRevision>,
-) -> Alternative {
-    // Sorted keys, so the identity of a revision does not depend on field
-    // order and two runs agree on the digest.
-    let revisions: Vec<BTreeMap<&str, &str>> = owner_revisions
-        .iter()
-        .map(|revision| {
-            BTreeMap::from([
-                ("unit", revision.unit.as_str()),
-                ("section", revision.section.as_str()),
-                ("original_start", revision.original_start.as_str()),
-                ("original_end", revision.original_end.as_str()),
-                ("revised_start", revision.revised_start.as_str()),
-                ("revised_end", revision.revised_end.as_str()),
-            ])
-        })
-        .collect();
-    let identity = format!(
-        "{evidence}:{}:{section}:{start:08X}-{end:08X}:{}",
-        group.as_deref().unwrap_or(""),
-        serde_json::to_string(&revisions).unwrap_or_default()
-    );
-    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
-    Alternative {
-        id: digest[..16].to_string(),
+) -> Draft {
+    Draft {
         evidence: evidence.to_string(),
         support_group: group,
         section: section.to_string(),
-        start: format_address(start),
-        end: format_address(end),
-        covered_bytes: end - start,
-        // Filled in by `complete`, which is the only place that knows what the
-        // unit already holds.
-        gained_bytes: end - start,
-        lines: vec![split_line(section, start, end)],
+        start,
+        end,
         anchors,
         owner_revisions,
-        ownership: OwnershipAssessment::default(),
     }
 }
 
@@ -296,14 +347,16 @@ pub fn body_bytes(lines: &[String]) -> u32 {
 /// fragment, not a boundary moving, and spanning from the lowest start to the
 /// highest end would swallow everything in between on no evidence at all.
 fn complete_body(existing: &[String], section: &str, start: u32, end: u32) -> Option<Vec<String>> {
-    let mut here: Vec<(u32, u32)> = Vec::new();
+    // Each range keeps the attribute text it was written with. The claim
+    // itself has none of its own; a range it merges into lends it its.
+    let mut here: Vec<(u32, u32, Option<String>)> = Vec::new();
     let mut elsewhere: Vec<String> = Vec::new();
     let mut insert_at: Option<usize> = None;
     for line in existing {
         match parse_range(line) {
             Some(range) if range.section == section => {
                 insert_at.get_or_insert(elsewhere.len());
-                here.push((range.start, range.end));
+                here.push((range.start, range.end, Some(entry_suffix(line))));
             }
             // Anything else is another section, or a line this parser does not
             // claim to understand; either way it is kept exactly as found.
@@ -312,46 +365,182 @@ fn complete_body(existing: &[String], section: &str, start: u32, end: u32) -> Op
     }
     // Touching counts: a tail that begins where the split ends is the same
     // range continuing, not a fragment somewhere else.
-    if !here.is_empty() && !here.iter().any(|&(a, b)| start <= b && a <= end) {
+    if !here.is_empty() && !here.iter().any(|&(a, b, _)| start <= b && a <= end) {
         return None;
     }
 
-    here.push((start, end));
+    here.push((start, end, None));
     here.sort_unstable();
-    let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(here.len());
-    for (a, b) in here {
+    let mut ranges: Vec<(u32, u32, Option<String>)> = Vec::with_capacity(here.len());
+    for (a, b, suffix) in here {
         match ranges.last_mut() {
-            Some(last) if a <= last.1 => last.1 = last.1.max(b),
-            _ => ranges.push((a, b)),
+            Some(last) if a <= last.1 => {
+                last.1 = last.1.max(b);
+                match (&last.2, suffix) {
+                    (_, None) => {}
+                    (None, Some(suffix)) => last.2 = Some(suffix),
+                    // Two ranges written differently cannot become one line
+                    // without deciding which of them was wrong.
+                    (Some(kept), Some(suffix)) if *kept != suffix => return None,
+                    _ => {}
+                }
+            }
+            _ => ranges.push((a, b, suffix)),
         }
     }
 
     let at = insert_at.unwrap_or(elsewhere.len());
     let mut lines = elsewhere;
-    for (offset, (a, b)) in ranges.into_iter().enumerate() {
-        lines.insert(at + offset, split_line(section, a, b));
+    for (offset, (a, b, suffix)) in ranges.into_iter().enumerate() {
+        lines.insert(at + offset, entry_line(section, a, b, suffix.as_deref().unwrap_or("")));
     }
     Some(lines)
 }
 
-/// Gives each alternative the complete body it would write, and drops the ones
-/// that would write nothing new.
-fn complete(alternatives: Vec<Alternative>, existing: &[String]) -> Vec<Alternative> {
-    let held = body_bytes(existing);
-    alternatives
-        .into_iter()
-        .filter_map(|mut item| {
-            let start = parse_address(&item.start)?;
-            let end = parse_address(&item.end)?;
-            let lines = complete_body(existing, &item.section, start, end)?;
-            // A claim the unit already covers is not a refinement, and offering
-            // it would have the stage rebuild the project to learn nothing.
-            let gained = body_bytes(&lines).checked_sub(held).filter(|&gained| gained > 0)?;
-            item.gained_bytes = gained;
-            item.lines = lines;
-            Some(item)
+/// The body `revision.unit` keeps once it gives up what the revision says.
+///
+/// A revision may only narrow one exactly-held range at one or both ends,
+/// never move or widen it, and the range keeps its attributes.
+fn revised_body(blocks: &Blocks, revision: &OwnerRevision) -> Option<Vec<String>> {
+    let original_start = parse_address(&revision.original_start)?;
+    let original_end = parse_address(&revision.original_end)?;
+    let revised_start = parse_address(&revision.revised_start)?;
+    let revised_end = parse_address(&revision.revised_end)?;
+    if revised_end <= revised_start
+        || original_end <= original_start
+        || revised_start < original_start
+        || revised_end > original_end
+        || (revised_start == original_start && revised_end == original_end)
+        || single_section_range(blocks, &revision.unit, &revision.section)
+            != Some((original_start, original_end))
+    {
+        return None;
+    }
+    let body = blocks.get(&revision.unit)?;
+    let matching: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            parse_range(line).is_some_and(|range| {
+                range.section == revision.section
+                    && range.start == original_start
+                    && range.end == original_end
+            })
         })
-        .collect()
+        .map(|(index, _)| index)
+        .collect();
+    let [index] = matching[..] else { return None };
+    let mut revised = body.clone();
+    revised[index] =
+        entry_line(&revision.section, revised_start, revised_end, &entry_suffix(&body[index]));
+    Some(revised)
+}
+
+/// What a draft is judged against: the unit, the world, the observations and
+/// the extracts the unit's source requires.
+struct Setting<'a> {
+    unit: &'a str,
+    blocks: &'a Blocks,
+    observations: &'a ObservationIndex,
+    required_extracts: &'a [crate::analysis::coverage::RequiredExtract],
+    policy: String,
+}
+
+fn section_ranges(lines: &[String]) -> BTreeMap<String, Vec<(u32, u32)>> {
+    let mut ranges: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+    for range in lines.iter().filter_map(|line| parse_range(line)) {
+        ranges.entry(range.section).or_default().push((range.start, range.end));
+    }
+    ranges
+}
+
+/// The certificate for `unit` taking the body a transaction gives it.
+pub fn assess_member(
+    observations: &ObservationIndex,
+    transaction: &OwnershipTransaction,
+    unit: &str,
+) -> Option<OwnershipAssessment> {
+    let member = transaction.member(unit)?;
+    let before = section_ranges(member.before.as_deref().unwrap_or_default());
+    let after = section_ranges(&member.after);
+    Some(observations.assess(unit, MODULE, &before, &after))
+}
+
+/// Turns a draft into an offered alternative, or explains nothing and drops
+/// it: an incomplete body, a transaction the current splits refuse, or a
+/// receiver whose new ground the observations do not support.
+fn finish(draft: Draft, setting: &Setting) -> Option<Alternative> {
+    let unit = setting.unit;
+    let existing = setting.blocks.get(unit).map(Vec::as_slice).unwrap_or_default();
+    let lines = complete_body(existing, &draft.section, draft.start, draft.end)?;
+    let mut changes = vec![(unit.to_string(), lines.clone())];
+    for revision in &draft.owner_revisions {
+        changes.push((revision.unit.clone(), revised_body(setting.blocks, revision)?));
+    }
+
+    // Build the transaction first with only the generator's evidence, to
+    // learn which members it has, then certify each receiver and cite the
+    // attributions that certificate rests on.
+    let provisional = OwnershipTransaction::build(setting.blocks, changes.clone(), Provenance {
+        policy: setting.policy.clone(),
+        observation_sha256: setting.observations.digest().to_string(),
+        evidence: vec!["provisional".into()],
+        ..Default::default()
+    })
+    .ok()?;
+    // A claim the unit already covers is not a refinement, and offering it
+    // would have the stage rebuild the project to learn nothing.
+    provisional.member(unit)?;
+
+    let ownership = assess_member(setting.observations, &provisional, unit)?;
+    if !ownership.permits_automatic_claim() {
+        return None;
+    }
+    let mut receiver_ownership = BTreeMap::new();
+    for receiver in provisional.receivers().into_iter().filter(|receiver| *receiver != unit) {
+        let assessment = assess_member(setting.observations, &provisional, receiver)?;
+        if !assessment.permits_automatic_claim() {
+            return None;
+        }
+        receiver_ownership.insert(receiver.to_string(), assessment);
+    }
+
+    let mut evidence =
+        vec![format!("{}:{}", draft.evidence, draft.support_group.as_deref().unwrap_or(""))];
+    evidence.extend(
+        std::iter::once(&ownership)
+            .chain(receiver_ownership.values())
+            .flat_map(|assessment| &assessment.records)
+            .filter(|record| record.class == ClaimClass::IndependentlyAttributed)
+            .filter_map(|record| record.attribution_id.clone()),
+    );
+    let transaction = OwnershipTransaction::build(setting.blocks, changes, Provenance {
+        policy: setting.policy.clone(),
+        observation_sha256: setting.observations.digest().to_string(),
+        evidence,
+        required_extracts: setting.required_extracts.to_vec(),
+        releases: Vec::new(),
+    })
+    .ok()?;
+    // The same checks a trial will make, made now, so that nothing is offered
+    // which could only ever be refused.
+    transaction.preview(setting.blocks).ok()?;
+
+    Some(Alternative {
+        id: transaction.id.clone(),
+        evidence: draft.evidence,
+        support_group: draft.support_group,
+        section: draft.section,
+        start: format_address(draft.start),
+        end: format_address(draft.end),
+        covered_bytes: draft.end - draft.start,
+        gained_bytes: transaction.gained_bytes(unit),
+        lines,
+        anchors: draft.anchors,
+        ownership,
+        receiver_ownership,
+        transaction,
+    })
 }
 
 /// The one range a unit claims in a section, when it claims exactly one.
@@ -541,38 +730,9 @@ fn sort_alternatives(alternatives: &mut [Alternative]) {
     });
 }
 
-fn section_ranges(lines: &[String]) -> BTreeMap<String, Vec<(u32, u32)>> {
-    let mut ranges: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
-    for range in lines.iter().filter_map(|line| parse_range(line)) {
-        ranges.entry(range.section).or_default().push((range.start, range.end));
-    }
-    ranges
-}
-
-fn certify(
-    unit: &str,
-    alternatives: Vec<Alternative>,
-    existing: &[String],
-    observations: &ObservationIndex,
-) -> Vec<Alternative> {
-    let before = section_ranges(existing);
-    alternatives
-        .into_iter()
-        .filter_map(|mut alternative| {
-            let after = section_ranges(&alternative.lines);
-            alternative.ownership = observations.assess(unit, "main", &before, &after);
-            let identity = serde_json::to_vec(&(
-                &alternative.id,
-                &alternative.lines,
-                &alternative.ownership,
-                &alternative.owner_revisions,
-            ))
-            .unwrap_or_default();
-            let digest = format!("{:x}", Sha256::digest(identity));
-            alternative.id = digest[..16].to_string();
-            alternative.ownership.permits_automatic_claim().then_some(alternative)
-        })
-        .collect()
+/// Within one kind, the widest claim first.
+fn sort_drafts(drafts: &mut [Draft]) {
+    drafts.sort_by_key(|draft| (Reverse(draft.end - draft.start), draft.start));
 }
 
 /// Every range this unit could claim, strongest evidence first.
@@ -604,7 +764,7 @@ pub fn build(
 
     // One anchor at a time: the narrowest claim, and the one most likely to
     // survive when a wider one overlaps something.
-    let mut individual: Vec<Alternative> = eligible
+    let mut individual: Vec<Draft> = eligible
         .iter()
         .filter_map(|anchor| {
             let start = parse_address(&anchor.target_address)?;
@@ -622,7 +782,7 @@ pub fn build(
             })
         })
         .collect();
-    sort_alternatives(&mut individual);
+    sort_drafts(&mut individual);
 
     // Adjacent anchors merged into one range: more bytes claimed per build.
     let mut ordered: Vec<&&CoverageAnchor> = eligible.iter().collect();
@@ -649,7 +809,7 @@ pub fn build(
     if current.len() > 1 {
         runs.push(current);
     }
-    let mut combined: Vec<Alternative> = runs
+    let mut combined: Vec<Draft> = runs
         .iter()
         .filter_map(|anchors| {
             let start = parse_address(&anchors[0].target_address)?;
@@ -669,19 +829,19 @@ pub fn build(
             )
         })
         .collect();
-    sort_alternatives(&mut combined);
+    sort_drafts(&mut combined);
 
     let mut shifted = layout_shift_alternatives(unit, target_blocks, observations);
-    sort_alternatives(&mut shifted);
+    sort_drafts(&mut shifted);
 
-    let mut sequences: Vec<Alternative> = unit
+    let mut sequences: Vec<Draft> = unit
         .boundary_sequences
         .iter()
         .filter_map(|sequence| sequence_alternative(unit, sequence, target_blocks, observations))
         .collect();
-    sort_alternatives(&mut sequences);
+    sort_drafts(&mut sequences);
 
-    let mut adjacent: Vec<Alternative> = unit
+    let mut adjacent: Vec<Draft> = unit
         .adjacent_owner_transitions
         .iter()
         .filter_map(|transition| {
@@ -695,7 +855,7 @@ pub fn build(
             )
         })
         .collect();
-    sort_alternatives(&mut adjacent);
+    sort_drafts(&mut adjacent);
 
     // Strongest kind first, and within a kind the biggest range first. A range
     // reached two ways is listed once.
@@ -706,25 +866,32 @@ pub fn build(
     // one anchor of it would leave a unit that looks represented, which is the
     // state hardest to get out of. The single-anchor claims stay as fallbacks
     // for when the run turns out not to hold.
-    let mut result: Vec<Alternative> = Vec::new();
-    let mut seen: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+    let mut drafts: Vec<Draft> = Vec::new();
+    let mut seen: BTreeSet<(String, u32, u32, String)> = BTreeSet::new();
     for item in
         adjacent.into_iter().chain(sequences).chain(shifted).chain(combined).chain(individual)
     {
         let key = (
             item.section.clone(),
-            item.start.clone(),
-            item.end.clone(),
+            item.start,
+            item.end,
             serde_json::to_string(&item.owner_revisions).unwrap_or_default(),
         );
         if seen.insert(key) {
-            result.push(item);
+            drafts.push(item);
         }
     }
-    // Last, because only here is it known what the unit already holds: every
-    // surviving alternative carries the complete body it would write.
-    let existing = target_blocks.get(&unit.name).map(Vec::as_slice).unwrap_or_default();
-    let mut result = certify(&unit.name, complete(result, existing), existing, observations);
+    // Last, because only here is it known what every affected unit already
+    // holds: each surviving draft becomes one transaction over all of them.
+    let setting = Setting {
+        unit: &unit.name,
+        blocks: target_blocks,
+        observations,
+        required_extracts: &unit.required_extracts,
+        policy: policy_digest(),
+    };
+    let mut result: Vec<Alternative> =
+        drafts.into_iter().filter_map(|draft| finish(draft, &setting)).collect();
     // Evidence quality is global. Generator order must not let a broad but
     // weak sequence outrank a fully attributed exact-body alternative.
     sort_alternatives(&mut result);
@@ -737,7 +904,7 @@ fn layout_shift_alternatives(
     unit: &CoverageUnit,
     target_blocks: &Blocks,
     observations: &ObservationIndex,
-) -> Vec<Alternative> {
+) -> Vec<Draft> {
     let mut groups: IndexMap<String, Vec<&LayoutShiftAnchor>> = IndexMap::new();
     for anchor in unit
         .layout_shift_anchors
@@ -810,7 +977,7 @@ fn sequence_alternative(
     sequence: &BoundarySequence,
     target_blocks: &Blocks,
     observations: &ObservationIndex,
-) -> Option<Alternative> {
+) -> Option<Draft> {
     let start = parse_address(&sequence.target_start)?;
     let end = parse_address(&sequence.target_end)?;
     if sequence.section != ".text"
@@ -844,7 +1011,7 @@ fn ownership_transition(
     start: u32,
     end: u32,
     observations: &ObservationIndex,
-) -> Option<Alternative> {
+) -> Option<Draft> {
     let functions = &sequence.functions;
     let support = sequence.ownership_transition_support.as_ref()?;
     let (ranges, strong) = sequence_details(functions)?;
@@ -952,7 +1119,7 @@ fn layout_corroborated(
     start: u32,
     end: u32,
     observations: &ObservationIndex,
-) -> Option<Alternative> {
+) -> Option<Draft> {
     let group = sequence.layout_support_group.as_ref()?;
     let mut anchors: Vec<&LayoutShiftAnchor> = unit
         .layout_shift_anchors
@@ -1021,7 +1188,7 @@ fn vtable_corroborated(
     start: u32,
     end: u32,
     observations: &ObservationIndex,
-) -> Option<Alternative> {
+) -> Option<Draft> {
     let functions = &sequence.functions;
     let support = sequence.vtable_support.as_ref()?;
     let helpers = &sequence.gap_helpers;
@@ -1152,7 +1319,7 @@ fn matched_sequence(
     start: u32,
     end: u32,
     observations: &ObservationIndex,
-) -> Option<Alternative> {
+) -> Option<Draft> {
     let functions = &sequence.functions;
     let (ranges, strong) = sequence_details(functions)?;
     let aligned_bytes: u32 = functions.iter().map(|f| f.size).sum();
@@ -1207,7 +1374,7 @@ fn adjacent_owner_alternative(
     source_units: &BTreeMap<String, &CoverageUnit>,
     source_blocks: &Blocks,
     observations: &ObservationIndex,
-) -> Option<Alternative> {
+) -> Option<Draft> {
     let section = transition.section.as_str();
     let side = transition.side.as_str();
     let start = parse_address(&transition.target_start)?;
@@ -1681,10 +1848,168 @@ mod tests {
             None,
             vec![],
         );
-        let found = certify("a.cpp", complete(vec![safe, false_fallback], &[]), &[], &observations);
+        let empty = IndexMap::new();
+        let setting = Setting {
+            unit: "a.cpp",
+            blocks: &empty,
+            observations: &observations,
+            required_extracts: &[],
+            policy: policy_digest(),
+        };
+        let found: Vec<Alternative> = [safe, false_fallback]
+            .into_iter()
+            .filter_map(|draft| finish(draft, &setting))
+            .collect();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].end, "0x80000200");
         assert_eq!(found[0].ownership.new_conflicts, 0);
+    }
+
+    /// Observations in which `a.cpp` and `owner.cpp` each own the functions
+    /// given, all independently attributed.
+    fn observed(a: &[(u32, u32)], owner: &[(u32, u32)]) -> ObservationIndex {
+        let anchors = |prefix: &str, ranges: &[(u32, u32)]| {
+            ranges
+                .iter()
+                .enumerate()
+                .map(|(index, (start, end))| {
+                    coverage_fixture::anchor(&format!("{prefix}{index}"), *start, *end)
+                })
+                .collect::<Vec<_>>()
+        };
+        let report = coverage_fixture::report("source", "target", vec![
+            coverage_fixture::unit("a.cpp", anchors("a", a)),
+            coverage_fixture::unit("owner.cpp", anchors("o", owner)),
+        ]);
+        let expected = BTreeSet::from(["a.cpp".to_string(), "owner.cpp".to_string()]);
+        ObservationIndex::load(report.identifications, "source", "target", &expected).unwrap()
+    }
+
+    fn narrowing(original: (u32, u32), revised: (u32, u32)) -> OwnerRevision {
+        OwnerRevision {
+            unit: "owner.cpp".into(),
+            section: ".text".into(),
+            original_start: format_address(original.0),
+            original_end: format_address(original.1),
+            revised_start: format_address(revised.0),
+            revised_end: format_address(revised.1),
+        }
+    }
+
+    #[test]
+    fn a_neighbour_giving_way_is_part_of_the_same_transaction() {
+        let observations = observed(&[(0x200, 0x300), (0x300, 0x400)], &[(0x400, 0x600)]);
+        let mut world = blocks(&[("owner.cpp", 0x200, 0x600)]);
+        world["owner.cpp"][0].push_str(" align:32");
+        let draft = alternative(
+            ".text",
+            0x200,
+            0x400,
+            vec![],
+            "adjacent-owner-transition-boundary",
+            None,
+            vec![narrowing((0x200, 0x600), (0x400, 0x600))],
+        );
+        let setting = Setting {
+            unit: "a.cpp",
+            blocks: &world,
+            observations: &observations,
+            required_extracts: &[],
+            policy: policy_digest(),
+        };
+        let found = finish(draft, &setting).expect("the joint change should be offered");
+        let transaction = &found.transaction;
+        assert_eq!(transaction.writes().collect::<Vec<_>>(), ["a.cpp", "owner.cpp"]);
+        // The neighbour keeps its attributes on the range it retains.
+        assert_eq!(transaction.member("owner.cpp").unwrap().after, [format!(
+            "{} align:32",
+            split_line(".text", 0x400, 0x600)
+        )]);
+        // Every byte the owner gives up has a receiver, and nothing grew in
+        // aggregate: a boundary moved.
+        assert_eq!(transaction.lost_bytes("owner.cpp"), 0x200);
+        assert_eq!(transaction.gained_bytes("a.cpp"), 0x200);
+        assert_eq!(transaction.net_bytes(), 0);
+        assert_eq!(found.id, transaction.id);
+
+        let mut applied = world.clone();
+        transaction.apply(&mut applied).unwrap();
+        assert_eq!(applied["a.cpp"], [split_line(".text", 0x200, 0x400)]);
+    }
+
+    #[test]
+    fn an_adjacent_owner_transition_becomes_one_two_unit_transaction() {
+        use coverage_fixture::{next_prefix_transition, owned_by, run};
+        let a = owned_by(run("A", 0x8000_1100, 0x8000_1300, 0x40), "B.cpp");
+        let b = owned_by(run("B", 0x8000_1300, 0x8000_1500, 0x80), "B.cpp");
+        let mut candidate = coverage_fixture::unit("A.cpp", a.clone());
+        candidate.adjacent_owner_transitions = vec![next_prefix_transition(
+            "P.cpp",
+            "B.cpp",
+            (0x8000_1100, 0x8000_1300),
+            (0x8000_1100, 0x8000_1500),
+            &a,
+            &b,
+        )];
+        let units = vec![
+            coverage_fixture::unit("P.cpp", run("P", 0x8000_1000, 0x8000_1100, 0x100)),
+            candidate,
+            coverage_fixture::unit("B.cpp", b),
+        ];
+        let report = coverage_fixture::report("source", "target", units.clone());
+        let expected = units.iter().map(|unit| unit.name.clone()).collect();
+        let observations =
+            ObservationIndex::load(report.identifications, "source", "target", &expected).unwrap();
+        let source =
+            blocks(&[("P.cpp", 0x400, 0x500), ("A.cpp", 0x500, 0x700), ("B.cpp", 0x700, 0x900)]);
+        let target =
+            blocks(&[("P.cpp", 0x8000_1000, 0x8000_1100), ("B.cpp", 0x8000_1100, 0x8000_1500)]);
+        let by_name: BTreeMap<String, &CoverageUnit> =
+            units.iter().map(|unit| (unit.name.clone(), unit)).collect();
+
+        let found = build(&units[1], &target, &by_name, &source, &observations);
+        let [joint] = &found[..] else { panic!("{found:#?}") };
+        assert_eq!(joint.evidence, "adjacent-owner-transition-boundary");
+        let transaction = &joint.transaction;
+        assert_eq!(transaction.writes().collect::<Vec<_>>(), ["A.cpp", "B.cpp"]);
+        assert_eq!(transaction.member("B.cpp").unwrap().after, [split_line(
+            ".text",
+            0x8000_1300,
+            0x8000_1500
+        )]);
+        // P.cpp's boundary is what the claim starts from, so it is read.
+        assert_eq!(transaction.reads.iter().map(|r| r.unit.as_str()).collect::<Vec<_>>(), [
+            "P.cpp"
+        ]);
+        assert_eq!(transaction.net_bytes(), 0);
+        assert!(joint.receiver_ownership.is_empty(), "B.cpp only gives ground up");
+    }
+
+    #[test]
+    fn a_revision_may_only_narrow_the_exact_range_it_names() {
+        let world = blocks(&[("owner.cpp", 0x200, 0x400)]);
+        assert!(revised_body(&world, &narrowing((0x200, 0x400), (0x300, 0x400))).is_some());
+        assert!(revised_body(&world, &narrowing((0x200, 0x400), (0x100, 0x400))).is_none());
+        assert!(revised_body(&world, &narrowing((0x200, 0x400), (0x200, 0x400))).is_none());
+        assert!(revised_body(&world, &narrowing((0x180, 0x400), (0x300, 0x400))).is_none());
+        let mut twice = world.clone();
+        twice["owner.cpp"].push(split_line(".text", 0x200, 0x400));
+        assert!(revised_body(&twice, &narrowing((0x200, 0x400), (0x300, 0x400))).is_none());
+    }
+
+    #[test]
+    fn an_extended_range_keeps_its_attributes() {
+        let existing = vec![format!("{} align:16", split_line(".text", 0x100, 0x200))];
+        assert_eq!(complete_body(&existing, ".text", 0x200, 0x300).unwrap(), [format!(
+            "{} align:16",
+            split_line(".text", 0x100, 0x300)
+        )]);
+        // Two differently written ranges cannot be merged into one line.
+        let mixed = vec![
+            format!("{} align:16", split_line(".text", 0x100, 0x200)),
+            split_line(".text", 0x300, 0x400),
+        ];
+        assert!(complete_body(&mixed, ".text", 0x200, 0x300).is_none());
     }
 
     #[test]
@@ -1701,30 +2026,23 @@ mod tests {
 
     #[test]
     fn an_identity_depends_on_the_range_and_the_evidence() {
-        let one = alternative(".text", 0x100, 0x200, vec![], "exact-body", None, vec![]);
-        let same = alternative(".text", 0x100, 0x200, vec![], "exact-body", None, vec![]);
-        let other = alternative(".text", 0x100, 0x200, vec![], "boundary-sequence", None, vec![]);
-        let wider = alternative(".text", 0x100, 0x300, vec![], "exact-body", None, vec![]);
-        assert_eq!(one.id, same.id);
-        assert_ne!(one.id, other.id);
-        assert_ne!(one.id, wider.id);
-        assert_eq!(one.id.len(), 16);
-    }
-
-    #[test]
-    fn an_identity_covers_the_owner_revisions_too() {
-        let revision = OwnerRevision {
-            unit: "b.cpp".into(),
-            section: ".text".into(),
-            original_start: "0x80000100".into(),
-            original_end: "0x80000400".into(),
-            revised_start: "0x80000200".into(),
-            revised_end: "0x80000400".into(),
+        let observations = observed(&[(0x100, 0x200), (0x200, 0x300)], &[]);
+        let empty = IndexMap::new();
+        let setting = Setting {
+            unit: "a.cpp",
+            blocks: &empty,
+            observations: &observations,
+            required_extracts: &[],
+            policy: policy_digest(),
         };
-        let plain = alternative(".text", 0x100, 0x200, vec![], "exact-body", None, vec![]);
-        let revised =
-            alternative(".text", 0x100, 0x200, vec![], "exact-body", None, vec![revision]);
-        assert_ne!(plain.id, revised.id);
+        let id = |start, end, evidence| {
+            finish(alternative(".text", start, end, vec![], evidence, None, vec![]), &setting)
+                .unwrap()
+                .id
+        };
+        assert_eq!(id(0x100, 0x200, "exact-body"), id(0x100, 0x200, "exact-body"));
+        assert_ne!(id(0x100, 0x200, "exact-body"), id(0x100, 0x200, "boundary-sequence"));
+        assert_ne!(id(0x100, 0x200, "exact-body"), id(0x100, 0x300, "exact-body"));
     }
 
     #[test]
@@ -1757,7 +2075,14 @@ mod tests {
 
     #[test]
     fn a_unit_with_an_alternative_is_eligible() {
-        let one = alternative(".text", 0x100, 0x200, vec![], "exact-body", None, vec![]);
+        let one = Alternative::uncertified(
+            "a.cpp",
+            (".text", 0x100, 0x200),
+            vec![split_line(".text", 0x100, 0x200)],
+            vec![],
+            &IndexMap::new(),
+        )
+        .unwrap();
         assert_eq!(disposition(&unit(vec![]), std::slice::from_ref(&one), false), "eligible");
     }
 

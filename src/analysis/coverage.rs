@@ -20,7 +20,7 @@ pub const COVERAGE_SCHEMA: u32 = 11;
 /// Kept in step with [`crate::stages::coverage::POLICY_VERSION`], which gates
 /// the proposals this evidence produces; the two are checked against each other
 /// on every read, so they have to move together.
-pub const POLICY_VERSION: u32 = 10;
+pub const POLICY_VERSION: u32 = 11;
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
 pub const MIN_LAYOUT_SHIFT_CHANGED_ACCESSES: u32 = 4;
@@ -90,6 +90,10 @@ pub struct CoveragePolicy {
     /// A change may not take ground from any unit without an owner revision
     /// saying so.
     pub refuse_unevidenced_ownership_loss: bool,
+    /// Every change is one ownership transaction over all the units it
+    /// touches, with exact before-state preconditions, a named receiver for
+    /// every transferred address, and a stable identity.
+    pub atomic_ownership_transactions: bool,
     pub minimum_anchor_bytes: u32,
     pub normalized_body_must_be_unique: bool,
     pub confirm_normalized_bytes_after_hash: bool,
@@ -449,6 +453,7 @@ pub fn current_policy() -> CoveragePolicy {
         refine_represented_units: true,
         prefer_combined_exact_anchors: true,
         refuse_unevidenced_ownership_loss: true,
+        atomic_ownership_transactions: true,
         minimum_anchor_bytes: MIN_ANCHOR_BYTES,
         normalized_body_must_be_unique: true,
         confirm_normalized_bytes_after_hash: true,
@@ -2855,6 +2860,7 @@ mod tests {
                 refine_represented_units: true,
                 prefer_combined_exact_anchors: true,
                 refuse_unevidenced_ownership_loss: true,
+                atomic_ownership_transactions: true,
                 minimum_anchor_bytes: MIN_ANCHOR_BYTES,
                 normalized_body_must_be_unique: true,
                 confirm_normalized_bytes_after_hash: true,

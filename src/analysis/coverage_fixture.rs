@@ -14,8 +14,8 @@
 
 use crate::analysis::{
     coverage::{
-        COVERAGE_SCHEMA, CoverageAnchor, CoverageReport, CoverageUnit, TargetFunction,
-        current_policy,
+        AdjacentOwnerSupport, AdjacentOwnerTransition, COVERAGE_SCHEMA, CoverageAnchor,
+        CoverageReport, CoverageUnit, SequenceFunction, TargetFunction, current_policy,
     },
     matching::{MatchMethod, MatchTier},
     ownership::{
@@ -75,6 +75,100 @@ pub fn withheld(mut anchor: CoverageAnchor, reason: &str) -> CoverageAnchor {
     anchor.normalized_body_equal = false;
     anchor.reasons.push(reason.to_string());
     anchor
+}
+
+/// Functions of `size` bytes tiling `start..end`, named `prefix0`, `prefix1`…
+pub fn run(prefix: &str, start: u32, end: u32, size: u32) -> Vec<CoverageAnchor> {
+    (start..end)
+        .step_by(size as usize)
+        .enumerate()
+        .map(|(index, address)| anchor(&format!("{prefix}{index}"), address, address + size))
+        .collect()
+}
+
+/// The same anchors, recorded as currently lying inside `owner`'s split.
+pub fn owned_by(anchors: Vec<CoverageAnchor>, owner: &str) -> Vec<CoverageAnchor> {
+    anchors
+        .into_iter()
+        .map(|mut anchor| {
+            anchor.existing_target_owner = Some(owner.to_string());
+            anchor
+        })
+        .collect()
+}
+
+fn sequence(anchors: &[CoverageAnchor]) -> Vec<SequenceFunction> {
+    anchors
+        .iter()
+        .map(|anchor| SequenceFunction {
+            source_name: anchor.source_name.clone(),
+            source_address: anchor.source_address.clone(),
+            target_address: anchor.target_address.clone(),
+            target_end: anchor.target_end.clone(),
+            size: anchor.size,
+            tier: "confident".into(),
+            method: "exact-hash".into(),
+            confidence: 1.0,
+            primary: true,
+        })
+        .collect()
+}
+
+/// A candidate whose functions occupy the head of the next unit's split: the
+/// next unit gives up `original.0..claim.1` and keeps the rest.
+///
+/// `candidate` and `owner` are the two units' `.text` functions, which must
+/// tile `claim` and `claim.1..original.1` respectively — the same functions
+/// the units' own anchors describe, so that the observations agree.
+pub fn next_prefix_transition(
+    previous: &str,
+    next: &str,
+    claim: (u32, u32),
+    original: (u32, u32),
+    candidate: &[CoverageAnchor],
+    owner: &[CoverageAnchor],
+) -> AdjacentOwnerTransition {
+    let bytes = claim.1 - claim.0;
+    let kept = original.1 - claim.1;
+    AdjacentOwnerTransition {
+        section: ".text".into(),
+        side: "next-prefix".into(),
+        target_start: hex(claim.0),
+        target_end: hex(claim.1),
+        target_bytes: bytes,
+        source_bytes: bytes,
+        previous_unit: previous.into(),
+        next_unit: next.into(),
+        source_functions: candidate.len() as u32,
+        aligned_functions: candidate.len() as u32,
+        strong_functions: candidate.len() as u32,
+        direct_anchors: candidate.len() as u32,
+        match_ratio: 1.0,
+        target_coverage: 1.0,
+        best_alignment_score: 10.0,
+        second_alignment_score: 1.0,
+        alignment_margin: 0.9,
+        size_delta: 0.0,
+        owner: AdjacentOwnerSupport {
+            unit: next.into(),
+            original_start: hex(original.0),
+            original_end: hex(original.1),
+            revised_start: hex(claim.1),
+            revised_end: hex(original.1),
+            source_bytes: kept,
+            target_bytes: kept,
+            size_delta: 0.0,
+            source_functions: owner.len() as u32,
+            aligned_functions: owner.len() as u32,
+            target_functions: owner.len() as u32,
+            strong_functions: owner.len() as u32,
+            functions: sequence(owner),
+            gap_helpers: Vec::new(),
+        },
+        functions: sequence(candidate),
+        eligible: true,
+        reasons: Vec::new(),
+    }
 }
 
 /// One source unit and the functions matched inside it.

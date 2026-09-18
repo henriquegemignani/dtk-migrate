@@ -70,6 +70,24 @@ pub fn parse_attributes(line: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The attribute text after an entry's address range, exactly as written.
+///
+/// [`parse_attributes`] is for comparing; this is for rewriting a range while
+/// keeping what followed it, in its original order and spelling.
+pub fn entry_suffix(line: &str) -> String {
+    let trimmed = line.trim();
+    match ENTRY.find(trimmed) {
+        Some(found) => trimmed[found.end()..].trim().to_string(),
+        None => String::new(),
+    }
+}
+
+/// An entry line for `section` `start..end`, followed by `suffix` if any.
+pub fn entry_line(section: &str, start: u32, end: u32, suffix: &str) -> String {
+    let line = format!("\t{section:11} start:0x{start:08X} end:0x{end:08X}");
+    if suffix.is_empty() { line } else { format!("{line} {suffix}") }
+}
+
 /// Strips a proposal file's leading `#` and trailing `# candidate: ...`
 /// annotation. A no-op on an already-clean `splits.txt` line.
 pub fn clean_entry_line(line: &str) -> String {

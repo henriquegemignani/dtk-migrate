@@ -64,15 +64,27 @@ pub struct Event {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The alternative the event is about, when a candidate has several.
+    ///
+    /// A candidate's alternatives can change different units: a refusal of one
+    /// that writes only the candidate says nothing about a neighbour that a
+    /// different, untried alternative would have written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<String>,
 }
 
 impl Event {
     pub fn new(unit: impl Into<String>, status: impl Into<String>) -> Self {
-        Self { unit: unit.into(), status: status.into(), reason: None }
+        Self { unit: unit.into(), status: status.into(), reason: None, alternative: None }
     }
 
     pub fn because(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
+        self
+    }
+
+    pub fn about(mut self, alternative: impl Into<String>) -> Self {
+        self.alternative = Some(alternative.into());
         self
     }
 }
@@ -137,6 +149,57 @@ pub struct Outcome {
     /// What acceptance actually proved, in one phrase, recorded alongside the
     /// result so nobody has to infer it later.
     pub validation: String,
+    /// Every change applied, in order. Empty for a stage whose acceptances are
+    /// fully described by `accepted`.
+    #[serde(default)]
+    pub applied: Vec<Applied>,
+}
+
+/// One change a stage applied while integrating, in the order it applied them.
+///
+/// `accepted` keeps one final candidate per unit, which is the right answer to
+/// "what does each unit look like now" and the wrong one to "how did it get
+/// there": a unit extended twice, or a neighbour narrowed by a transaction a
+/// later refinement superseded, changed the project through a change no final
+/// candidate still carries. Publication replays this history instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Applied {
+    /// The candidate whose proposal carried the change.
+    pub unit: String,
+    /// The selection it was applied under.
+    pub id: String,
+    /// Every unit it wrote. All of them belong to this stage for the rest of
+    /// the run, not only the candidate.
+    pub units: Vec<String>,
+    /// What the stage needs to re-check it, in the stage's own terms.
+    #[serde(default)]
+    pub record: serde_json::Value,
+}
+
+/// What evaluating a candidate may read or change.
+///
+/// Two candidates whose footprints conflict are one scheduling unit: they go
+/// to the same worker, in candidate order, so which of them is decided first
+/// can never depend on which lane finished first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Footprint {
+    pub units: BTreeSet<String>,
+    /// (section, start, end) ranges whose ownership may change.
+    pub intervals: Vec<(String, u32, u32)>,
+}
+
+impl Footprint {
+    pub fn of(name: &str) -> Self {
+        Self { units: BTreeSet::from([name.to_string()]), intervals: Vec::new() }
+    }
+
+    /// Whether the two share a unit, or claim ranges that overlap or touch.
+    pub fn conflicts(&self, other: &Footprint) -> bool {
+        !self.units.is_disjoint(&other.units)
+            || self.intervals.iter().any(|(section, start, end)| {
+                other.intervals.iter().any(|(s, a, b)| s == section && start <= b && a <= end)
+            })
+    }
 }
 
 /// Alternative ids a unit has already been asked about, so that rediscovery can
@@ -169,6 +232,18 @@ pub trait Stage {
         Ok(Vec::new())
     }
 
+    /// Every unit accepting this candidate could write, under any of its
+    /// alternatives. A focused run must permit all of them for the change to
+    /// be made whole.
+    fn writes(&self, candidate: &Candidate) -> Result<BTreeSet<String>> {
+        Ok(BTreeSet::from([candidate.name.clone()]))
+    }
+
+    /// What evaluating this candidate may read or change, for scheduling.
+    fn footprint(&self, candidate: &Candidate) -> Result<Footprint> {
+        Ok(Footprint::of(&candidate.name))
+    }
+
     /// Tries the given candidates against the prepared baseline.
     ///
     /// `preferred` names the alternative a worker already found to work, so
@@ -185,13 +260,15 @@ pub trait Stage {
     ///
     /// A worker proved something in its own copy. Publication applies the same
     /// change to the user's checkout, where the surroundings may differ, so the
-    /// gate runs once more there.
+    /// gate runs once more there. `applied` is the history integration
+    /// recorded, which the project must still be the result of.
     fn validate(
         &self,
         ctx: &BuildContext,
         accepted: &[Candidate],
         prepared: &Prepared,
         selections: &Selections,
+        applied: &[Applied],
     ) -> Result<Report>;
 
     /// Extra files this stage wants written beside its result, as

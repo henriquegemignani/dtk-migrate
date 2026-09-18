@@ -16,12 +16,16 @@ were measured against the same thing.
 **Evaluate in parallel, reduce in order.** Candidates are batched, and each batch
 is evaluated in a private copy of the project. Results are combined in candidate
 order, never completion order, so the outcome does not depend on which lane
-finished first.
+finished first. Candidates whose changes depend on one another — a coverage
+transaction that reads or writes a unit another may write — are one conflict
+component and always share a batch, even past `--batch-size`.
 
 **Integrate.** Workers each proved their batch alone; the union has to be proved
 too, because two changes that are fine apart can conflict together. Deferred
 candidates are retried against the integrated state, but only after something has
-been accepted — until then nothing has changed for them.
+been accepted — until then nothing has changed for them. A coverage transaction
+whose preconditions no longer hold is refused as stale and regenerated from
+fresh evidence in the next round, never adjusted to fit.
 
 **Publish once.** Only the coordinator writes to the user's checkout.
 
@@ -106,6 +110,11 @@ The checkout must still be byte-for-byte what the run measured. Every replacemen
 is journalled with both the old and new bytes before it happens, so an
 interrupted publication is recognised on the next `--resume` and undone. The
 stage gate then runs again *there*, because a worker proved something in a copy.
+For coverage that means replaying the stage's `applied` history backwards from
+the published splits: each transaction's bodies must be exactly what stands, its
+certificate must replay against its own observations, and undoing it must leave
+what the one before it wrote. A refinement that superseded an earlier
+transaction does not hide the earlier one's effect on a neighbour.
 
 A rollback never overwrites an edit made meanwhile. Someone else's work outranks
 undoing ours: the file is left as they made it and named in the journal.
@@ -123,7 +132,9 @@ stage, tools and timeout — is reused; anything else is rerun rather than trust
 A worker failure stops the other lanes but keeps what they finished, so a resumed
 run picks up from there.
 
-Resuming a run that already published does nothing and says so.
+Resuming a run that already published does nothing and says so. A run written
+by a tool with a different run schema (currently 4, which added the applied
+transaction history) is refused rather than reinterpreted.
 
 ## Resource settings
 
@@ -150,4 +161,11 @@ avoidable full-link cycles in one measured run.
 
 `--only UNIT` evaluates an exact unit and nothing else. Every other eligible
 candidate is still reported under `eligible_excluded_by_only`, so a focused run
-does not make an untested proposal look ineligible.
+does not make an untested proposal look ineligible. A transaction that would also
+have to change a unit outside `--only` is refused as `dependency-not-permitted`,
+naming the unit it needed. Naming that unit too (`--only A.cpp --only B.cpp`)
+permits the whole transaction without making the neighbour a candidate of its
+own. Names are resolved across the whole pipeline: a unit an earlier stage
+already changed is satisfied in later stages, and a unit only a later stage
+proposes is not an error in an earlier one. A name no stage proposed, and no
+requested candidate's change writes, stops the run before publication.

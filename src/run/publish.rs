@@ -142,7 +142,7 @@ pub fn publish(
         let mut report = ctx.build(None)?;
         for stage_name in &run.stages {
             let Some((result, prepared)) = results.get(stage_name) else { continue };
-            if result.accepted.is_empty() {
+            if result.accepted.is_empty() && result.applied.is_empty() {
                 continue;
             }
             report = stage_for(stage_name)?.validate(
@@ -150,6 +150,7 @@ pub fn publish(
                 &result.accepted,
                 prepared,
                 &result.selections,
+                &result.applied,
             )?;
         }
         crate::run::check_environment(run)?;

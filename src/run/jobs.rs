@@ -24,16 +24,111 @@ use serde::{Deserialize, Serialize};
 use crate::{
     build::process::Cancel,
     run::{RunDir, RunRecord, context, read_json, write_json},
-    stages::{Candidate, Event, Prepared, Selections, Stage},
+    stages::{Candidate, Event, Footprint, Prepared, Selections, Stage},
     workspace::{Manifest, fingerprint},
 };
 
-/// Splits candidates into batches of at most `size`, in order.
-pub fn batches(candidates: &[Candidate], size: usize) -> Vec<Vec<Candidate>> {
-    if size == 0 {
+/// Splits candidates into batches of about `size`, keeping every conflict
+/// component whole.
+///
+/// Two candidates whose footprints conflict — one reads or writes a unit the
+/// other may write, or both claim the same ground — are decided in the same
+/// lane, one after the other in candidate order. Split across lanes, each
+/// would be proved against a world the other was changing, and which of them
+/// integration saw first would depend on which lane finished first. A
+/// component larger than `size` stays one batch: correctness outranks balance.
+///
+/// Components are placed by their first candidate, and a batch lists its
+/// candidates in their original order, so the result depends only on the
+/// candidate list.
+pub fn batches(
+    candidates: &[Candidate],
+    size: usize,
+    footprints: &[Footprint],
+) -> Vec<Vec<Candidate>> {
+    assert_eq!(candidates.len(), footprints.len(), "one footprint per candidate");
+    if size == 0 || candidates.is_empty() {
         return vec![candidates.to_vec()];
     }
-    candidates.chunks(size).map(<[Candidate]>::to_vec).collect()
+    let components = conflict_components(footprints);
+    let mut result: Vec<Vec<Candidate>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    for component in components {
+        if !current.is_empty() && current.len() + component.len() > size {
+            current.sort_unstable();
+            result.push(current.iter().map(|&index| candidates[index].clone()).collect());
+            current.clear();
+        }
+        current.extend(component);
+    }
+    if !current.is_empty() {
+        current.sort_unstable();
+        result.push(current.iter().map(|&index| candidates[index].clone()).collect());
+    }
+    result
+}
+
+/// Candidate indices grouped by conflict, each group ascending, groups ordered
+/// by their first member.
+fn conflict_components(footprints: &[Footprint]) -> Vec<Vec<usize>> {
+    let mut parent: Vec<usize> = (0..footprints.len()).collect();
+    fn root(parent: &mut [usize], mut index: usize) -> usize {
+        while parent[index] != index {
+            parent[index] = parent[parent[index]];
+            index = parent[index];
+        }
+        index
+    }
+    fn join(parent: &mut [usize], a: usize, b: usize) {
+        let (a, b) = (root(parent, a), root(parent, b));
+        // The smaller index stays the root, so a component is named by its
+        // first candidate.
+        if a != b {
+            let (low, high) = (a.min(b), a.max(b));
+            parent[high] = low;
+        }
+    }
+
+    // Shared units, by index rather than pairwise.
+    let mut by_unit: std::collections::BTreeMap<&str, usize> = Default::default();
+    for (index, footprint) in footprints.iter().enumerate() {
+        for unit in &footprint.units {
+            match by_unit.get(unit.as_str()) {
+                Some(&first) => join(&mut parent, first, index),
+                None => {
+                    by_unit.insert(unit, index);
+                }
+            }
+        }
+    }
+    // Overlapping or touching ground, by a sweep over each section.
+    let mut intervals: Vec<(&str, u32, u32, usize)> = footprints
+        .iter()
+        .enumerate()
+        .flat_map(|(index, footprint)| {
+            footprint
+                .intervals
+                .iter()
+                .map(move |(section, start, end)| (section.as_str(), *start, *end, index))
+        })
+        .collect();
+    intervals.sort_unstable();
+    let mut reach: Option<(&str, u32, usize)> = None;
+    for (section, start, end, index) in intervals {
+        match reach {
+            Some((open, far, owner)) if open == section && start <= far => {
+                join(&mut parent, owner, index);
+                reach = Some((section, far.max(end), owner));
+            }
+            _ => reach = Some((section, end, index)),
+        }
+    }
+
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    for index in 0..footprints.len() {
+        groups.entry(root(&mut parent, index)).or_default().push(index);
+    }
+    groups.into_values().collect()
 }
 
 /// Everything that decides whether a stored result may be reused.
@@ -262,6 +357,12 @@ mod tests {
         (0..count).map(|i| Candidate::new(format!("u{i}"))).collect()
     }
 
+    fn alone(candidates: &[Candidate]) -> Vec<Footprint> {
+        candidates.iter().map(|c| Footprint::of(&c.name)).collect()
+    }
+
+    fn names(batch: &[Candidate]) -> Vec<&str> { batch.iter().map(|c| c.name.as_str()).collect() }
+
     fn spec(names: &[&str]) -> JobSpec {
         JobSpec {
             schema: crate::run::SCHEMA,
@@ -290,7 +391,7 @@ mod tests {
     #[test]
     fn candidates_are_batched_in_order() {
         let all = candidates(5);
-        let split = batches(&all, 2);
+        let split = batches(&all, 2, &alone(&all));
         assert_eq!(split.len(), 3);
         assert_eq!(split[0][0].name, "u0");
         assert_eq!(split[2][0].name, "u4");
@@ -298,7 +399,59 @@ mod tests {
 
     #[test]
     fn a_batch_size_of_zero_means_one_batch() {
-        assert_eq!(batches(&candidates(5), 0).len(), 1);
+        let all = candidates(5);
+        assert_eq!(batches(&all, 0, &alone(&all)).len(), 1);
+    }
+
+    #[test]
+    fn candidates_sharing_a_unit_are_decided_in_one_lane() {
+        // u0 and u3 both depend on shared.cpp: a transaction for one reads or
+        // writes what the other may change.
+        let all = candidates(4);
+        let mut footprints = alone(&all);
+        footprints[0].units.insert("shared.cpp".into());
+        footprints[3].units.insert("shared.cpp".into());
+        let split = batches(&all, 2, &footprints);
+        assert_eq!(split.iter().map(|b| names(b)).collect::<Vec<_>>(), [vec!["u0", "u3"], vec![
+            "u1", "u2"
+        ]]);
+    }
+
+    #[test]
+    fn candidates_claiming_touching_ground_are_decided_in_one_lane() {
+        let all = candidates(3);
+        let mut footprints = alone(&all);
+        footprints[0].intervals.push((".text".into(), 0x100, 0x200));
+        footprints[1].intervals.push((".data".into(), 0x100, 0x200));
+        footprints[2].intervals.push((".text".into(), 0x200, 0x280));
+        let split = batches(&all, 1, &footprints);
+        assert_eq!(split.iter().map(|b| names(b)).collect::<Vec<_>>(), [vec!["u0", "u2"], vec![
+            "u1"
+        ]]);
+    }
+
+    #[test]
+    fn a_component_is_never_split_to_honour_the_batch_size() {
+        let all = candidates(3);
+        let mut footprints = alone(&all);
+        for footprint in &mut footprints {
+            footprint.units.insert("hub.cpp".into());
+        }
+        let split = batches(&all, 1, &footprints);
+        assert_eq!(split.len(), 1);
+        assert_eq!(names(&split[0]), ["u0", "u1", "u2"]);
+    }
+
+    #[test]
+    fn batching_depends_only_on_the_candidate_list() {
+        let all = candidates(6);
+        let mut footprints = alone(&all);
+        footprints[1].units.insert("x.cpp".into());
+        footprints[4].units.insert("x.cpp".into());
+        assert_eq!(
+            batches(&all, 2, &footprints).iter().map(|b| names(b)).collect::<Vec<_>>(),
+            batches(&all, 2, &footprints).iter().map(|b| names(b)).collect::<Vec<_>>()
+        );
     }
 
     #[test]

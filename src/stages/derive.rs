@@ -215,6 +215,7 @@ impl Stage for Derive {
             events,
             report: final_report,
             validation: VALIDATION.to_string(),
+            applied: Vec::new(),
         })
     }
 
@@ -224,6 +225,7 @@ impl Stage for Derive {
         _accepted: &[Candidate],
         _prepared: &Prepared,
         _selections: &Selections,
+        _applied: &[crate::stages::Applied],
     ) -> Result<Report> {
         ctx.build(None)
     }

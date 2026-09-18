@@ -172,6 +172,7 @@ impl Stage for Verify {
             events,
             report,
             validation: VALIDATION.to_string(),
+            applied: Vec::new(),
             selections: Selections::new(),
         })
     }
@@ -182,6 +183,7 @@ impl Stage for Verify {
         accepted: &[Candidate],
         _prepared: &Prepared,
         _selections: &Selections,
+        _applied: &[crate::stages::Applied],
     ) -> Result<Report> {
         let text = std::fs::read_to_string(ctx.root.join("configure.py"))?;
         let mut names = Configure::parse(&text)?.configured_names(&ctx.target);

@@ -459,12 +459,10 @@ fn score(
     let owner_effects = selected
         .map(|alternative| {
             alternative
-                .owner_revisions
-                .iter()
-                .map(|revision| revision.unit.clone())
-                .collect::<BTreeSet<String>>()
-                .into_iter()
-                .map(|owner| owner_effect(&owner, oracle, visible, &blocks, SCOPE))
+                .transaction
+                .writes()
+                .filter(|owner| *owner != name)
+                .map(|owner| owner_effect(owner, oracle, visible, &blocks, SCOPE))
                 .collect()
         })
         .unwrap_or_default();
@@ -682,7 +680,6 @@ mod tests {
     use indexmap::IndexMap;
 
     use super::*;
-    use crate::stages::coverage::alternatives::OwnerRevision;
 
     /// The interval arithmetic these tests rest on lives in
     /// [`crate::analysis::ownership_score`] and is tested there. What is tested
@@ -726,24 +723,53 @@ mod tests {
         }
     }
 
-    /// Enough of an alternative to score. `lines` is the part that matters:
-    /// applying an alternative writes exactly these, so a real one carrying a
+    fn line(section: &str, start: u32, end: u32) -> String {
+        format!("\t{section:11} start:0x{start:08X} end:0x{end:08X}")
+    }
+
+    /// A neighbour narrowed in the same transaction: its name, the range the
+    /// proposal believed it held, and the range it keeps.
+    type Narrowing = (&'static str, (u32, u32), (u32, u32));
+
+    /// A proposal, before it is derived against the world it is scored in.
+    ///
+    /// The body is the part that matters: applying an alternative writes
+    /// exactly `section start..end` for the unit, so a real one carrying a
     /// single range is a unit claiming a single range and nothing else.
-    fn alternative(section: &str, start: u32, end: u32) -> Alternative {
-        Alternative {
-            id: "test".to_string(),
-            evidence: "exact-body".to_string(),
-            support_group: None,
-            section: section.to_string(),
-            start: format!("0x{start:08X}"),
-            end: format!("0x{end:08X}"),
-            covered_bytes: end - start,
-            gained_bytes: end - start,
-            lines: vec![format!("\t{section:11} start:0x{start:08X} end:0x{end:08X}")],
-            anchors: Vec::new(),
-            owner_revisions: Vec::new(),
-            ownership: Default::default(),
-        }
+    struct Claim {
+        section: &'static str,
+        start: u32,
+        end: u32,
+        neighbour: Option<Narrowing>,
+    }
+
+    fn alternative(section: &'static str, start: u32, end: u32) -> Claim {
+        Claim { section, start, end, neighbour: None }
+    }
+
+    /// Derives each claim's transaction the way generation would: against
+    /// the world the proposal was made in, which for a neighbour revision is
+    /// whatever range the proposal believed that neighbour held.
+    fn derive(name: &str, claims: Vec<Claim>, visible: &Blocks) -> Vec<Alternative> {
+        claims
+            .into_iter()
+            .map(|claim| {
+                let mut world = visible.clone();
+                let mut others = Vec::new();
+                if let Some((owner, original, revised)) = claim.neighbour {
+                    world.insert(owner.to_string(), vec![line(".text", original.0, original.1)]);
+                    others.push((owner.to_string(), vec![line(".text", revised.0, revised.1)]));
+                }
+                Alternative::uncertified(
+                    name,
+                    (claim.section, claim.start, claim.end),
+                    vec![line(claim.section, claim.start, claim.end)],
+                    others,
+                    &world,
+                )
+                .unwrap()
+            })
+            .collect()
     }
 
     /// An oracle placing one unit in two code sections.
@@ -756,15 +782,17 @@ mod tests {
         oracle
     }
 
-    fn scored(name: &str, found: Vec<Alternative>, oracle: &Blocks, visible: &Blocks) -> Record {
+    fn scored(name: &str, found: Vec<Claim>, oracle: &Blocks, visible: &Blocks) -> Record {
+        let found = derive(name, found, visible);
         score(&unit(name, 0), found, &Oracle::of(oracle), visible, &BTreeMap::new())
     }
 
     /// A unit whose evidence produced nothing, holding a split the scenario cut
     /// short: the bytes it still owns are not missing.
-    fn truncated(found: Vec<Alternative>) -> Record {
+    fn truncated(found: Vec<Claim>) -> Record {
         let oracle = blocks(&[("CCollidableSphere.cpp", 0x1000, 0x2400)]);
         let visible = blocks(&[("CCollidableSphere.cpp", 0x1000, 0x2380)]);
+        let found = derive("CCollidableSphere.cpp", found, &visible);
         score(
             &unit("CCollidableSphere.cpp", 0x1400),
             found,
@@ -876,20 +904,13 @@ mod tests {
 
     /// The same alternative, but shrinking a neighbour to make room.
     fn with_revision(
-        mut alternative: Alternative,
-        unit: &str,
+        mut claim: Claim,
+        unit: &'static str,
         original: (u32, u32),
         revised: (u32, u32),
-    ) -> Alternative {
-        alternative.owner_revisions = vec![OwnerRevision {
-            unit: unit.to_string(),
-            section: ".text".to_string(),
-            original_start: format!("0x{:08X}", original.0),
-            original_end: format!("0x{:08X}", original.1),
-            revised_start: format!("0x{:08X}", revised.0),
-            revised_end: format!("0x{:08X}", revised.1),
-        }];
-        alternative
+    ) -> Claim {
+        claim.neighbour = Some((unit, original, revised));
+        claim
     }
 
     #[test]
