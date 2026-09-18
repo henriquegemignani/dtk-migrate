@@ -16,7 +16,10 @@
 pub mod alternatives;
 pub mod extracts;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::{BTreeMap, BTreeSet},
+};
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
@@ -26,8 +29,8 @@ use crate::{
     analysis::{
         coverage::{CoverageReport, CoverageUnit, RequiredExtract},
         ownership::{
-            IDENTIFICATION_SCHEMA, IdentificationConfidence, IdentificationReport,
-            UnitIdentification,
+            IdentificationConfidence, ObservationIndex, ObservationReference, UnitIdentification,
+            load_reference,
         },
     },
     build::context::{BuildContext, ValidationError, is_trial_failure},
@@ -46,12 +49,15 @@ use crate::{
 pub struct Coverage;
 
 /// The evidence schema this stage understands.
-pub const EVIDENCE_SCHEMA: u32 = 10;
-pub const POLICY_VERSION: u32 = 9;
+pub const EVIDENCE_SCHEMA: u32 = 11;
+pub const POLICY_VERSION: u32 = 10;
 
-const VALIDATION: &str = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-required-extracts-and-extracted-link-inputs-and-retail-bytes";
+const VALIDATION: &str = "canonical-attributed-ownership-and-unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-required-extracts-and-extracted-link-inputs-and-retail-bytes";
 
-fn validate_evidence(evidence: &CoverageReport) -> Result<()> {
+fn validate_evidence(
+    mut evidence: CoverageReport,
+    expected_units: &BTreeSet<String>,
+) -> Result<(CoverageReport, ObservationIndex)> {
     if evidence.schema != EVIDENCE_SCHEMA || evidence.policy.version != POLICY_VERSION {
         bail!(
             "Coverage evidence is schema {} policy {}, and this stage understands {EVIDENCE_SCHEMA}/{POLICY_VERSION}",
@@ -59,78 +65,26 @@ fn validate_evidence(evidence: &CoverageReport) -> Result<()> {
             evidence.policy.version
         );
     }
-    if evidence.identifications.schema != IDENTIFICATION_SCHEMA {
-        bail!(
-            "Coverage evidence has identification schema {}, and this stage understands {IDENTIFICATION_SCHEMA}",
-            evidence.identifications.schema
-        );
+    let source_units: BTreeSet<String> =
+        evidence.source_units.iter().map(|unit| unit.name.clone()).collect();
+    if source_units.len() != evidence.source_units.len() || &source_units != expected_units {
+        bail!("Coverage evidence does not cover exactly the source split units");
     }
-    if evidence.identifications.source != evidence.source
-        || evidence.identifications.target != evidence.target
-    {
-        bail!("Coverage identification source/target does not match its enclosing evidence");
-    }
+    let observations = ObservationIndex::load(
+        evidence.identifications,
+        &evidence.source,
+        &evidence.target,
+        expected_units,
+    )?;
+    evidence.identifications = observations.report().clone();
+    Ok((evidence, observations))
+}
 
-    let source_units: BTreeSet<&str> =
-        evidence.source_units.iter().map(|unit| unit.name.as_str()).collect();
-    let identification_units: BTreeSet<&str> =
-        evidence.identifications.units.iter().map(|unit| unit.unit.as_str()).collect();
-    if source_units.len() != evidence.source_units.len()
-        || identification_units.len() != evidence.identifications.units.len()
-    {
-        bail!("Coverage evidence has duplicate source or identification unit records");
-    }
-    if source_units != identification_units {
-        bail!("Coverage identification inventory does not cover exactly the source split units");
-    }
-
-    let attribution_units: BTreeMap<&str, &str> = evidence
-        .identifications
-        .attributions
-        .iter()
-        .map(|item| (item.id.as_str(), item.source.unit.as_str()))
-        .collect();
-    if attribution_units.len() != evidence.identifications.attributions.len() {
-        bail!("Coverage evidence has duplicate function attribution ids");
-    }
-    if attribution_units.values().any(|unit| !source_units.contains(unit)) {
-        bail!("Coverage evidence attributes a function to an unknown source unit");
-    }
-    for unit in &evidence.identifications.units {
-        for id in unit
-            .evidence
-            .iter()
-            .chain(&unit.unresolved_helpers)
-            .chain(unit.candidates.iter().flat_map(|candidate| &candidate.attribution_ids))
-        {
-            match attribution_units.get(id.as_str()) {
-                None => {
-                    bail!("Identification for {} refers to unknown attribution {id}", unit.unit)
-                }
-                Some(owner) if *owner != unit.unit => bail!(
-                    "Identification for {} refers to attribution {id} owned by {owner}",
-                    unit.unit
-                ),
-                Some(_) => {}
-            }
-        }
-        for id in unit.candidates.iter().flat_map(|candidate| {
-            [
-                candidate.left_target_edge.adjacent_attribution_id.as_ref(),
-                candidate.right_target_edge.adjacent_attribution_id.as_ref(),
-            ]
-            .into_iter()
-            .flatten()
-        }) {
-            if !attribution_units.contains_key(id.as_str()) {
-                bail!(
-                    "Identification for {} refers to unknown adjacent attribution {id}",
-                    unit.unit
-                );
-            }
-        }
-    }
-    Ok(())
+fn persist_observations(
+    ctx: &BuildContext,
+    observations: &ObservationIndex,
+) -> Result<ObservationReference> {
+    observations.persist(&ctx.output)
 }
 
 /// What a coverage candidate offers, carried from preparation into the trial.
@@ -143,7 +97,41 @@ pub struct Proposal {
     /// The observation that led to this proposal. It survives a trial refusal,
     /// independently of the alternative that happened to be attempted.
     pub identification: UnitIdentification,
+    /// The candidate unit's complete body when this proposal was derived.
+    /// Change E will generalize this into transaction-wide preconditions; C
+    /// records the one body needed to replay its ownership certificate.
+    #[serde(default)]
+    pub before_lines: Vec<String>,
+    pub observation: ObservationReference,
     pub alternatives: Vec<Alternative>,
+}
+
+fn compare_candidates(left: &Candidate, right: &Candidate) -> Ordering {
+    let best = |candidate: &Candidate| {
+        proposal_of(candidate)
+            .expect("fresh coverage candidate must contain a valid proposal")
+            .alternatives
+            .into_iter()
+            .next()
+            .expect("fresh coverage candidate must contain an alternative")
+    };
+    let left_best = best(left);
+    let right_best = best(right);
+    (
+        Reverse(left_best.ownership.complete_membership),
+        Reverse(left_best.ownership.supported_edges),
+        Reverse(left_best.ownership.independent_members),
+        left_best.ownership.padding_bytes,
+        Reverse(left_best.gained_bytes),
+    )
+        .cmp(&(
+            Reverse(right_best.ownership.complete_membership),
+            Reverse(right_best.ownership.supported_edges),
+            Reverse(right_best.ownership.independent_members),
+            right_best.ownership.padding_bytes,
+            Reverse(right_best.gained_bytes),
+        ))
+        .then_with(|| left.name.cmp(&right.name))
 }
 
 /// What preparation found, beyond the candidates themselves.
@@ -167,9 +155,13 @@ pub struct Inventory {
     pub baseline_bytes: BTreeMap<String, u32>,
     /// Every unit and why it did or did not produce a candidate.
     pub dispositions: BTreeMap<String, String>,
-    /// Complete observation inventory, including units excluded by policy,
-    /// `--only`, existing ownership or build availability.
-    pub identifications: IdentificationReport,
+    /// Content-addressed complete observation inventory. The report itself is
+    /// stored once beside preparation; summaries and proposals bind to it by
+    /// digest.
+    pub observation: ObservationReference,
+    /// Unit-level diagnostics are small enough to keep in summaries. Function
+    /// attributions remain in the content-addressed artifact.
+    pub identifications: Vec<UnitIdentification>,
 }
 
 impl Stage for Coverage {
@@ -179,12 +171,15 @@ impl Stage for Coverage {
         std::fs::create_dir_all(&ctx.output)?;
         let baseline = ctx.build(None)?;
 
-        let evidence = generate_evidence(ctx)?;
-        validate_evidence(&evidence)?;
-
-        let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
+        let expected_units = source_blocks.keys().cloned().collect();
+        let evidence = generate_evidence(ctx)?;
+        let (evidence, observations) = validate_evidence(evidence, &expected_units)?;
+        let observation = persist_observations(ctx, &observations)?;
+        let _ = std::fs::remove_file(ctx.output.join("coverage-evidence.json"));
+
+        let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
 
         // An autogenerated unit is dtk's own placeholder, not a source file.
         let source_units: Vec<&CoverageUnit> =
@@ -208,10 +203,11 @@ impl Stage for Coverage {
         // ground it does not already hold, so a unit with nothing to gain
         // produces nothing to try.
         let mut dispositions = BTreeMap::new();
-        let mut candidates: Vec<(Candidate, u32)> = Vec::new();
+        let mut candidates: Vec<Candidate> = Vec::new();
         let mut refinements = 0;
         for unit in &source_units {
-            let found = alternatives::build(unit, &target_blocks, &by_name, &source_blocks);
+            let found =
+                alternatives::build(unit, &target_blocks, &by_name, &source_blocks, &observations);
             let represented = target_blocks.contains_key(&unit.name);
             dispositions
                 .insert(unit.name.clone(), alternatives::disposition(unit, &found, represented));
@@ -219,7 +215,6 @@ impl Stage for Coverage {
                 continue;
             }
             refinements += usize::from(represented);
-            let widest = found.iter().map(|a| a.gained_bytes).max().unwrap_or(0);
             let proposal = Proposal {
                 policy_version: POLICY_VERSION,
                 source_code_bytes: unit.code_bytes,
@@ -228,17 +223,17 @@ impl Stage for Coverage {
                     || format!("Coverage evidence has no identification for {}", unit.name),
                 )?)
                 .clone(),
+                before_lines: target_blocks.get(&unit.name).cloned().unwrap_or_default(),
+                observation: observation.clone(),
                 alternatives: found,
             };
-            candidates.push((
-                Candidate { name: unit.name.clone(), evidence: serde_json::to_value(proposal)? },
-                widest,
-            ));
+            candidates.push(Candidate {
+                name: unit.name.clone(),
+                evidence: serde_json::to_value(proposal)?,
+            });
         }
-        // Most new ground first. For a unit being extended that is the growth,
-        // not the whole range, since the rest is already its.
-        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
-        let mut chosen: Vec<Candidate> = candidates.into_iter().map(|(c, _)| c).collect();
+        candidates.sort_by(compare_candidates);
+        let mut chosen = candidates;
         if let Some(limit) = limit {
             chosen.truncate(limit);
         }
@@ -258,7 +253,8 @@ impl Stage for Coverage {
                 .map(|(name, lines)| (name.clone(), body_bytes(lines)))
                 .collect(),
             dispositions,
-            identifications: evidence.identifications.clone(),
+            observation,
+            identifications: evidence.identifications.units.clone(),
         };
 
         // Audited, not evaluated: a unit that already owns a range counts as
@@ -318,6 +314,7 @@ impl Stage for Coverage {
         // deciding the fate of units another worker is holding at the time.
         for candidate in candidates {
             let proposal = proposal_of(candidate)?;
+            let observations = load_reference(&proposal.observation, &ctx.source, &ctx.target)?;
             // A rollback point for the configuration, in case none of this
             // candidate's alternatives survives.
             let config_before = config_owned.current().to_vec();
@@ -347,6 +344,7 @@ impl Stage for Coverage {
                     candidate,
                     alternative,
                     &proposal,
+                    &observations,
                     &report,
                     starting_complete,
                 ) {
@@ -464,6 +462,15 @@ impl Coverage {
             let Some(alternative) = proposal.alternatives.iter().find(|a| &a.id == id) else {
                 bail!(ValidationError(format!("Unknown coverage alternative for {name}")));
             };
+            let observations = load_reference(&proposal.observation, &ctx.source, &ctx.target)?;
+            validate_ownership_certificate(
+                name,
+                proposal,
+                alternative,
+                &blocks,
+                &observations,
+                true,
+            )?;
             if blocks.get(name) != Some(&alternative.lines) {
                 bail!(ValidationError(format!(
                     "Coverage split for {name} changed after selection"
@@ -501,9 +508,18 @@ fn try_alternative(
     candidate: &Candidate,
     alternative: &Alternative,
     proposal: &Proposal,
+    observations: &ObservationIndex,
     baseline: &Report,
     starting_complete: u64,
 ) -> Result<Report> {
+    validate_ownership_certificate(
+        &candidate.name,
+        proposal,
+        alternative,
+        &splits.blocks,
+        observations,
+        false,
+    )?;
     let is_new = !splits.blocks.contains_key(&candidate.name);
     apply_alternative(&mut splits.blocks, &candidate.name, alternative)?;
     if is_new {
@@ -524,6 +540,53 @@ fn try_alternative(
         bail!(ValidationError("coverage candidate reduces source-linked code".into()));
     }
     Ok(tested)
+}
+
+fn validate_ownership_certificate(
+    unit: &str,
+    proposal: &Proposal,
+    alternative: &Alternative,
+    blocks: &IndexMap<String, Vec<String>>,
+    observations: &ObservationIndex,
+    applied: bool,
+) -> Result<()> {
+    if proposal.observation.sha256 != alternative.ownership.observation_sha256
+        || observations.digest() != proposal.observation.sha256
+    {
+        bail!(ValidationError(format!("Ownership observations changed for {unit}")));
+    }
+    let ranges = |lines: &[String]| {
+        let mut result: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+        for range in lines.iter().filter_map(|line| parse_range(line)) {
+            result.entry(range.section).or_default().push((range.start, range.end));
+        }
+        result
+    };
+    let current = blocks.get(unit).map(Vec::as_slice).unwrap_or_default();
+    let expected = if applied { &alternative.lines } else { &proposal.before_lines };
+    if current != expected {
+        bail!(ValidationError(format!(
+            "Ownership {} state changed for {unit} alternative {}",
+            if applied { "published" } else { "baseline" },
+            alternative.id
+        )));
+    }
+    let before = ranges(&proposal.before_lines);
+    let after = ranges(&alternative.lines);
+    let actual = observations.assess(unit, "main", &before, &after);
+    if actual != alternative.ownership {
+        bail!(ValidationError(format!(
+            "Ownership certificate is stale for {unit} alternative {}",
+            alternative.id
+        )));
+    }
+    if !actual.permits_automatic_claim() {
+        bail!(ValidationError(format!(
+            "Ownership evidence does not support {unit} alternative {}",
+            alternative.id
+        )));
+    }
+    Ok(())
 }
 
 /// Whether the stage would offer this unit a candidate.
@@ -555,10 +618,14 @@ fn revisit(
     permitted: &Permitted,
     tried: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<Vec<Candidate>> {
-    let evidence = generate_evidence(ctx)?;
-    let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
     let source_blocks =
         Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
+    let expected_units = source_blocks.keys().cloned().collect();
+    let evidence = generate_evidence(ctx)?;
+    let (evidence, observations) = validate_evidence(evidence, &expected_units)?;
+    let observation = persist_observations(ctx, &observations)?;
+    let _ = std::fs::remove_file(ctx.output.join("coverage-evidence.json"));
+    let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
     let by_name: BTreeMap<String, &CoverageUnit> = evidence
         .source_units
         .iter()
@@ -577,7 +644,8 @@ fn revisit(
         if !permitted.allows(name) {
             continue;
         }
-        let found = alternatives::build(unit, &target_blocks, &by_name, &source_blocks);
+        let found =
+            alternatives::build(unit, &target_blocks, &by_name, &source_blocks, &observations);
         let refused = tried.get(name);
         if found.is_empty()
             || found.iter().all(|a| refused.is_some_and(|seen| seen.contains(&a.id)))
@@ -592,18 +660,13 @@ fn revisit(
                 .get(name.as_str())
                 .with_context(|| format!("Coverage evidence has no identification for {name}"))?)
             .clone(),
+            before_lines: target_blocks.get(name).cloned().unwrap_or_default(),
+            observation: observation.clone(),
             alternatives: found,
         };
         next.push(Candidate { name: name.clone(), evidence: serde_json::to_value(proposal)? });
     }
-    // Most new ground first, as in preparation.
-    next.sort_by_key(|candidate| {
-        let widest = proposal_of(candidate)
-            .ok()
-            .and_then(|p| p.alternatives.iter().map(|a| a.gained_bytes).max())
-            .unwrap_or(0);
-        (std::cmp::Reverse(widest), candidate.name.clone())
-    });
+    next.sort_by(compare_candidates);
     Ok(next)
 }
 
@@ -1047,7 +1110,8 @@ pub struct Summary {
     pub newly_assigned_code_bytes: u32,
     pub selected: BTreeMap<String, Alternative>,
     pub dispositions: BTreeMap<String, String>,
-    pub identifications: IdentificationReport,
+    pub observation: ObservationReference,
+    pub identifications: Vec<UnitIdentification>,
     pub events: Vec<Event>,
     pub metrics: Metrics,
     pub measures: Measures,
@@ -1175,6 +1239,10 @@ pub fn summarize(prepared: &Prepared, result: &crate::run::StageResult) -> Resul
         },
         selected,
         dispositions,
+        observation: ObservationReference {
+            file: format!("preparation/ownership-{}.json", inventory.observation.sha256),
+            ..inventory.observation
+        },
         identifications: inventory.identifications,
         events: result.events.clone(),
         measures: result.final_measures.clone(),
@@ -1235,7 +1303,7 @@ pub fn markdown(value: &Summary) -> String {
             .into(),
     );
     lines.push("|---|---|---|---|---:|---|---|".into());
-    for identification in &value.identifications.units {
+    for identification in &value.identifications {
         lines.push(format!(
             "| `{}` | {} | `{}` | `{}` | {}/{} | {} | {} |",
             markdown_cell(&identification.unit),
@@ -1379,7 +1447,7 @@ mod tests {
             0x8000_0200,
         )])]);
         evidence.identifications.schema += 1;
-        let error = validate_evidence(&evidence).unwrap_err();
+        let error = validate_evidence(evidence, &BTreeSet::from(["a.cpp".into()])).unwrap_err();
         assert!(error.to_string().contains("identification schema"), "{error}");
     }
 
@@ -1391,7 +1459,7 @@ mod tests {
             0x8000_0200,
         )])]);
         evidence.identifications.units.clear();
-        let error = validate_evidence(&evidence).unwrap_err();
+        let error = validate_evidence(evidence, &BTreeSet::from(["a.cpp".into()])).unwrap_err();
         assert!(error.to_string().contains("exactly the source split units"), "{error}");
     }
 
@@ -1442,6 +1510,7 @@ mod tests {
             lines,
             anchors: Vec::new(),
             owner_revisions: Vec::new(),
+            ownership: Default::default(),
         }
     }
 
@@ -1649,54 +1718,113 @@ mod tests {
             source_code_bytes: 0x1000,
             required_extracts: Vec::new(),
             identification: UnitIdentification::absent(name, 0),
+            before_lines: Vec::new(),
+            observation: observation_reference(),
             alternatives: vec![alternative.clone()],
         };
         Candidate { name: name.into(), evidence: serde_json::to_value(proposal).unwrap() }
     }
 
-    fn function_attribution(
-        id: &str,
-        unit: &str,
-    ) -> crate::analysis::ownership::FunctionAttribution {
-        use crate::analysis::{
-            matching::{MatchMethod, MatchTier},
-            ownership::{AttributionOrigin, EvidenceReference, FunctionLocation, SourceFunction},
-        };
-
-        crate::analysis::ownership::FunctionAttribution {
-            id: id.into(),
-            target: FunctionLocation {
-                module: "main".into(),
-                section: ".text".into(),
-                address: "0x80000100".into(),
-                end: "0x80000200".into(),
-            },
-            source: SourceFunction {
-                name: "A".into(),
-                unit: unit.into(),
-                module: "main".into(),
-                section: ".text".into(),
-                address: "0x80000100".into(),
-                end: "0x80000200".into(),
-            },
-            method: MatchMethod::ExactHash,
-            tier: MatchTier::Confident,
-            confidence: 1.0,
-            evidence_count: 1,
-            origin: AttributionOrigin::NormalizedBody,
-            binary_supported: true,
-            independent: true,
-            ambiguous: false,
-            competing: None,
-            source_weak: false,
-            target_weak: false,
-            template_instantiation: false,
-            current_target_owner: None,
-            evidence: vec![EvidenceReference {
-                kind: "exact-hash".into(),
-                detail: "test evidence".into(),
-            }],
+    fn observation_reference() -> ObservationReference {
+        ObservationReference {
+            schema: crate::analysis::ownership::IDENTIFICATION_SCHEMA,
+            sha256: "test-observations".into(),
+            file: "ownership-test.json".into(),
         }
+    }
+
+    #[test]
+    fn candidates_rank_ownership_evidence_before_bytes_gained() {
+        let mut strong =
+            body(".text", 0x8000_0100, 0x8000_0180, vec![line(".text", 0x8000_0100, 0x8000_0180)]);
+        strong.ownership.complete_membership = true;
+        strong.ownership.supported_edges = 2;
+        strong.ownership.independent_members = 2;
+
+        let mut large =
+            body(".text", 0x8000_0200, 0x8000_0400, vec![line(".text", 0x8000_0200, 0x8000_0400)]);
+        large.ownership.complete_membership = true;
+        large.ownership.supported_edges = 1;
+        large.ownership.independent_members = 1;
+
+        let mut candidates =
+            [candidate_for("large.cpp", &large), candidate_for("strong.cpp", &strong)];
+        candidates.sort_by(compare_candidates);
+        assert_eq!(candidates[0].name, "strong.cpp");
+    }
+
+    #[test]
+    fn ownership_certificate_requires_the_state_for_its_checkpoint() {
+        let evidence = evidence_report("NTSC", "PAL", vec![unit("a.cpp", vec![anchor(
+            "A",
+            0x8000_0100,
+            0x8000_0200,
+        )])]);
+        let expected = BTreeSet::from(["a.cpp".to_string()]);
+        let observations =
+            ObservationIndex::load(evidence.identifications, "NTSC", "PAL", &expected).unwrap();
+        let before = vec![line(".text", 0x8000_0100, 0x8000_0180)];
+        let after = vec![line(".text", 0x8000_0100, 0x8000_0200)];
+        let before_ranges = BTreeMap::from([(".text".into(), vec![(0x8000_0100, 0x8000_0180)])]);
+        let after_ranges = BTreeMap::from([(".text".into(), vec![(0x8000_0100, 0x8000_0200)])]);
+        let mut alternative = body(".text", 0x8000_0100, 0x8000_0200, after.clone());
+        alternative.ownership = observations.assess("a.cpp", "main", &before_ranges, &after_ranges);
+        let proposal = Proposal {
+            policy_version: POLICY_VERSION,
+            source_code_bytes: 0x100,
+            required_extracts: Vec::new(),
+            identification: observations.unit("a.cpp").unwrap().clone(),
+            before_lines: before.clone(),
+            observation: ObservationReference {
+                schema: crate::analysis::ownership::IDENTIFICATION_SCHEMA,
+                sha256: observations.digest().into(),
+                file: "unused-in-this-test.json".into(),
+            },
+            alternatives: vec![alternative.clone()],
+        };
+        let baseline_blocks = IndexMap::from([("a.cpp".into(), before)]);
+        let published_blocks = IndexMap::from([("a.cpp".into(), after)]);
+
+        validate_ownership_certificate(
+            "a.cpp",
+            &proposal,
+            &alternative,
+            &baseline_blocks,
+            &observations,
+            false,
+        )
+        .unwrap();
+        validate_ownership_certificate(
+            "a.cpp",
+            &proposal,
+            &alternative,
+            &published_blocks,
+            &observations,
+            true,
+        )
+        .unwrap();
+        assert!(
+            validate_ownership_certificate(
+                "a.cpp",
+                &proposal,
+                &alternative,
+                &published_blocks,
+                &observations,
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_ownership_certificate(
+                "a.cpp",
+                &proposal,
+                &alternative,
+                &baseline_blocks,
+                &observations,
+                true,
+            )
+            .is_err()
+        );
     }
 
     fn stage_result(accepted: Vec<Candidate>, selections: Selections) -> crate::run::StageResult {
@@ -1745,7 +1873,8 @@ mod tests {
             refinements: 0,
             baseline_bytes: held.iter().map(|(n, b)| ((*n).to_string(), *b)).collect(),
             dispositions: BTreeMap::new(),
-            identifications: IdentificationReport::empty("NTSC", "PAL"),
+            observation: observation_reference(),
+            identifications: Vec::new(),
         }
     }
 
@@ -1794,6 +1923,8 @@ mod tests {
             source_code_bytes: 0x200,
             required_extracts: Vec::new(),
             identification,
+            before_lines: Vec::new(),
+            observation: observation_reference(),
             alternatives: vec![alternative.clone()],
         };
         let candidate =
@@ -1818,20 +1949,15 @@ mod tests {
         first.evidence.push("attribution-1".into());
         let second = UnitIdentification::absent("outside-only.cpp", 0);
         let mut inventory = inventory_with(&[]);
-        inventory.identifications.units = vec![first, second];
-        inventory
-            .identifications
-            .attributions
-            .push(function_attribution("attribution-1", "wanted.cpp"));
+        inventory.identifications = vec![first, second];
         let summary =
             summarize(&prepared_with(inventory), &stage_result(Vec::new(), Selections::new()))
                 .unwrap();
         assert_eq!(
-            summary.identifications.units.iter().map(|item| item.unit.as_str()).collect::<Vec<_>>(),
+            summary.identifications.iter().map(|item| item.unit.as_str()).collect::<Vec<_>>(),
             ["wanted.cpp", "outside-only.cpp"]
         );
-        assert_eq!(summary.identifications.attributions.len(), 1);
-        assert_eq!(summary.identifications.attributions[0].id, "attribution-1");
+        assert_eq!(summary.observation.sha256, "test-observations");
     }
 
     #[test]
@@ -1909,7 +2035,8 @@ mod tests {
             newly_assigned_code_bytes: 4096,
             selected: BTreeMap::new(),
             dispositions: BTreeMap::from([("a.cpp".into(), "accepted".into())]),
-            identifications: IdentificationReport::empty("NTSC", "PAL"),
+            observation: observation_reference(),
+            identifications: Vec::new(),
             events: Vec::new(),
             metrics: Metrics {
                 representation: Representation { baseline_tus: 40, final_tus: 42, source_tus: 100 },

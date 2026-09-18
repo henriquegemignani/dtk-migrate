@@ -73,6 +73,7 @@ pub const SCORE_SCHEMA: u32 = 5;
 /// inventory. Keep this explicit here so the historical adapter cannot silently
 /// reinterpret a future coverage schema merely because some fields deserialize.
 const TYPED_IDENTIFICATION_COVERAGE_SCHEMA: u32 = 10;
+const REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA: u32 = 11;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -854,6 +855,8 @@ struct CoverageArtifact {
     schema: u32,
     #[serde(default)]
     identifications: Option<IdentificationReport>,
+    #[serde(default)]
+    observation: Option<crate::analysis::ownership::ObservationReference>,
 }
 
 fn typed_identifications(
@@ -876,9 +879,9 @@ fn typed_identifications(
             coverage.schema
         );
     }
-    if report.schema != IDENTIFICATION_SCHEMA {
+    if report.schema != 1 {
         bail!(
-            "Coverage summary has identification schema {}, but the benchmark understands {IDENTIFICATION_SCHEMA}",
+            "Coverage summary has identification schema {}, but schema {TYPED_IDENTIFICATION_COVERAGE_SCHEMA} requires identification schema 1",
             report.schema
         );
     }
@@ -935,6 +938,50 @@ fn typed_identifications(
                 );
             }
         }
+    }
+    Ok((identifications, attributions))
+}
+
+fn referenced_identifications(
+    coverage: CoverageArtifact,
+    coverage_dir: &Path,
+    source: &str,
+    target: &str,
+) -> Result<(BTreeMap<String, UnitIdentification>, BTreeMap<String, FunctionAttribution>)> {
+    if coverage.schema == TYPED_IDENTIFICATION_COVERAGE_SCHEMA {
+        return typed_identifications(coverage, source, target);
+    }
+    if coverage.schema != REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA {
+        if coverage.schema > REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA {
+            bail!("Coverage summary schema {} is newer than the benchmark", coverage.schema);
+        }
+        return Ok((BTreeMap::new(), BTreeMap::new()));
+    }
+    let reference = coverage.observation.ok_or_else(|| {
+        anyhow::anyhow!("Coverage summary schema 11 is missing its ownership observation reference")
+    })?;
+    if reference.schema != IDENTIFICATION_SCHEMA {
+        bail!("Coverage observation uses unsupported identification schema {}", reference.schema);
+    }
+    let relative = Path::new(&reference.file);
+    if relative.is_absolute()
+        || relative.components().any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        bail!("Coverage observation path must stay inside the coverage artifact directory");
+    }
+    let report: IdentificationReport = read_json(&coverage_dir.join(relative))?;
+    let index =
+        crate::analysis::ownership::ObservationIndex::load_self_contained(report, source, target)?;
+    if index.digest() != reference.sha256 {
+        bail!("Coverage observation digest does not match coverage.json");
+    }
+    let mut identifications = BTreeMap::new();
+    for item in &index.report().units {
+        identifications.insert(item.unit.clone(), item.clone());
+    }
+    let mut attributions = BTreeMap::new();
+    for item in &index.report().attributions {
+        attributions.insert(item.id.clone(), item.clone());
     }
     Ok((identifications, attributions))
 }
@@ -1092,7 +1139,12 @@ pub fn read_run(run: &Path) -> Result<RunFacts> {
 
     let artifact = run.join("coverage").join("coverage.json");
     let (identifications, attributions) = if artifact.is_file() {
-        typed_identifications(read_json(&artifact)?, &summary.source, &target)?
+        referenced_identifications(
+            read_json(&artifact)?,
+            artifact.parent().expect("coverage.json has a parent"),
+            &summary.source,
+            &target,
+        )?
     } else {
         (BTreeMap::new(), BTreeMap::new())
     };
@@ -2270,12 +2322,15 @@ mod tests {
             CoverageArtifact {
                 schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA - 1,
                 identifications: Some(IdentificationReport {
-                    schema: IDENTIFICATION_SCHEMA,
+                    schema: 1,
                     source: "NTSC".into(),
                     target: "PAL".into(),
                     attributions: Vec::new(),
+                    source_functions: Vec::new(),
+                    target_functions: Vec::new(),
                     units: vec![identification.clone()],
                 }),
+                observation: None,
             },
             "NTSC",
             "PAL",
@@ -2288,6 +2343,7 @@ mod tests {
                 CoverageArtifact {
                     schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA - 1,
                     identifications: None,
+                    observation: None,
                 },
                 "NTSC",
                 "PAL"
@@ -2301,6 +2357,7 @@ mod tests {
             CoverageArtifact {
                 schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA,
                 identifications: None,
+                observation: None,
             },
             "NTSC",
             "PAL",
@@ -2312,12 +2369,15 @@ mod tests {
                 CoverageArtifact {
                     schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA,
                     identifications: Some(IdentificationReport {
-                        schema: IDENTIFICATION_SCHEMA,
+                        schema: 1,
                         source: "NTSC".into(),
                         target: "PAL".into(),
                         attributions: Vec::new(),
+                        source_functions: Vec::new(),
+                        target_functions: Vec::new(),
                         units: vec![identification],
                     }),
+                    observation: None,
                 },
                 "NTSC",
                 "PAL"

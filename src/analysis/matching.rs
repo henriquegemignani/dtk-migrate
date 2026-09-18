@@ -168,7 +168,7 @@ impl MatchTier {
 
 /// A runner-up scoring within this fraction of the winner means the evidence
 /// didn't actually single the winner out, whatever its confidence says.
-const CONTESTED_MARGIN: f32 = 0.15;
+pub(crate) const CONTESTED_MARGIN: f32 = 0.15;
 
 /// Independent agreeing neighbors needed before a propagated match is trusted
 /// beyond [`MatchTier::Candidate`].
@@ -210,21 +210,28 @@ impl Match {
     /// close revisions, broadly spread between distant ones — so the same
     /// threshold means different things per pair. The evidence kind doesn't move.
     pub fn tier(&self) -> MatchTier {
-        if self.is_contested() {
-            return MatchTier::Candidate;
-        }
-        match self.method {
-            // Tier 1 anchors are decided by content unique on both sides.
-            MatchMethod::Name | MatchMethod::ExactHash | MatchMethod::StringRef => {
-                MatchTier::Confident
-            }
-            // Propagated, but the bodies are byte-identical once relocations are
-            // masked. The hash wasn't unique enough to anchor on alone; combined
-            // with call-graph agreement and no rival, it's as good as one.
-            _ if self.distinctive_body => MatchTier::Confident,
-            _ if self.evidence >= CORROBORATION_FOR_PROBABLE => MatchTier::Probable,
-            _ => MatchTier::Candidate,
-        }
+        classify_tier(self.method, self.distinctive_body, self.evidence, self.is_contested())
+    }
+}
+
+pub(crate) fn classify_tier(
+    method: MatchMethod,
+    distinctive_body: bool,
+    evidence: u32,
+    contested: bool,
+) -> MatchTier {
+    if contested {
+        return MatchTier::Candidate;
+    }
+    match method {
+        // Tier 1 anchors are decided by content unique on both sides.
+        MatchMethod::Name | MatchMethod::ExactHash | MatchMethod::StringRef => MatchTier::Confident,
+        // Propagated, but the bodies are byte-identical once relocations are
+        // masked. The hash wasn't unique enough to anchor on alone; combined
+        // with call-graph agreement and no rival, it's as good as one.
+        _ if distinctive_body => MatchTier::Confident,
+        _ if evidence >= CORROBORATION_FOR_PROBABLE => MatchTier::Probable,
+        _ => MatchTier::Candidate,
     }
 }
 

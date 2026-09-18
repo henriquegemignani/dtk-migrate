@@ -16,11 +16,11 @@ use crate::analysis::{
     ownership::IdentificationReport,
 };
 
-pub const COVERAGE_SCHEMA: u32 = 10;
+pub const COVERAGE_SCHEMA: u32 = 11;
 /// Kept in step with [`crate::stages::coverage::POLICY_VERSION`], which gates
 /// the proposals this evidence produces; the two are checked against each other
 /// on every read, so they have to move together.
-pub const POLICY_VERSION: u32 = 9;
+pub const POLICY_VERSION: u32 = 10;
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
 pub const MIN_LAYOUT_SHIFT_CHANGED_ACCESSES: u32 = 4;

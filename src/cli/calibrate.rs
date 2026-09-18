@@ -262,7 +262,7 @@ pub fn run(args: Args) -> Result<()> {
         // The layout is the target's own functions, which masking does not
         // move; the oracle supplies the owners it no longer carries.
         let owners = ownership_at_layout(&masked.target_layout, &oracle);
-        let records = score_all(&masked, &oracle, &source_blocks, &owners);
+        let records = score_all(&masked, &oracle, &source_blocks, &owners)?;
         let measures = summarize(&records);
         let wrong = faults(&records);
 
@@ -333,7 +333,7 @@ fn score_all(
     oracle: &Oracle,
     source_blocks: &Blocks,
     owners: &BTreeMap<(String, String), Option<String>>,
-) -> Vec<Record> {
+) -> Result<Vec<Record>> {
     let by_name: BTreeMap<String, &CoverageUnit> =
         masked.source_units.iter().map(|unit| (unit.name.clone(), unit)).collect();
 
@@ -347,15 +347,29 @@ fn score_all(
         .collect();
     asked.sort_by(|a, b| a.name.cmp(&b.name));
 
-    asked
+    let expected: BTreeSet<String> =
+        masked.source_units.iter().map(|unit| unit.name.clone()).collect();
+    let observations = crate::analysis::ownership::ObservationIndex::load(
+        masked.identifications.clone(),
+        &masked.source,
+        &masked.target,
+        &expected,
+    )?;
+    Ok(asked
         .into_iter()
         .map(|unit| {
             // The splits the scenario left standing, which is what a migration
             // would have had in hand at this point.
-            let found = alternatives::build(unit, &masked.mask.visible, &by_name, source_blocks);
+            let found = alternatives::build(
+                unit,
+                &masked.mask.visible,
+                &by_name,
+                source_blocks,
+                &observations,
+            );
             score(unit, found, oracle, &masked.mask.visible, owners)
         })
-        .collect()
+        .collect())
 }
 
 fn score(
@@ -728,6 +742,7 @@ mod tests {
             lines: vec![format!("\t{section:11} start:0x{start:08X} end:0x{end:08X}")],
             anchors: Vec::new(),
             owner_revisions: Vec::new(),
+            ownership: Default::default(),
         }
     }
 

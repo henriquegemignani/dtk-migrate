@@ -12,13 +12,20 @@
 //! a unit `configure.py` has not enabled still links from its extracted
 //! original. That distinction is what [`super::verify`] exists to settle.
 
-use std::collections::BTreeSet;
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::{BTreeMap, BTreeSet},
+};
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    analysis::{
+        coverage::CoverageReport,
+        ownership::{ObservationIndex, ObservationReference, OwnershipAssessment, load_reference},
+    },
     build::context::{BuildContext, is_trial_failure},
     project::{
         link_order::cyclic_units,
@@ -31,8 +38,7 @@ use crate::{
 
 pub struct Discover;
 
-const VALIDATION: &str =
-    "objdiff matched code; retail hash checks split integrity, not candidate source linkage";
+const VALIDATION: &str = "canonical attributed ownership and objdiff matched code; retail hash checks split integrity, not candidate source linkage";
 
 /// Sections whose ranges a code candidate may claim.
 pub const CODE_SECTIONS: [&str; 2] = [".text", ".init"];
@@ -42,6 +48,12 @@ pub const CODE_SECTIONS: [&str; 2] = [".text", ".init"];
 pub struct Proposal {
     pub lines: Vec<String>,
     pub kind: Kind,
+    #[serde(default)]
+    pub before_lines: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<ObservationReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<OwnershipAssessment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +74,64 @@ fn ranges_in(lines: &[String], section: &str) -> Vec<(u32, u32)> {
         .filter(|range| range.section == section)
         .map(|range| (range.start, range.end))
         .collect()
+}
+
+fn code_ranges(lines: &[String]) -> BTreeMap<String, Vec<(u32, u32)>> {
+    let mut result: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+    for range in lines
+        .iter()
+        .filter_map(|line| parse_range(line))
+        .filter(|range| CODE_SECTIONS.contains(&range.section.as_str()))
+    {
+        result.entry(range.section).or_default().push((range.start, range.end));
+    }
+    result
+}
+
+fn assess_code(
+    observations: &ObservationIndex,
+    unit: &str,
+    before: &[String],
+    after: &[String],
+) -> OwnershipAssessment {
+    observations.assess(unit, "main", &code_ranges(before), &code_ranges(after))
+}
+
+fn claimed_code_bytes(lines: &[String]) -> u32 {
+    lines
+        .iter()
+        .filter_map(|line| parse_range(line))
+        .filter(|range| CODE_SECTIONS.contains(&range.section.as_str()))
+        .map(|range| range.end - range.start)
+        .sum()
+}
+
+fn compare_code_candidates(left: &Candidate, right: &Candidate) -> Ordering {
+    let left_proposal = proposal_of(left).expect("fresh discovery candidate must be valid");
+    let left_ownership = left_proposal
+        .ownership
+        .as_ref()
+        .expect("fresh code candidate must contain an ownership certificate");
+    let right_proposal = proposal_of(right).expect("fresh discovery candidate must be valid");
+    let right_ownership = right_proposal
+        .ownership
+        .as_ref()
+        .expect("fresh code candidate must contain an ownership certificate");
+    (
+        Reverse(left_ownership.complete_membership),
+        Reverse(left_ownership.supported_edges),
+        Reverse(left_ownership.independent_members),
+        left_ownership.padding_bytes,
+        Reverse(claimed_code_bytes(&left_proposal.lines)),
+    )
+        .cmp(&(
+            Reverse(right_ownership.complete_membership),
+            Reverse(right_ownership.supported_edges),
+            Reverse(right_ownership.independent_members),
+            right_ownership.padding_bytes,
+            Reverse(claimed_code_bytes(&right_proposal.lines)),
+        ))
+        .then_with(|| left.name.cmp(&right.name))
 }
 
 /// Ranges every unit other than `name` already claims in `section`.
@@ -280,6 +350,7 @@ impl Stage for Discover {
 
         let proposals_path = ctx.output.join("proposals.txt");
         let renames_path = ctx.output.join("renames.txt");
+        let coverage_path = ctx.output.join("ownership-evidence.json");
         let mut request = crate::matching::Request::new(
             config_path(ctx, &ctx.source),
             config_path(ctx, &ctx.target),
@@ -288,6 +359,7 @@ impl Stage for Discover {
             splits: Some(proposals_path.clone()),
             renames: Some(renames_path.clone()),
             report: Some(ctx.output.join("matches.json")),
+            coverage: Some(coverage_path.clone()),
             ..Default::default()
         };
         crate::matching::run(&request)?;
@@ -313,11 +385,30 @@ impl Stage for Discover {
         let proposals = Splits::read(&proposals_path)?.blocks;
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
+        let evidence: CoverageReport = serde_json::from_slice(&std::fs::read(&coverage_path)?)?;
+        let expected: BTreeSet<String> = source_blocks.keys().cloned().collect();
+        let observations =
+            ObservationIndex::load(evidence.identifications, &ctx.source, &ctx.target, &expected)?;
+        let observation = observations.persist(&ctx.output)?;
+        let _ = std::fs::remove_file(&coverage_path);
 
         let mut candidates: Vec<Candidate> = code_proposals(&proposals, &blocks)
             .into_iter()
-            .map(|(name, lines)| candidate(name, lines, Kind::Code))
+            .filter_map(|(name, lines)| {
+                let before = blocks.get(&name).cloned().unwrap_or_default();
+                let ownership = assess_code(&observations, &name, &before, &lines);
+                ownership.permits_automatic_claim().then(|| {
+                    candidate(name, Proposal {
+                        lines,
+                        kind: Kind::Code,
+                        before_lines: before,
+                        observation: Some(observation.clone()),
+                        ownership: Some(ownership),
+                    })
+                })
+            })
             .collect::<Result<_>>()?;
+        candidates.sort_by(compare_code_candidates);
         if let Some(limit) = limit {
             candidates.truncate(limit);
         }
@@ -331,7 +422,16 @@ impl Stage for Discover {
         let mut data: Vec<Candidate> = data_proposals(&proposals, &blocks, &source_blocks)
             .into_iter()
             .filter(|(name, _)| !staged.contains(name.as_str()))
-            .map(|(name, lines)| candidate(name, lines, Kind::Data))
+            .map(|(name, lines)| {
+                let before_lines = blocks.get(&name).cloned().unwrap_or_default();
+                candidate(name, Proposal {
+                    lines,
+                    kind: Kind::Data,
+                    before_lines,
+                    observation: None,
+                    ownership: None,
+                })
+            })
             .collect::<Result<_>>()?;
         if let Some(limit) = limit {
             data.truncate(limit);
@@ -396,10 +496,19 @@ impl Stage for Discover {
     fn validate(
         &self,
         ctx: &BuildContext,
-        _accepted: &[Candidate],
+        accepted: &[Candidate],
         _prepared: &Prepared,
         _selections: &Selections,
     ) -> Result<Report> {
+        let blocks =
+            Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;
+        for candidate in accepted {
+            let proposal = proposal_of(candidate)?;
+            if blocks.get(&candidate.name) != Some(&proposal.lines) {
+                bail!("Discovery split for {} changed after selection", candidate.name);
+            }
+            validate_code_proposal(ctx, &candidate.name, &proposal, true)?;
+        }
         ctx.build(None)
     }
 }
@@ -410,8 +519,8 @@ pub fn config_path(ctx: &BuildContext, version: &str) -> typed_path::Utf8NativeP
     typed_path::Utf8NativePathBuf::from(path.to_string_lossy().into_owned())
 }
 
-fn candidate(name: String, lines: Vec<String>, kind: Kind) -> Result<Candidate> {
-    Ok(Candidate { evidence: serde_json::to_value(Proposal { lines, kind })?, name })
+fn candidate(name: String, proposal: Proposal) -> Result<Candidate> {
+    Ok(Candidate { evidence: serde_json::to_value(proposal)?, name })
 }
 
 fn proposal_of(candidate: &Candidate) -> Result<Proposal> {
@@ -469,6 +578,7 @@ impl Trials {
         let mut new_names: Vec<String> = Vec::new();
         for candidate in batch {
             let proposal = proposal_of(candidate)?;
+            validate_code_proposal(ctx, &candidate.name, &proposal, false)?;
             if !staged.blocks.contains_key(&candidate.name) {
                 new_names.push(candidate.name.clone());
             }
@@ -552,6 +662,40 @@ impl Trials {
     }
 }
 
+fn validate_code_proposal(
+    ctx: &BuildContext,
+    unit: &str,
+    proposal: &Proposal,
+    applied: bool,
+) -> Result<()> {
+    if proposal.kind == Kind::Data {
+        return Ok(());
+    }
+    let reference = proposal
+        .observation
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Code proposal for {unit} has no ownership observations"))?;
+    let recorded = proposal
+        .ownership
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Code proposal for {unit} has no ownership certificate"))?;
+    let observations = load_reference(reference, &ctx.source, &ctx.target)?;
+    let blocks =
+        Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;
+    let expected = if applied { &proposal.lines } else { &proposal.before_lines };
+    if blocks.get(unit).map(Vec::as_slice).unwrap_or_default() != expected {
+        bail!("Discovery ownership baseline changed for {unit}");
+    }
+    let actual = assess_code(&observations, unit, &proposal.before_lines, &proposal.lines);
+    if &actual != recorded || actual.observation_sha256 != reference.sha256 {
+        bail!("Discovery ownership certificate is stale for {unit}");
+    }
+    if !actual.permits_automatic_claim() {
+        bail!("Discovery ownership evidence does not support {unit}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +755,34 @@ mod tests {
             blocks(&[("small.cpp", &[&text(0x100, 0x110)]), ("big.cpp", &[&text(0x200, 0x400)])]);
         let result = code_proposals(&proposals, &IndexMap::new());
         assert_eq!(result[0].0, "big.cpp");
+    }
+
+    #[test]
+    fn prepared_code_candidates_rank_evidence_before_size() {
+        let make = |name: &str, end: u32, independent_members: u32| {
+            candidate(name.into(), Proposal {
+                lines: vec![text(0x100, end)],
+                kind: Kind::Code,
+                before_lines: Vec::new(),
+                observation: Some(ObservationReference {
+                    schema: 2,
+                    sha256: "observed".into(),
+                    file: "observed.json".into(),
+                }),
+                ownership: Some(OwnershipAssessment {
+                    complete_membership: true,
+                    independent_members,
+                    ..Default::default()
+                }),
+            })
+            .unwrap()
+        };
+        let smaller_but_stronger = make("strong.cpp", 0x180, 2);
+        let larger_but_weaker = make("large.cpp", 0x400, 1);
+        assert_eq!(
+            compare_code_candidates(&smaller_but_stronger, &larger_but_weaker),
+            Ordering::Less
+        );
     }
 
     #[test]

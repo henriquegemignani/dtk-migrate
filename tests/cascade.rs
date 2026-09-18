@@ -122,13 +122,22 @@ fn evidence_for(named: usize) -> CoverageReport {
 /// Every unit the policy would offer a candidate for, given what is owned.
 fn offered(named: usize, owned: &Blocks) -> BTreeMap<String, Vec<String>> {
     let evidence = evidence_for(named);
+    let expected = evidence.source_units.iter().map(|unit| unit.name.clone()).collect();
+    let observations = dtk_migrate::analysis::ownership::ObservationIndex::load(
+        evidence.identifications.clone(),
+        &evidence.source,
+        &evidence.target,
+        &expected,
+    )
+    .unwrap();
     let by_name: BTreeMap<String, &dtk_migrate::analysis::coverage::CoverageUnit> =
         evidence.source_units.iter().map(|u| (u.name.clone(), u)).collect();
     evidence
         .source_units
         .iter()
         .filter_map(|source| {
-            let found = alternatives::build(source, owned, &by_name, &IndexMap::new());
+            let found =
+                alternatives::build(source, owned, &by_name, &IndexMap::new(), &observations);
             found.first().map(|first| (source.name.clone(), first.lines.clone()))
         })
         .collect()
@@ -304,12 +313,16 @@ fn config_yml(version: &str) -> String {
 /// Only `stunted_splits` reads these — the cascade's alternatives come from
 /// anchors, not from the source layout — but a unit whose source counterpart is
 /// missing is audited differently, so the fixture supplies both.
-fn source_splits() -> String {
-    format!(
+fn source_splits(include_unlinked: bool) -> String {
+    let mut splits = format!(
         "{SPLITS_HEADER}A.cpp:\n{}\n\nB.cpp:\n{}\n",
         line(".text", 0x8000_0400, 0x8000_0600),
         line(".text", 0x8000_0600, 0x8000_0700)
-    )
+    );
+    if include_unlinked {
+        splits.push_str(&format!("\nUnlinked.cpp:\n{}\n", line(".text", 0x8000_2000, 0x8000_2100)));
+    }
+    splits
 }
 
 struct Fixture {
@@ -360,7 +373,10 @@ fn build_fixture(worlds: &[CoverageReport]) -> Option<Fixture> {
             .ok()?;
         std::fs::write(root.join(format!("config/{version}/symbols.txt")), "// symbols\n").ok()?;
     }
-    std::fs::write(root.join("config/NTSC/splits.txt"), source_splits()).ok()?;
+    let include_unlinked = worlds
+        .first()
+        .is_some_and(|world| world.source_units.iter().any(|unit| unit.name == "Unlinked.cpp"));
+    std::fs::write(root.join("config/NTSC/splits.txt"), source_splits(include_unlinked)).ok()?;
     // The target owns nothing yet. Everything it ends up owning, the run put
     // there. Written in exactly the form the writer renders — a file that is
     // merely equivalent would be rewritten the first time a stage saves it, and
