@@ -72,6 +72,8 @@ The generated build graph is patched after each configure:
   mid-build does not undo the first change.
 
 Both edits refuse a rule they do not recognise rather than guessing.
+After final validation, publication regenerates the owner's ordinary build
+graph so a later plain `ninja` no longer carries either trial-only edit.
 
 ## The run directory
 

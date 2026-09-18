@@ -323,6 +323,10 @@ fn resuming_a_published_run_does_no_work() {
         &python,
     ]);
     assert!(first.status.success(), "{}", report(&first));
+    assert!(
+        !fixture.read("build.ninja").contains("configure-hook"),
+        "publication should return an ordinary build graph to the project owner"
+    );
 
     let run = fixture.runs().pop().unwrap();
     let id = run.file_name().unwrap().to_string_lossy().into_owned();

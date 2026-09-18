@@ -158,6 +158,7 @@ pub fn publish(
         {
             bail!("The project changed during final validation");
         }
+        ctx.restore_generated_graph()?;
         Ok(report)
     })();
 
@@ -181,6 +182,12 @@ pub fn publish(
                 if let Err(rebuild) = ctx.build(None) {
                     tracing::error!(
                         "The project was restored, but rebuilding its report failed: {rebuild:#}"
+                    );
+                }
+                if let Err(restore) = ctx.restore_generated_graph() {
+                    tracing::error!(
+                        "The project inputs were restored, but its ordinary build graph was not: \
+                         {restore:#}"
                     );
                 }
             }

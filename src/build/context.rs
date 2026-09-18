@@ -133,6 +133,23 @@ impl BuildContext {
         )
     }
 
+    /// Regenerates the ordinary project build graph after migration trials.
+    ///
+    /// Trial graphs deliberately point their configure rule at the frozen
+    /// migration binary, and their split rule uses trial-only flags. Those
+    /// generated files are outside the workspace snapshot, so publishing the
+    /// proven source inputs does not replace them. Regenerate through the
+    /// project's normal defaults before returning the checkout to its owner;
+    /// otherwise a later plain `ninja` can re-enter a completed run's hook.
+    pub fn restore_generated_graph(&self) -> Result<()> {
+        let args =
+            vec!["configure.py".into(), "configure".into(), "-v".into(), self.target.clone()];
+        self.run(&self.tools.python.clone(), &args, false, None)
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("Failed to restore the project's ordinary build graph")?;
+        Ok(())
+    }
+
     fn toolchain_paths(&self) -> Vec<(&'static str, PathBuf)> {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
         let tools = self.tools.toolchain_root.clone().unwrap_or_else(|| self.root.clone());

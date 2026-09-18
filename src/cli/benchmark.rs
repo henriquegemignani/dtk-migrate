@@ -854,7 +854,13 @@ pub struct RunFacts {
 struct CoverageArtifact {
     schema: u32,
     #[serde(default)]
-    identifications: Option<IdentificationReport>,
+    // Schema 10 embedded the complete IdentificationReport here. Schema 11
+    // keeps a compact Vec<UnitIdentification> for human-readable coverage
+    // output and points at the complete, content-addressed report through
+    // `observation`. Delay decoding until the schema has selected which
+    // meaning applies, or serde will try to read schema 11's array as the old
+    // report before `referenced_identifications` can follow the reference.
+    identifications: Option<serde_json::Value>,
     #[serde(default)]
     observation: Option<crate::analysis::ownership::ObservationReference>,
 }
@@ -879,6 +885,8 @@ fn typed_identifications(
             coverage.schema
         );
     }
+    let report: IdentificationReport = serde_json::from_value(report)
+        .context("Coverage summary schema 10 has an invalid typed identification inventory")?;
     if report.schema != 1 {
         bail!(
             "Coverage summary has identification schema {}, but schema {TYPED_IDENTIFICATION_COVERAGE_SCHEMA} requires identification schema 1",
@@ -2321,15 +2329,18 @@ mod tests {
         let error = typed_identifications(
             CoverageArtifact {
                 schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA - 1,
-                identifications: Some(IdentificationReport {
-                    schema: 1,
-                    source: "NTSC".into(),
-                    target: "PAL".into(),
-                    attributions: Vec::new(),
-                    source_functions: Vec::new(),
-                    target_functions: Vec::new(),
-                    units: vec![identification.clone()],
-                }),
+                identifications: Some(
+                    serde_json::to_value(IdentificationReport {
+                        schema: 1,
+                        source: "NTSC".into(),
+                        target: "PAL".into(),
+                        attributions: Vec::new(),
+                        source_functions: Vec::new(),
+                        target_functions: Vec::new(),
+                        units: vec![identification.clone()],
+                    })
+                    .unwrap(),
+                ),
                 observation: None,
             },
             "NTSC",
@@ -2368,15 +2379,18 @@ mod tests {
             typed_identifications(
                 CoverageArtifact {
                     schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA,
-                    identifications: Some(IdentificationReport {
-                        schema: 1,
-                        source: "NTSC".into(),
-                        target: "PAL".into(),
-                        attributions: Vec::new(),
-                        source_functions: Vec::new(),
-                        target_functions: Vec::new(),
-                        units: vec![identification],
-                    }),
+                    identifications: Some(
+                        serde_json::to_value(IdentificationReport {
+                            schema: 1,
+                            source: "NTSC".into(),
+                            target: "PAL".into(),
+                            attributions: Vec::new(),
+                            source_functions: Vec::new(),
+                            target_functions: Vec::new(),
+                            units: vec![identification],
+                        })
+                        .unwrap()
+                    ),
                     observation: None,
                 },
                 "NTSC",
@@ -2387,6 +2401,24 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn referenced_coverage_can_keep_its_compact_identification_list() {
+        let artifact: CoverageArtifact = serde_json::from_value(serde_json::json!({
+            "schema": REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA,
+            "identifications": [{ "unit": "u.cpp" }],
+            "observation": {
+                "schema": IDENTIFICATION_SCHEMA,
+                "sha256": "digest",
+                "file": "preparation/ownership-digest.json"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(artifact.schema, REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA);
+        assert!(artifact.identifications.unwrap().is_array());
+        assert!(artifact.observation.is_some());
     }
 
     #[test]
