@@ -1,8 +1,8 @@
 # Plan: recover PAL translation units from historical NTSC evidence
 
 Status: living implementation plan. Change A landed through `0a351d2`; Change B landed at
-`c6e0039`; Change C landed at `beb8e2d`. The remaining plan below is based on the architecture
-after those changes.
+`c6e0039`; Change C landed at `beb8e2d`, with end-to-end compatibility fixes at `cfd1cfa` and
+`2dcea5a`. The remaining plan below is based on the architecture after those changes.
 
 ## Implementation checkpoint after Change C
 
@@ -40,6 +40,70 @@ the typed atomic transaction and exact multi-owner preconditions before D enable
 boundaries. D can then consume C's canonical member and edge records instead of creating another
 ownership model. The total abstention on misplaced helpers confirms that G remains necessary; it
 should resolve emitted helper ownership rather than weaken C's gate.
+
+### Historical rerun after Change C
+
+A fresh migration at the frozen historical Prime revision
+`b65ad2a6f9ae8e400e48f76209d3c015b22b84c0` completed all four stages as run
+`20714-094411`. Its durable evidence is under:
+
+`C:/Users/henri/programming/decomp/prime-migration-change-c-b65ad2a6/build/dtk-migrate/runs/20714-094411/`
+
+The first attempt exposed that ownership reports generated in a workspace retained absolute config
+paths while workers validated stable version IDs. `cfd1cfa` now validates the enclosing report and
+canonicalizes the persisted observation to `GM8E01_00` / `GM8P01_00`. Scoring the completed run then
+exposed a second integration gap: coverage schema 11 keeps a compact identification array while the
+benchmark tried to decode it as schema 10's embedded report before following the content-addressed
+reference. `2dcea5a` selects the representation by schema and also restores the owner's ordinary
+generated Ninja graph after publication.
+
+The run published and independently rebuilt to the retail hashes. A resume using the frozen run
+binary finished in 47 ms and left every worker result and build-log digest unchanged. The ordinary
+post-publication build reported 69.43% matched and 21.18% linked (426 linked files), compared with
+69.34% and 21.00% (421 linked files) at the frozen baseline. Stage results were:
+
+| Stage | Accepted | Deferred | Main effect |
+|---|---:|---:|---|
+| coverage | 19 | 0 | 19 safe refinements, 15,640 newly owned code bytes |
+| discover | 54 | 58 | 54 accepted; refusals remain measured rather than guessed through |
+| verify | 5 | 17 | five additional source objects proved against retail |
+
+Scored against the same immutable 35-TU oracle as run `20713-150344`, the safety change is decisive
+and the recall cost is now measured:
+
+| Recall population | Old exact / partial / wrong / unchanged | New exact / partial / wrong / unchanged |
+|---|---:|---:|
+| 25 changed `.text` bodies | 2 / 2 / 4 / 17 | 1 / 0 / 0 / 24 |
+| 27 changed complete bodies | 1 / 3 / 5 / 18 | 0 / 3 / 0 / 24 |
+| all 35, code only | 2 / 2 / 7 / 24 | 1 / 0 / 0 / 34 |
+| all 35, complete body | 1 / 3 / 8 / 23 | 0 / 3 / 0 / 32 |
+
+Verified regressions fell from **8 to 0**, and newly wrong known ownership from **1,884 bytes to
+0**. Code-exact proposal recall fell from 7 to 4 and selected exact code bodies from 2 to 1. There
+were no ranking failures in either run: the remaining gap is generation/eligibility and coupled
+application, not choosing the wrong alternative from one decision.
+
+The changed identities explain where the remaining plan must act:
+
+- `CScriptSound` is the new exact code recovery: 692 correct code bytes gained with no foreign
+  claim. Its complete body remains partial by 244 data bytes, which belongs to H.
+- `CGuiPane` and `CGuiTableGroup` each have a corroborated identification containing the
+  oracle-exact code interval, but it is not offered because an adjacent edge is unsupported;
+  TableGroup additionally carries unresolved weak/helper ownership. D must turn these recorded
+  intervals into independently supported edge hypotheses, after E can express the affected
+  ownership atomically. G must resolve the helper rather than bypassing it.
+- `CStreamAudioManager` remains at its current code interval because the left adjacent target
+  function is unattributed; 236 code bytes and 240 non-code bytes remain unresolved. G supplies the
+  missing member/owner evidence and H must preserve its multiple data ranges.
+- The old unsafe Camera, Light, Slider, compression, delayed-killer, PlayerState and Platform
+  outcomes now abstain or make only safe partial progress. Their disappearance is evidence that C's
+  refusal is doing its job, not a reason to relax it.
+- Pane's discover proposal is still refused as `no-matched-code-gain`. I should preserve the failed
+  command evidence and retry it only after a relevant boundary/dependency transaction changes.
+
+This checkpoint strengthens the delivery order rather than changing it: implement E next, then
+enable D's independent-edge and small-sequence rules on the atomic substrate. G, H and I retain the
+specific evidence and application gaps above as acceptance cases.
 
 ## Implementation checkpoint after Change B
 
