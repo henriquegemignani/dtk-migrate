@@ -57,6 +57,8 @@ const VALIDATION: &str = "canonical-attributed-ownership-and-unique-exact-or-cor
 fn validate_evidence(
     mut evidence: CoverageReport,
     expected_units: &BTreeSet<String>,
+    source: &str,
+    target: &str,
 ) -> Result<(CoverageReport, ObservationIndex)> {
     if evidence.schema != EVIDENCE_SCHEMA || evidence.policy.version != POLICY_VERSION {
         bail!(
@@ -70,10 +72,12 @@ fn validate_evidence(
     if source_units.len() != evidence.source_units.len() || &source_units != expected_units {
         bail!("Coverage evidence does not cover exactly the source split units");
     }
-    let observations = ObservationIndex::load(
+    let observations = ObservationIndex::load_enclosed_for_run(
         evidence.identifications,
         &evidence.source,
         &evidence.target,
+        source,
+        target,
         expected_units,
     )?;
     evidence.identifications = observations.report().clone();
@@ -175,7 +179,8 @@ impl Stage for Coverage {
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let expected_units = source_blocks.keys().cloned().collect();
         let evidence = generate_evidence(ctx)?;
-        let (evidence, observations) = validate_evidence(evidence, &expected_units)?;
+        let (evidence, observations) =
+            validate_evidence(evidence, &expected_units, &ctx.source, &ctx.target)?;
         let observation = persist_observations(ctx, &observations)?;
         let _ = std::fs::remove_file(ctx.output.join("coverage-evidence.json"));
 
@@ -622,7 +627,8 @@ fn revisit(
         Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
     let expected_units = source_blocks.keys().cloned().collect();
     let evidence = generate_evidence(ctx)?;
-    let (evidence, observations) = validate_evidence(evidence, &expected_units)?;
+    let (evidence, observations) =
+        validate_evidence(evidence, &expected_units, &ctx.source, &ctx.target)?;
     let observation = persist_observations(ctx, &observations)?;
     let _ = std::fs::remove_file(ctx.output.join("coverage-evidence.json"));
     let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
@@ -1447,7 +1453,8 @@ mod tests {
             0x8000_0200,
         )])]);
         evidence.identifications.schema += 1;
-        let error = validate_evidence(evidence, &BTreeSet::from(["a.cpp".into()])).unwrap_err();
+        let error = validate_evidence(evidence, &BTreeSet::from(["a.cpp".into()]), "NTSC", "PAL")
+            .unwrap_err();
         assert!(error.to_string().contains("identification schema"), "{error}");
     }
 
@@ -1459,8 +1466,34 @@ mod tests {
             0x8000_0200,
         )])]);
         evidence.identifications.units.clear();
-        let error = validate_evidence(evidence, &BTreeSet::from(["a.cpp".into()])).unwrap_err();
+        let error = validate_evidence(evidence, &BTreeSet::from(["a.cpp".into()]), "NTSC", "PAL")
+            .unwrap_err();
         assert!(error.to_string().contains("exactly the source split units"), "{error}");
+    }
+
+    #[test]
+    fn workspace_config_paths_are_canonicalized_to_run_version_ids() {
+        let mut evidence = evidence_report("source-config", "target-config", vec![unit(
+            "a.cpp",
+            vec![anchor("A", 0x8000_0100, 0x8000_0200)],
+        )]);
+        evidence.source = r"C:\run\coverage\baseline\config\GM8E01_00\config.yml".into();
+        evidence.target = r"C:\run\coverage\baseline\config\GM8P01_00\config.yml".into();
+        evidence.identifications.source = evidence.source.clone();
+        evidence.identifications.target = evidence.target.clone();
+
+        let (canonical, observations) = validate_evidence(
+            evidence,
+            &BTreeSet::from(["a.cpp".into()]),
+            "GM8E01_00",
+            "GM8P01_00",
+        )
+        .unwrap();
+
+        assert_eq!(canonical.identifications.source, "GM8E01_00");
+        assert_eq!(canonical.identifications.target, "GM8P01_00");
+        assert_eq!(observations.report().source, "GM8E01_00");
+        assert_eq!(observations.report().target, "GM8P01_00");
     }
 
     fn revision(original: (u32, u32), revised: (u32, u32)) -> OwnerRevision {

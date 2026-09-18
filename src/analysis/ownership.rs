@@ -200,6 +200,27 @@ impl OwnershipAssessment {
 }
 
 impl ObservationIndex {
+    /// Validate an identification report against the coverage report that
+    /// carried it, then bind the persisted artifact to the migration's stable
+    /// version ids. Match targets are named by their config paths, which are
+    /// workspace-specific and must not become the identity workers compare
+    /// after preparation moves into a different workspace.
+    pub fn load_enclosed_for_run(
+        mut report: IdentificationReport,
+        enclosing_source: &str,
+        enclosing_target: &str,
+        run_source: &str,
+        run_target: &str,
+        expected_units: &BTreeSet<String>,
+    ) -> Result<Self> {
+        if report.source != enclosing_source || report.target != enclosing_target {
+            bail!("Coverage identification source/target does not match its enclosing evidence");
+        }
+        report.source = run_source.to_string();
+        report.target = run_target.to_string();
+        Self::load(report, run_source, run_target, expected_units)
+    }
+
     pub fn load_self_contained(
         report: IdentificationReport,
         source: &str,

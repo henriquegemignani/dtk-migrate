@@ -387,8 +387,14 @@ impl Stage for Discover {
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let evidence: CoverageReport = serde_json::from_slice(&std::fs::read(&coverage_path)?)?;
         let expected: BTreeSet<String> = source_blocks.keys().cloned().collect();
-        let observations =
-            ObservationIndex::load(evidence.identifications, &ctx.source, &ctx.target, &expected)?;
+        let observations = ObservationIndex::load_enclosed_for_run(
+            evidence.identifications,
+            &evidence.source,
+            &evidence.target,
+            &ctx.source,
+            &ctx.target,
+            &expected,
+        )?;
         let observation = observations.persist(&ctx.output)?;
         let _ = std::fs::remove_file(&coverage_path);
 
