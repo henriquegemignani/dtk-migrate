@@ -1,6 +1,34 @@
 # Plan: recover PAL translation units from historical NTSC evidence
 
-Status: implementation plan, based on code at `086fddb65057c2dc844d1a774e81dcc2c04a7d12`. No algorithm changes are included in this document.
+Status: living implementation plan. Change A landed through `0a351d2`; Change B landed at
+`c6e0039`. The remaining plan below is based on the architecture after those changes.
+
+## Implementation checkpoint after Change B
+
+The objective, safety constraints and completion criteria still fit. Change B did, however, move
+more groundwork into the observation layer than the original delivery order assumed:
+
+- `IdentificationReport` is now the canonical function-attribution and TU-identification record.
+  Change C must validate and index this report rather than derive a second attribution model from
+  `MatchResult`, `CoverageUnit` or `TargetFunction`.
+- Candidate sequences already carry section-local envelopes, target interiors and preliminary edge
+  evidence. Change D should refine those records into address-bearing boundary hypotheses rather
+  than introduce a parallel sequence model.
+- The atomic transaction substrate from Change E should land after C and before D enables any new
+  ownership-changing rule. Boundary inference can be developed diagnostically first, but accepted
+  compositions should not be added to the legacy `Alternative`/`OwnerRevision` representation only
+  to be rewritten immediately afterward.
+- Transaction identity, before-state preconditions and stale-state regeneration belong to E. Change
+  I then uses that identity for dependency-aware retry, diagnostics and caching.
+- Known function attribution keeps a required source function and unit. Target-only helper/orphan
+  evidence in G should use a separate deterministic cluster type rather than making every known
+  attribution optional.
+
+The full historical identification report is currently about 38 MB and the coverage report about
+58 MB. G will add more helper and object evidence, so C should store the immutable observation
+report once as a content-addressed run artifact. Prepared state, summaries and proposals should
+refer to its digest and carry only the unit-local slice needed for a trial. Standalone
+`match --identifications` output remains self-contained.
 
 ## Objective and measured starting point
 
@@ -94,7 +122,17 @@ Keep identification, boundary certainty, and application state as independent fi
 
 **Files:** new `src/analysis/ownership.rs`, `src/analysis/matching.rs`, `src/analysis/coverage.rs`, `src/stages/coverage/alternatives.rs`, `src/stages/coverage/mod.rs`, `src/analysis/unit_matching.rs`, `src/stages/discover.rs`.
 
-Build a target-address attribution index from the full `MatchResult`, not just a candidate's selected functions. Today `TargetFunction` records current ownership but not which other source TU its function matches. Consequently an otherwise plausible bounded sequence can swallow foreign functions in the uncovered portion of its gap.
+Build a validated target-address attribution index from the complete `IdentificationReport`, not
+just a candidate's selected functions. Key it by module, section and address, and keep attribution
+IDs as the provenance carried into later boundary and transaction records. `TargetFunction` still
+records current ownership but is not a second source of identity. Consequently an otherwise
+plausible bounded sequence can no longer swallow foreign functions in the uncovered portion of its
+gap.
+
+Recompute aggregate counts, confidence, basis, candidate membership and edge references from the
+underlying typed attributions when loading evidence. Referential integrity alone is insufficient:
+serialized `eligible`, `independent`, count and confidence fields are diagnostics, not authority.
+Store the validated immutable report once in the run and bind every derived proposal to its digest.
 
 For every candidate, validate the full resulting range set and classify each covered function or interval as independently attributed to this TU, a supported helper, a conflicting attribution, padding, or unresolved. Distinguish problems already present in a retained block from newly introduced claims. A pre-existing questionable block must not prevent reporting a safe independent extension, but it prevents claiming complete certification of that body.
 
@@ -114,19 +152,33 @@ Change ranking so complete corroborated membership, supported edges and absence 
 
 Replace the assumption that a boundary sequence owns the entire current-neighbour gap. Preserve that gap as a search window. Derive member sequences and candidate left/right edges from matched function extents, exact/layout groups, independently identified neighbours, relocations and supported helpers.
 
-Represent each edge with its address, evidence references, competing addresses and dependence on current ownership. Compose a left edge from one evidence family and a right edge from another only when they describe the same unit/module/section, have compatible member sequences, and pass the full interior-attribution check. Reject compositions that span an unrelated island. Inference must support `.init` as well as `.text`; remove current `.text` restrictions only when the same checks operate on section-local members.
+Extend the existing `CandidateSequence`/`EdgeEvidence` observations into boundary hypotheses. Each
+edge needs its address, evidence references, competing addresses and dependence on current
+ownership. Compose a left edge from one evidence family and a right edge from another only when
+they describe the same unit/module/section, have compatible member sequences, and pass the full
+interior-attribution check. Reject compositions that span an unrelated island. Inference must
+support `.init` as well as `.text`; remove current `.text` restrictions only when the same checks
+operate on section-local members.
 
 Platform is the concrete composition case: layout evidence supplies start `0x800AA344`, while sequence evidence supplies end `0x800AD964`. Keep both original alternatives for diagnosis, but offer the corroborated composition ahead of incomplete choices once its interior and edges pass.
 
 Add a complete-sequence policy route that does not require 512 aligned bytes. Require known extents, an unambiguous ordered pairing, independently supported edges, no unexplained interior function or foreign claim, and corroboration not based solely on weak functions. Account for version-specific inserted/deleted functions explicitly; matching all source members alone does not mean every target member has been explained.
 
-The first enabled small-sequence case should be Group: six of six members, full target coverage, four exact anchors. Do not lower the global minimum to make BlockInstruction or three-function text classes pass. Their stale edges, generated helpers, or missing independent evidence require the corresponding mechanisms below. Likewise TransitionDatabase's 24/24 name-heavy alignment is an identification success, but automatic ownership should wait for independent call/relocation/vtable or object corroboration and accounting for its extra target functions.
+The first enabled small-sequence case should be Group: six of six members, full target coverage,
+four independently supported members. Its current observation still has unresolved adjacent edges
+and a helper, so the rule must show how the complete sequence resolves those facts rather than
+ignoring their blockers. Do not lower the global minimum to make BlockInstruction or three-function
+text classes pass. Their stale edges, generated helpers, or missing independent evidence require the
+corresponding mechanisms below. TransitionDatabase's 24/24 alignment is currently a tentative,
+name-and-helper-heavy hypothesis: it has binary evidence but no independently supported non-helper
+member. Automatic ownership must wait for independent call/relocation/vtable or object
+corroboration and accounting for its extra target functions.
 
 Move policy constants into one shared policy module used by generation and validation. `current_policy()` centralizes report construction, but `alternatives.rs` still duplicates thresholds and `matched_sequence()` mainly checks structure after trusting `eligible`. Validate serialized evidence against the same declared policy without trusting its summary booleans or counts.
 
 **Tests and acceptance:** recover Group's full range; create Platform's exact composed range; do not bridge an unrelated gap; refuse a complete but ambiguous sequence; preserve secondary code sections; a full source sequence with unexplained target functions remains unresolved. Run all existing calibration scenarios before enabling the rule.
 
-## 5. Solve neighbouring TUs and apply coupled changes atomically
+## 5. Introduce atomic ownership transactions, then solve neighbouring TUs
 
 **Files:** new `src/analysis/unit_runs.rs`, `src/analysis/unit_matching.rs`, `src/analysis/coverage.rs`, `src/stages/coverage/alternatives.rs`, `src/stages/coverage/mod.rs`, `src/stages/mod.rs`, `src/run/mod.rs`, `src/run/jobs.rs`, `src/run/publish.rs`, `src/project/link_order.rs`.
 
@@ -141,11 +193,25 @@ Construct candidate cuts at function boundaries and supported alignment padding.
 
 Bound the search by candidate cuts, competing hypotheses and work budget, and report exhaustion. Do not hard-code three-unit runs. Reuse `unit_matching.rs` grouping/attribution where it is valid rather than maintaining two inconsistent models. Source order is a hypothesis that can be interrupted by independently proven reordered units; do not force cross-version order through a contradictory anchor.
 
-Introduce a typed ownership transaction containing all affected unit bodies, exact before-state preconditions, evidence references, transfers and expected read/write sets. Preserve unmodified ranges and split attributes. Existing `OwnerRevision` supports only narrowing one contiguous section; it is insufficient for general swaps, multiple ranges, or simultaneous extensions. Generalize through one shared atomic apply function used by calibration, trials and publication. Construct and validate the changed map before committing it so errors never leave partial mutations.
+Introduce this typed ownership transaction before enabling Change D's new composition rule. It
+contains all affected unit bodies, exact before-state preconditions, evidence references, transfers,
+expected read/write sets and the digest of the observation/policy state that produced it. Preserve
+unmodified ranges and split attributes. Existing `OwnerRevision` supports only narrowing one
+contiguous section; it is insufficient for general swaps, multiple ranges, or simultaneous
+extensions. Generalize through one shared atomic apply function used by calibration, trials and
+publication. Construct and validate the changed map before committing it so errors never leave
+partial mutations.
 
 Validate that transferred intervals have a justified receiver, unrelated ownership is preserved, code/data ranges do not overlap, and link order remains acyclic. Allow a correction with zero net byte gain or a justified shrink; `complete()` currently drops anything without positive growth. Growth stays a metric, not eligibility.
 
-Give a transaction its own stable ID and explicit member list. One multi-owner transaction is one worker job item, never several independently accepted unit candidates. Schedule transactions with overlapping read/write sets in a conflict component; trial dependent changes together. At integration, stale before-state preconditions trigger regeneration, not silent application. Expand final reporting back to per-unit effects while retaining the transaction identity. A group may mutate only permitted units: if `--only` excludes a required neighbour, report the dependency and refuse that mutation.
+Give a transaction its own stable ID over its canonical full after-state, exact before-state,
+required extracts, evidence digest, policy digest and explicit member list. One multi-owner
+transaction is one worker job item, never several independently accepted unit candidates. Schedule
+transactions with overlapping read/write sets in a conflict component; trial dependent changes
+together. At integration, stale before-state preconditions trigger regeneration, not silent
+application. Expand final reporting back to per-unit effects while retaining the transaction
+identity. A group may mutate only permitted units: if `--only` excludes a required neighbour,
+report the dependency and refuse that mutation.
 
 **Tests and acceptance:** recover Sound/Platform jointly; represent the Pane/Slider and Group/Head/Light problems as coupled hypotheses; a conflict cannot depend on worker completion order; a failed group restores every file and owner; equal-size boundary correction is offered; full coordinator tests cover group acceptance, later refinement, publication, interruption/resume and `--only` constraints.
 
@@ -161,7 +227,12 @@ Add compiled source objects as an optional second channel using the existing obj
 
 A mismatching object is still useful member evidence. Compiler flags or source differences may change emitted order and helper presence, so object agreement corroborates identity; disagreement does not erase independently supported binary identification. Cache by object digest, target binary digest and policy, and record compiler/configuration provenance. Missing objects should yield an unavailable evidence channel, not a failed identification run.
 
-When a cluster has no baseline source TU, emit a deterministic unresolved cluster ID and supported type/symbol clues. Do not invent a filename or assign the cluster to its nearest represented neighbour. `CTimeRemainderAndFraction.cpp` was introduced later; success at the historical baseline is detecting and bounding its separate cluster, not predicting that exact future path. A later explicit user mapping or independently grounded unit identity can resolve it.
+When a cluster has no baseline source TU, emit a separate `UnresolvedTargetCluster` (or equivalent)
+with a deterministic ID and supported type/symbol clues. Do not weaken `FunctionAttribution` by
+making its known source optional, invent a filename or assign the cluster to its nearest represented
+neighbour. `CTimeRemainderAndFraction.cpp` was introduced later; success at the historical baseline
+is detecting and bounding its separate cluster, not predicting that exact future path. A later
+explicit user mapping or independently grounded unit identity can resolve it.
 
 **Tests and acceptance:** compiler-generated text-instruction tails are represented as helper hypotheses; small widget type-ID functions get ownership through supporting unit evidence; duplicate helper definitions remain ambiguous when linker ownership is unproven; the CTime cluster is not swallowed by FrameDelayedKiller; binary-only mode still identifies supported units when every compiled object is removed.
 
@@ -191,13 +262,16 @@ Use structured refusal kinds: conflicting attribution, illegal split, link-order
 
 Do not assume Pane's earlier undefined animation symbols prove an unrelated failure. Reproduce its oracle-exact proposal on the untouched historical baseline and compare the failed command inputs to determine whether it is an interaction, hidden split dependency, or tooling problem. Keep it classified as identified/proposed but application-refused until measured.
 
-Key retry decisions by transaction identity plus relevant ownership/evidence/dependency state, not only candidate name or alternative range ID. The current ID is created before completion and omits the resulting full body; include canonical full after-state, before-state preconditions, required extracts and evidence/policy digests. Permit a retry after a relevant neighbour or dependency changes, and suppress identical repeated work on an unchanged state. Do not invalidate all retries for unrelated workspace edits.
+Key retry decisions by the transaction identity introduced in E plus relevant dependency state, not
+only candidate name or alternative range ID. Permit a retry after a relevant neighbour or dependency
+changes, and suppress identical repeated work on an unchanged state. Do not invalidate all retries
+for unrelated workspace edits.
 
 Retain coordinator-only rediscovery. Report attempted, skipped-as-unchanged, regenerated and budget-exhausted counts separately. Reuse binary/function matching when only ownership changes; invalidate ownership-derived windows and proposal construction without recomputing immutable fingerprints. Optimize after correctness tests exist.
 
 **Tests and acceptance:** failures in adjacent trials cannot borrow each other's diagnostics; the same proposal is retried after a relevant dependency repair; an unrelated change does not cause a retry; no-candidate and all-refused baseline runs still succeed; the A → B → A cascade still publishes and resumes correctly.
 
-## 9. Compatibility, reporting and documentation
+## 9. Compatibility, reporting and documentation (continuous)
 
 **Files:** `src/analysis/coverage.rs` and shared policy module, `src/stages/coverage/mod.rs`, `src/run/mod.rs`, `src/analysis/coverage_fixture.rs`, `tests/cascade.rs`, `README.md`, `docs/coverage.md`, `docs/runs.md`, `docs/prime.md`.
 
@@ -214,16 +288,20 @@ Each change should be reviewable and tested locally. The plan does not require o
 | Change | Deliverable | Dependencies |
 |---|---|---|
 | A | Shared scoring, immutable historical manifest, regression fixtures | None |
-| B | Typed attribution, source-independent identification output, diagnostic failures | A |
+| B | Typed attribution, source-independent identification output, persisted blockers | A |
 | C | Full-range conflict validation, provenance, safe ranking and fallback validation | B |
-| D | Independent edges, composition, conservative small complete-sequence rule | C |
-| E | Atomic ownership transaction and coordinator/publication integration | A–C |
+| E | Atomic ownership transaction, identity and coordinator/publication integration | A–C |
+| D | Independent edges, composition, conservative small complete-sequence rule | C, E before enabling policy |
 | F | Joint run inference using atomic transactions | D, E |
 | G | Binary helper families, optional object corroboration, orphan clusters | B–D; E for transfers |
 | H | Data range recovery and scoped cross-stage certificates | E, G |
 | I | Dependency-aware retries, caching and final full validation | E–H |
 
-Schema and documentation changes accompany the change that needs them. B's reporting and failure diagnostics can be separate small commits. C should land before any recall-expanding rule. G can be developed independently of the joint solver once the attribution model is stable, but no delegation is required by this plan.
+Schema and documentation changes accompany the change that needs them. B's identification blocker
+reporting is complete; structured command/build failure diagnostics remain in I. C should land
+before any recall-expanding rule. Boundary hypotheses from D may be developed before E, but no new
+ownership-changing policy should be enabled until transactions are in place. G can be developed
+independently of the joint solver once the attribution model is stable.
 
 ## Validation and completion criteria
 
