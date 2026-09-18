@@ -1,7 +1,45 @@
 # Plan: recover PAL translation units from historical NTSC evidence
 
 Status: living implementation plan. Change A landed through `0a351d2`; Change B landed at
-`c6e0039`. The remaining plan below is based on the architecture after those changes.
+`c6e0039`; Change C landed at `beb8e2d`. The remaining plan below is based on the architecture
+after those changes.
+
+## Implementation checkpoint after Change C
+
+The ownership safety layer now exists at the boundary between observations and mutations:
+
+- Identification schema 2 carries complete source and target function inventories plus raw facts
+  needed to recompute attribution tier, ambiguity, independence, unit aggregates, candidate
+  membership and edge support. Coverage schema 11 / policy 10 no longer treats serialized
+  `eligible`, aggregate count, confidence or ownership fields as authority.
+- `ObservationIndex` validates and canonicalizes the report, indexes target functions by
+  module/section/address, records current target ownership as a constraint, and persists one
+  content-addressed report. Proposals and summaries bind to its digest instead of embedding the
+  roughly 38 MB report repeatedly.
+- Coverage and discovery classify every function and padding interval in the complete proposed
+  body. New foreign, shared-helper, unresolved or partial-function claims are refused; questionable
+  ground already retained remains visible without blocking an otherwise safe extension. Every
+  fallback is certified, and the certificate is recomputed against the exact pre-trial state and
+  exact published state.
+- Candidate order is evidence-first: complete membership, supported edges, independent members
+  and less padding precede bytes gained. Range size is only a tie-breaker.
+
+The Prime `GM8E01_00` to `GM8P01_00` calibration was rerun across all five scenarios. No selected
+proposal had a wrong boundary, claimed a known foreign byte or caused a revised-owner loss. In the
+truncated-split scenario all 77 calibration offers and all 82 held-out offers recovered their exact
+body with zero missed bytes. Misplaced-helper remained entirely not-offered, which is the expected
+result until helper ownership is implemented. The only named error remains the pre-existing
+`MetroidPrime/ScriptLoader.cpp` false fragment in the held-out `everything` and
+`consecutive-units` populations; it survives only as a rejected alternative/anchor, not as a
+selected boundary.
+
+The long-term plan still fits, with **Change E next**. C deliberately retained the legacy
+single-unit `Alternative` and narrowing-only `OwnerRevision`; they cannot represent safe swaps,
+multi-range transfers, zero-growth corrections or coupled Platform/Sound work. E should introduce
+the typed atomic transaction and exact multi-owner preconditions before D enables new composed
+boundaries. D can then consume C's canonical member and edge records instead of creating another
+ownership model. The total abstention on misplaced helpers confirms that G remains necessary; it
+should resolve emitted helper ownership rather than weaken C's gate.
 
 ## Implementation checkpoint after Change B
 
@@ -298,8 +336,9 @@ Each change should be reviewable and tested locally. The plan does not require o
 | I | Dependency-aware retries, caching and final full validation | E–H |
 
 Schema and documentation changes accompany the change that needs them. B's identification blocker
-reporting is complete; structured command/build failure diagnostics remain in I. C should land
-before any recall-expanding rule. Boundary hypotheses from D may be developed before E, but no new
+reporting is complete; structured command/build failure diagnostics remain in I. C's safety gate
+is now in place before any recall-expanding rule. Boundary hypotheses from D may be developed
+before E, but no new
 ownership-changing policy should be enabled until transactions are in place. G can be developed
 independently of the joint solver once the attribution model is stable.
 
