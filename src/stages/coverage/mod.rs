@@ -23,7 +23,13 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    analysis::coverage::{CoverageReport, CoverageUnit, RequiredExtract},
+    analysis::{
+        coverage::{CoverageReport, CoverageUnit, RequiredExtract},
+        ownership::{
+            IDENTIFICATION_SCHEMA, IdentificationConfidence, IdentificationReport,
+            UnitIdentification,
+        },
+    },
     build::context::{BuildContext, ValidationError, is_trial_failure},
     project::{
         audit::{self, Stunted},
@@ -40,10 +46,92 @@ use crate::{
 pub struct Coverage;
 
 /// The evidence schema this stage understands.
-pub const EVIDENCE_SCHEMA: u32 = 9;
+pub const EVIDENCE_SCHEMA: u32 = 10;
 pub const POLICY_VERSION: u32 = 9;
 
 const VALIDATION: &str = "unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-required-extracts-and-extracted-link-inputs-and-retail-bytes";
+
+fn validate_evidence(evidence: &CoverageReport) -> Result<()> {
+    if evidence.schema != EVIDENCE_SCHEMA || evidence.policy.version != POLICY_VERSION {
+        bail!(
+            "Coverage evidence is schema {} policy {}, and this stage understands {EVIDENCE_SCHEMA}/{POLICY_VERSION}",
+            evidence.schema,
+            evidence.policy.version
+        );
+    }
+    if evidence.identifications.schema != IDENTIFICATION_SCHEMA {
+        bail!(
+            "Coverage evidence has identification schema {}, and this stage understands {IDENTIFICATION_SCHEMA}",
+            evidence.identifications.schema
+        );
+    }
+    if evidence.identifications.source != evidence.source
+        || evidence.identifications.target != evidence.target
+    {
+        bail!("Coverage identification source/target does not match its enclosing evidence");
+    }
+
+    let source_units: BTreeSet<&str> =
+        evidence.source_units.iter().map(|unit| unit.name.as_str()).collect();
+    let identification_units: BTreeSet<&str> =
+        evidence.identifications.units.iter().map(|unit| unit.unit.as_str()).collect();
+    if source_units.len() != evidence.source_units.len()
+        || identification_units.len() != evidence.identifications.units.len()
+    {
+        bail!("Coverage evidence has duplicate source or identification unit records");
+    }
+    if source_units != identification_units {
+        bail!("Coverage identification inventory does not cover exactly the source split units");
+    }
+
+    let attribution_units: BTreeMap<&str, &str> = evidence
+        .identifications
+        .attributions
+        .iter()
+        .map(|item| (item.id.as_str(), item.source.unit.as_str()))
+        .collect();
+    if attribution_units.len() != evidence.identifications.attributions.len() {
+        bail!("Coverage evidence has duplicate function attribution ids");
+    }
+    if attribution_units.values().any(|unit| !source_units.contains(unit)) {
+        bail!("Coverage evidence attributes a function to an unknown source unit");
+    }
+    for unit in &evidence.identifications.units {
+        for id in unit
+            .evidence
+            .iter()
+            .chain(&unit.unresolved_helpers)
+            .chain(unit.candidates.iter().flat_map(|candidate| &candidate.attribution_ids))
+        {
+            match attribution_units.get(id.as_str()) {
+                None => {
+                    bail!("Identification for {} refers to unknown attribution {id}", unit.unit)
+                }
+                Some(owner) if *owner != unit.unit => bail!(
+                    "Identification for {} refers to attribution {id} owned by {owner}",
+                    unit.unit
+                ),
+                Some(_) => {}
+            }
+        }
+        for id in unit.candidates.iter().flat_map(|candidate| {
+            [
+                candidate.left_target_edge.adjacent_attribution_id.as_ref(),
+                candidate.right_target_edge.adjacent_attribution_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+        }) {
+            if !attribution_units.contains_key(id.as_str()) {
+                bail!(
+                    "Identification for {} refers to unknown adjacent attribution {id}",
+                    unit.unit
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 /// What a coverage candidate offers, carried from preparation into the trial.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +140,9 @@ pub struct Proposal {
     pub source_code_bytes: u64,
     #[serde(default)]
     pub required_extracts: Vec<RequiredExtract>,
+    /// The observation that led to this proposal. It survives a trial refusal,
+    /// independently of the alternative that happened to be attempted.
+    pub identification: UnitIdentification,
     pub alternatives: Vec<Alternative>,
 }
 
@@ -76,6 +167,9 @@ pub struct Inventory {
     pub baseline_bytes: BTreeMap<String, u32>,
     /// Every unit and why it did or did not produce a candidate.
     pub dispositions: BTreeMap<String, String>,
+    /// Complete observation inventory, including units excluded by policy,
+    /// `--only`, existing ownership or build availability.
+    pub identifications: IdentificationReport,
 }
 
 impl Stage for Coverage {
@@ -86,13 +180,7 @@ impl Stage for Coverage {
         let baseline = ctx.build(None)?;
 
         let evidence = generate_evidence(ctx)?;
-        if evidence.schema != EVIDENCE_SCHEMA || evidence.policy.version != POLICY_VERSION {
-            bail!(
-                "Coverage evidence is schema {} policy {}, and this stage understands {EVIDENCE_SCHEMA}/{POLICY_VERSION}",
-                evidence.schema,
-                evidence.policy.version
-            );
-        }
+        validate_evidence(&evidence)?;
 
         let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
         let source_blocks =
@@ -103,6 +191,12 @@ impl Stage for Coverage {
             evidence.source_units.iter().filter(|unit| !unit.autogenerated).collect();
         let by_name: BTreeMap<String, &CoverageUnit> =
             source_units.iter().map(|unit| (unit.name.clone(), *unit)).collect();
+        let identification_by_name: BTreeMap<&str, &UnitIdentification> = evidence
+            .identifications
+            .units
+            .iter()
+            .map(|identification| (identification.unit.as_str(), identification))
+            .collect();
         let missing: Vec<&&CoverageUnit> =
             source_units.iter().filter(|unit| !target_blocks.contains_key(&unit.name)).collect();
 
@@ -130,6 +224,10 @@ impl Stage for Coverage {
                 policy_version: POLICY_VERSION,
                 source_code_bytes: unit.code_bytes,
                 required_extracts: unit.required_extracts.clone(),
+                identification: (*identification_by_name.get(unit.name.as_str()).with_context(
+                    || format!("Coverage evidence has no identification for {}", unit.name),
+                )?)
+                .clone(),
                 alternatives: found,
             };
             candidates.push((
@@ -160,6 +258,7 @@ impl Stage for Coverage {
                 .map(|(name, lines)| (name.clone(), body_bytes(lines)))
                 .collect(),
             dispositions,
+            identifications: evidence.identifications.clone(),
         };
 
         // Audited, not evaluated: a unit that already owns a range counts as
@@ -466,6 +565,12 @@ fn revisit(
         .filter(|unit| !unit.autogenerated)
         .map(|unit| (unit.name.clone(), unit))
         .collect();
+    let identification_by_name: BTreeMap<&str, &UnitIdentification> = evidence
+        .identifications
+        .units
+        .iter()
+        .map(|identification| (identification.unit.as_str(), identification))
+        .collect();
 
     let mut next = Vec::new();
     for (name, unit) in &by_name {
@@ -483,6 +588,10 @@ fn revisit(
             policy_version: POLICY_VERSION,
             source_code_bytes: unit.code_bytes,
             required_extracts: unit.required_extracts.clone(),
+            identification: (*identification_by_name
+                .get(name.as_str())
+                .with_context(|| format!("Coverage evidence has no identification for {name}"))?)
+            .clone(),
             alternatives: found,
         };
         next.push(Candidate { name: name.clone(), evidence: serde_json::to_value(proposal)? });
@@ -938,6 +1047,7 @@ pub struct Summary {
     pub newly_assigned_code_bytes: u32,
     pub selected: BTreeMap<String, Alternative>,
     pub dispositions: BTreeMap<String, String>,
+    pub identifications: IdentificationReport,
     pub events: Vec<Event>,
     pub metrics: Metrics,
     pub measures: Measures,
@@ -1065,6 +1175,7 @@ pub fn summarize(prepared: &Prepared, result: &crate::run::StageResult) -> Resul
         },
         selected,
         dispositions,
+        identifications: inventory.identifications,
         events: result.events.clone(),
         measures: result.final_measures.clone(),
         stunted_splits: stunted,
@@ -1110,9 +1221,36 @@ pub fn markdown(value: &Summary) -> String {
         ),
         "| Newly verified source-linked code bytes | 0 | 0 |".to_string(),
         String::new(),
-        "## Selected ranges".to_string(),
-        String::new(),
     ];
+    lines.push("## Translation-unit identifications".to_string());
+    lines.push(String::new());
+    lines.push(
+        "Identification is reported independently of boundary certainty and application. A build \
+         refusal does not erase the binary observation."
+            .to_string(),
+    );
+    lines.push(String::new());
+    lines.push(
+        "| TU | Kind | Identity | Basis | Members | Boundary blockers | Application blockers |"
+            .into(),
+    );
+    lines.push("|---|---|---|---|---:|---|---|".into());
+    for identification in &value.identifications.units {
+        lines.push(format!(
+            "| `{}` | {} | `{}` | `{}` | {}/{} | {} | {} |",
+            markdown_cell(&identification.unit),
+            if identification.autogenerated { "autogenerated" } else { "source" },
+            identification_confidence(identification.confidence),
+            identification_basis(identification.basis),
+            identification.matched_functions,
+            identification.source_functions,
+            blockers(&identification.boundary_blockers),
+            blockers(&identification.application_blockers),
+        ));
+    }
+    lines.push(String::new());
+    lines.push("## Selected ranges".to_string());
+    lines.push(String::new());
     if value.selected.is_empty() {
         lines.push("No range passed the coverage gates.".to_string());
     } else {
@@ -1146,6 +1284,35 @@ pub fn markdown(value: &Summary) -> String {
     lines.extend(stunted_section(&value.stunted_splits));
     lines.join("\n") + "\n"
 }
+
+fn identification_confidence(value: IdentificationConfidence) -> &'static str {
+    match value {
+        IdentificationConfidence::Absent => "absent",
+        IdentificationConfidence::Tentative => "tentative",
+        IdentificationConfidence::Corroborated => "corroborated",
+        IdentificationConfidence::Ambiguous => "ambiguous",
+    }
+}
+
+fn identification_basis(value: crate::analysis::ownership::IdentificationBasis) -> &'static str {
+    use crate::analysis::ownership::IdentificationBasis;
+    match value {
+        IdentificationBasis::None => "none",
+        IdentificationBasis::NamesOnly => "names-only",
+        IdentificationBasis::Binary => "binary",
+        IdentificationBasis::Mixed => "mixed",
+    }
+}
+
+fn blockers(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".into()
+    } else {
+        values.iter().map(|value| markdown_cell(value)).collect::<Vec<_>>().join("<br>")
+    }
+}
+
+fn markdown_cell(value: &str) -> String { value.replace('|', "\\|").replace(['\r', '\n'], " ") }
 
 /// Reports units whose existing range is too small to be the whole unit.
 ///
@@ -1192,6 +1359,7 @@ fn stunted_section(stunted: &[Stunted]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{alternatives::format_address, *};
+    use crate::analysis::coverage_fixture::{anchor, report as evidence_report, unit};
 
     fn blocks(entries: &[(&str, u32, u32)]) -> IndexMap<String, Vec<String>> {
         let mut map: IndexMap<String, Vec<String>> = IndexMap::new();
@@ -1201,6 +1369,30 @@ mod tests {
                 .push(format!("\t{:11} start:0x{start:08X} end:0x{end:08X}", ".text"));
         }
         map
+    }
+
+    #[test]
+    fn evidence_rejects_an_incompatible_identification_schema() {
+        let mut evidence = evidence_report("NTSC", "PAL", vec![unit("a.cpp", vec![anchor(
+            "A",
+            0x8000_0100,
+            0x8000_0200,
+        )])]);
+        evidence.identifications.schema += 1;
+        let error = validate_evidence(&evidence).unwrap_err();
+        assert!(error.to_string().contains("identification schema"), "{error}");
+    }
+
+    #[test]
+    fn evidence_requires_identification_for_every_source_unit() {
+        let mut evidence = evidence_report("NTSC", "PAL", vec![unit("a.cpp", vec![anchor(
+            "A",
+            0x8000_0100,
+            0x8000_0200,
+        )])]);
+        evidence.identifications.units.clear();
+        let error = validate_evidence(&evidence).unwrap_err();
+        assert!(error.to_string().contains("exactly the source split units"), "{error}");
     }
 
     fn revision(original: (u32, u32), revised: (u32, u32)) -> OwnerRevision {
@@ -1456,9 +1648,55 @@ mod tests {
             policy_version: POLICY_VERSION,
             source_code_bytes: 0x1000,
             required_extracts: Vec::new(),
+            identification: UnitIdentification::absent(name, 0),
             alternatives: vec![alternative.clone()],
         };
         Candidate { name: name.into(), evidence: serde_json::to_value(proposal).unwrap() }
+    }
+
+    fn function_attribution(
+        id: &str,
+        unit: &str,
+    ) -> crate::analysis::ownership::FunctionAttribution {
+        use crate::analysis::{
+            matching::{MatchMethod, MatchTier},
+            ownership::{AttributionOrigin, EvidenceReference, FunctionLocation, SourceFunction},
+        };
+
+        crate::analysis::ownership::FunctionAttribution {
+            id: id.into(),
+            target: FunctionLocation {
+                module: "main".into(),
+                section: ".text".into(),
+                address: "0x80000100".into(),
+                end: "0x80000200".into(),
+            },
+            source: SourceFunction {
+                name: "A".into(),
+                unit: unit.into(),
+                module: "main".into(),
+                section: ".text".into(),
+                address: "0x80000100".into(),
+                end: "0x80000200".into(),
+            },
+            method: MatchMethod::ExactHash,
+            tier: MatchTier::Confident,
+            confidence: 1.0,
+            evidence_count: 1,
+            origin: AttributionOrigin::NormalizedBody,
+            binary_supported: true,
+            independent: true,
+            ambiguous: false,
+            competing: None,
+            source_weak: false,
+            target_weak: false,
+            template_instantiation: false,
+            current_target_owner: None,
+            evidence: vec![EvidenceReference {
+                kind: "exact-hash".into(),
+                detail: "test evidence".into(),
+            }],
+        }
     }
 
     fn stage_result(accepted: Vec<Candidate>, selections: Selections) -> crate::run::StageResult {
@@ -1507,6 +1745,7 @@ mod tests {
             refinements: 0,
             baseline_bytes: held.iter().map(|(n, b)| ((*n).to_string(), *b)).collect(),
             dispositions: BTreeMap::new(),
+            identifications: IdentificationReport::empty("NTSC", "PAL"),
         }
     }
 
@@ -1539,6 +1778,60 @@ mod tests {
         )
         .unwrap();
         assert!(looked_up_by_name.selected.is_empty());
+    }
+
+    #[test]
+    fn a_build_refusal_retains_the_boundary_and_identification() {
+        let alternative =
+            body(".text", 0x8000_0100, 0x8000_0300, vec![line(".text", 0x8000_0100, 0x8000_0300)]);
+        let mut identification = UnitIdentification::absent("a.cpp", 2);
+        identification.confidence = IdentificationConfidence::Corroborated;
+        identification.binary_functions = 2;
+        identification.independently_supported_functions = 2;
+        identification.boundary_blockers.clear();
+        let proposal = Proposal {
+            policy_version: POLICY_VERSION,
+            source_code_bytes: 0x200,
+            required_extracts: Vec::new(),
+            identification,
+            alternatives: vec![alternative.clone()],
+        };
+        let candidate =
+            Candidate { name: "a.cpp".into(), evidence: serde_json::to_value(proposal).unwrap() };
+        let mut result = stage_result(Vec::new(), Selections::new());
+        result.offered.push(candidate.clone());
+        result.deferred.push(candidate);
+
+        let stored: crate::run::StageResult =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        let retained: Proposal =
+            serde_json::from_value(stored.deferred[0].evidence.clone()).unwrap();
+        assert_eq!(retained.identification.confidence, IdentificationConfidence::Corroborated);
+        assert_eq!(retained.alternatives[0].start, alternative.start);
+        assert_eq!(retained.alternatives[0].end, alternative.end);
+    }
+
+    #[test]
+    fn narrowing_mutation_does_not_narrow_the_identification_inventory() {
+        let mut first = UnitIdentification::absent("wanted.cpp", 1);
+        first.confidence = IdentificationConfidence::Tentative;
+        first.evidence.push("attribution-1".into());
+        let second = UnitIdentification::absent("outside-only.cpp", 0);
+        let mut inventory = inventory_with(&[]);
+        inventory.identifications.units = vec![first, second];
+        inventory
+            .identifications
+            .attributions
+            .push(function_attribution("attribution-1", "wanted.cpp"));
+        let summary =
+            summarize(&prepared_with(inventory), &stage_result(Vec::new(), Selections::new()))
+                .unwrap();
+        assert_eq!(
+            summary.identifications.units.iter().map(|item| item.unit.as_str()).collect::<Vec<_>>(),
+            ["wanted.cpp", "outside-only.cpp"]
+        );
+        assert_eq!(summary.identifications.attributions.len(), 1);
+        assert_eq!(summary.identifications.attributions[0].id, "attribution-1");
     }
 
     #[test]
@@ -1616,6 +1909,7 @@ mod tests {
             newly_assigned_code_bytes: 4096,
             selected: BTreeMap::new(),
             dispositions: BTreeMap::from([("a.cpp".into(), "accepted".into())]),
+            identifications: IdentificationReport::empty("NTSC", "PAL"),
             events: Vec::new(),
             metrics: Metrics {
                 representation: Representation { baseline_tus: 40, final_tus: 42, source_tus: 100 },

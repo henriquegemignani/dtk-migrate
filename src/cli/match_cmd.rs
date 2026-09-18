@@ -35,6 +35,10 @@ pub struct Args {
     /// Write evidence for conservative partial translation-unit coverage here.
     #[arg(long)]
     pub coverage: Option<PathBuf>,
+    /// Write source-independent function attribution and TU identification here.
+    /// This inventory is produced even when no boundary is safe to apply.
+    #[arg(long)]
+    pub identifications: Option<PathBuf>,
     /// Minimum confidence for a match to be reported at all.
     #[arg(short = 'c', long, default_value_t = 0.5)]
     pub min_confidence: f32,
@@ -71,6 +75,7 @@ pub fn run(args: Args) -> Result<()> {
             candidates: args.candidates,
             splits: args.splits,
             coverage: args.coverage,
+            identifications: args.identifications,
         },
     })
 }

@@ -87,7 +87,7 @@ tools/                  the frozen dtk, ninja and dtk-migrate
   jobs/<n>/             one batch: its spec, its result, its command log
   integration-evidence/ the union's build log
   result.json           what the stage concluded
-  coverage.{json,md}    coverage only: the four measures, kept apart
+  coverage.{json,md}    coverage only: measures plus the complete TU identification inventory
 pool/worker-N/          the private workspaces
 integration/            the workspace the stages chain through
 publication.json        the journal, written before the first write

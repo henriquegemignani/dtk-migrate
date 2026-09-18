@@ -13,9 +13,10 @@ use crate::analysis::{
     fingerprint::{LayoutShiftBody, layout_shift_body, normalized_body},
     mask::Masked,
     matching::{MatchResult, MatchTarget, MatchTier},
+    ownership::IdentificationReport,
 };
 
-pub const COVERAGE_SCHEMA: u32 = 9;
+pub const COVERAGE_SCHEMA: u32 = 10;
 /// Kept in step with [`crate::stages::coverage::POLICY_VERSION`], which gates
 /// the proposals this evidence produces; the two are checked against each other
 /// on every read, so they have to move together.
@@ -68,6 +69,9 @@ pub struct CoverageReport {
     /// The masking happened to the object, so every generator below saw the
     /// same world — there is no second, unmasked view for one of them to read.
     pub mask: Masked,
+    /// Function attribution and TU identity observations, retained regardless
+    /// of whether mutation policy can offer an ownership change.
+    pub identifications: IdentificationReport,
     pub source_units: Vec<CoverageUnit>,
     pub target_layout: Vec<TargetFunction>,
 }
@@ -165,6 +169,12 @@ pub struct ExtractSpec {
     pub header_type: Option<String>,
     pub custom_type: Option<String>,
     pub custom_data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExtractCatalogs<'a> {
+    pub source: &'a [ExtractSpec],
+    pub target: &'a [ExtractSpec],
 }
 
 impl ExtractSpec {
@@ -522,10 +532,10 @@ pub fn build_report(
     source: &MatchTarget,
     target: &MatchTarget,
     matches: &MatchResult,
+    identifications: IdentificationReport,
     hide_target_names: bool,
     mask: &Masked,
-    source_extracts: &[ExtractSpec],
-    target_extracts: &[ExtractSpec],
+    extracts: ExtractCatalogs<'_>,
 ) -> CoverageReport {
     let mut source_hashes: HashMap<u64, Vec<NodeIndex>> = HashMap::new();
     let mut target_hashes: HashMap<u64, Vec<NodeIndex>> = HashMap::new();
@@ -688,16 +698,16 @@ pub fn build_report(
         source,
         target,
         matches,
-        source_extracts,
-        target_extracts,
+        extracts.source,
+        extracts.target,
         &mut units,
     );
     add_adjacent_owner_transition_evidence(
         source,
         target,
         matches,
-        source_extracts,
-        target_extracts,
+        extracts.source,
+        extracts.target,
         &mut units,
     );
 
@@ -732,6 +742,7 @@ pub fn build_report(
         source: source.name.clone(),
         target: target.name.clone(),
         mask: mask.clone(),
+        identifications,
         source_units: units.into_values().collect(),
         target_layout,
     }
@@ -2918,6 +2929,7 @@ mod tests {
             source: "source".into(),
             target: "target".into(),
             mask: Masked::default(),
+            identifications: IdentificationReport::empty("source", "target"),
             source_units: Vec::new(),
             target_layout: Vec::new(),
         };

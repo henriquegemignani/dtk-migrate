@@ -14,10 +14,11 @@ use typed_path::{Utf8NativePath, Utf8NativePathBuf};
 
 use crate::{
     analysis::{
-        coverage::build_report as build_coverage_report,
+        coverage::{ExtractCatalogs, build_report as build_coverage_report},
         data_matching::match_data,
         mask::{self, Scenario},
         matching::{MatchOptions, MatchTarget, MatchTier, match_functions},
+        ownership::identify_units,
         unit_matching::propose_units,
     },
     matching::{
@@ -39,6 +40,7 @@ pub struct Outputs {
     pub candidates: Option<PathBuf>,
     pub splits: Option<PathBuf>,
     pub coverage: Option<PathBuf>,
+    pub identifications: Option<PathBuf>,
 }
 
 /// What to match, and how hard to look.
@@ -106,6 +108,9 @@ pub fn run(request: &Request) -> Result<()> {
 
     let result = match_functions(&source, &target, &options);
     let data_matches = match_data(&source, &target, &result);
+    // Identification is an observation layer, so build it before any output
+    // chooses eligibility thresholds or attempts a mutation.
+    let identifications = identify_units(&source, &target, &result);
     let report = Report::build(&source, &target, &result, request.validate);
     report.print_summary();
 
@@ -158,15 +163,21 @@ pub fn run(request: &Request) -> Result<()> {
             &source,
             &target,
             &result,
+            identifications.clone(),
             request.validate,
             &masked,
-            &source_extracts,
-            &target_extracts,
+            ExtractCatalogs { source: &source_extracts, target: &target_extracts },
         );
         let mut file = buf_writer(&path)?;
         serde_json::to_writer_pretty(&mut file, &coverage)?;
         file.flush()?;
         info!("Wrote coverage evidence to {}", path);
+    }
+    if let Some(path) = native(outputs.identifications.as_ref()) {
+        let mut file = buf_writer(&path)?;
+        serde_json::to_writer_pretty(&mut file, &identifications)?;
+        file.flush()?;
+        info!("Wrote TU identifications to {}", path);
     }
     Ok(())
 }

@@ -44,6 +44,17 @@ The result is then classified into three tiers (`Match::tier()`) — confident /
 candidate — based on the *kind* of evidence, not a cut on the confidence score. `dtk-migrate match` reads
 two project configs, `dtk-migrate symbols rename` applies a rename file to a `symbols.txt` in place.
 
+`match --identifications <path>` records the observation layer before any split
+policy is applied. Every matched target function names its source unit, evidence
+channels, weak/template status and material runner-up. The TU records group those
+attributions into section-local candidate sequences and keep identity confidence,
+boundary blockers and application blockers separate. A same-name match can still
+carry independent exact-body evidence: the winning matcher route does not erase
+other evidence present in the binaries. Weak and template functions retain their
+body evidence but do not independently corroborate emitted TU ownership. This
+output does not read compiled source objects or source files, so it remains
+available when the target project cannot build.
+
 ## Findings that changed the design
 
 ### Confidence is not comparable across binary pairs

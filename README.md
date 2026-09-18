@@ -16,6 +16,7 @@ percentage would be read as the strongest of them.
 
 | | what it says | what it does not say |
 |---|---|---|
+| **Binary TU identification** | target functions are attributed to a source translation unit, with competing explanations retained | that both split edges are known or safe to apply |
 | **Split coverage** | a target range is assigned to a source file | that the file compiles, or matches |
 | **Objdiff matched code** | bytes in functions a comparison calls matching | that the file is finished |
 | **Configured source linkage** | the file is enabled in `configure.py` | anything measured; it is a build setting |
@@ -57,7 +58,10 @@ dtk-migrate symbols rename config/GM8P01_00/symbols.txt renames.txt
 ```
 
 `--renames` carries only matches safe to apply unreviewed; everything else goes
-to `--candidates` with its alternatives, for a person to judge. `--splits`
+to `--candidates` with its alternatives, for a person to judge. `--identifications`
+writes the complete source-independent TU inventory, including tentative and
+blocked hypotheses. It reads the two binaries and their metadata; compiled
+source objects and buildable source files are not required. `--splits`
 proposes split boundaries in `splits.txt` syntax, which `splits merge` folds in.
 See [matching](docs/matching.md).
 

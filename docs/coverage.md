@@ -33,9 +33,24 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 8. Evidence comes from `match --coverage`; each *alternative* is
+Policy version 9, evidence schema 10. Evidence comes from `match --coverage`;
+each *alternative* is
 one complete way a unit could claim a range, tried strongest first until one
 survives a build.
+
+The evidence also carries the complete `match --identifications` inventory.
+Function attribution and TU identification are observations made before byte
+thresholds, ownership-overlap checks, `--only`, source-object availability or a
+trial build. Each record distinguishes pre-existing names from binary evidence,
+retains materially competing identities, and reports candidate member sequences,
+unexplained target functions, missing source members, uncertain helpers and
+separate boundary/application blockers. A deferred or build-refused proposal
+keeps both this identification and every boundary alternative it offered.
+
+Identification, boundary certainty and application are independent. A TU may be
+corroborated while an edge remains unresolved, or may have a complete observed
+sequence that cannot yet be applied because ownership is contested. The summary
+includes every source split unit even when `--only` limits the mutations.
 
 **Accepted when** the evidence holds on re-derivation, the range is nobody
 else's, the build reproduces retail bytes, the unit is still linked from its

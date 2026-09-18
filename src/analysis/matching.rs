@@ -4,6 +4,7 @@ use decomp_toolkit::{
     obj::{ObjInfo, SectionIndex, SymbolIndex},
     util::config::is_auto_symbol,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::analysis::{
     callgraph::{CallGraph, NodeIndex},
@@ -98,7 +99,8 @@ impl MatchTarget {
 }
 
 /// How a pair of functions was matched, in decreasing order of directness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum MatchMethod {
     /// Both sides already carry the same non-generated name.
     Name,
@@ -140,7 +142,8 @@ pub struct Alternative {
 /// The distinction exists because a wrong name is worse than no name: it reads
 /// as established fact, propagates onward, and nothing prompts anyone to
 /// re-check it. Only [`MatchTier::Confident`] may be applied unreviewed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum MatchTier {
     /// Decided by content unique to this pair, or by an identical body backed by
     /// structural agreement. Safe to apply without review.
@@ -193,6 +196,13 @@ pub struct Match {
 }
 
 impl Match {
+    /// Whether another source function was close enough that this pairing did
+    /// not actually resolve the identity. We retain weaker runner-ups for
+    /// diagnosis, but they must not make an otherwise decisive match ambiguous.
+    pub fn is_contested(&self) -> bool {
+        self.runner_up.is_some_and(|a| a.relative_score > 1.0 - CONTESTED_MARGIN)
+    }
+
     /// Classifies the match by what kind of evidence produced it.
     ///
     /// Deliberately not a cut on [`Self::confidence`]: that score's distribution
@@ -200,7 +210,7 @@ impl Match {
     /// close revisions, broadly spread between distant ones — so the same
     /// threshold means different things per pair. The evidence kind doesn't move.
     pub fn tier(&self) -> MatchTier {
-        if self.runner_up.is_some_and(|a| a.relative_score > 1.0 - CONTESTED_MARGIN) {
+        if self.is_contested() {
             return MatchTier::Candidate;
         }
         match self.method {

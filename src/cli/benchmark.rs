@@ -49,9 +49,15 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 
 use crate::{
-    analysis::ownership_score::{
-        Application, Blocks, Body, Identification, Ledger, Oracle, Outcome, Scope,
-        SelectionQuality, Verification, ledger, outcome, selection_quality,
+    analysis::{
+        ownership::{
+            FunctionAttribution, IDENTIFICATION_SCHEMA, IdentificationBasis,
+            IdentificationConfidence, IdentificationReport, UnitIdentification,
+        },
+        ownership_score::{
+            Application, Blocks, Body, Identification, Ledger, Oracle, Outcome, Scope,
+            SelectionQuality, Verification, ledger, outcome, selection_quality,
+        },
     },
     project::{
         configure_py::Configure,
@@ -62,7 +68,11 @@ use crate::{
 /// Bumped when the manifest's meaning changes. The historical run's own schema
 /// is frozen — see [`legacy`] — so this versions only what `prepare` writes.
 pub const MANIFEST_SCHEMA: u32 = 4;
-pub const SCORE_SCHEMA: u32 = 4;
+pub const SCORE_SCHEMA: u32 = 5;
+/// Coverage summaries before schema 10 do not contain the typed identification
+/// inventory. Keep this explicit here so the historical adapter cannot silently
+/// reinterpret a future coverage schema merely because some fields deserialize.
+const TYPED_IDENTIFICATION_COVERAGE_SCHEMA: u32 = 10;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -835,6 +845,98 @@ pub struct RunFacts {
     /// byte-for-byte file. Real run directories must always prove by digest.
     allow_structural_baseline: bool,
     stages: BTreeMap<String, legacy::Stage>,
+    identifications: BTreeMap<String, UnitIdentification>,
+    attributions: BTreeMap<String, FunctionAttribution>,
+}
+
+#[derive(Deserialize)]
+struct CoverageArtifact {
+    schema: u32,
+    #[serde(default)]
+    identifications: Option<IdentificationReport>,
+}
+
+fn typed_identifications(
+    coverage: CoverageArtifact,
+    source: &str,
+    target: &str,
+) -> Result<(BTreeMap<String, UnitIdentification>, BTreeMap<String, FunctionAttribution>)> {
+    let Some(report) = coverage.identifications else {
+        if coverage.schema >= TYPED_IDENTIFICATION_COVERAGE_SCHEMA {
+            bail!(
+                "Coverage summary schema {} is missing its typed identification inventory",
+                coverage.schema
+            );
+        }
+        return Ok((BTreeMap::new(), BTreeMap::new()));
+    };
+    if coverage.schema != TYPED_IDENTIFICATION_COVERAGE_SCHEMA {
+        bail!(
+            "Coverage summary schema {} contains typed identifications, but the benchmark understands them only in schema {TYPED_IDENTIFICATION_COVERAGE_SCHEMA}",
+            coverage.schema
+        );
+    }
+    if report.schema != IDENTIFICATION_SCHEMA {
+        bail!(
+            "Coverage summary has identification schema {}, but the benchmark understands {IDENTIFICATION_SCHEMA}",
+            report.schema
+        );
+    }
+    if report.source != source || report.target != target {
+        bail!("Coverage summary's identification source/target does not match the run");
+    }
+    let mut identifications = BTreeMap::new();
+    for identification in report.units {
+        let name = identification.unit.clone();
+        if identifications.insert(name.clone(), identification).is_some() {
+            bail!("Coverage summary contains duplicate identification for {name}");
+        }
+    }
+    let mut attributions = BTreeMap::new();
+    for attribution in report.attributions {
+        let id = attribution.id.clone();
+        if !identifications.contains_key(&attribution.source.unit) {
+            bail!("Coverage summary attributes {id} to an unknown source unit");
+        }
+        if attributions.insert(id.clone(), attribution).is_some() {
+            bail!("Coverage summary contains duplicate attribution {id}");
+        }
+    }
+    for identification in identifications.values() {
+        for id in identification.evidence.iter().chain(&identification.unresolved_helpers).chain(
+            identification.candidates.iter().flat_map(|candidate| &candidate.attribution_ids),
+        ) {
+            let Some(attribution) = attributions.get(id) else {
+                bail!(
+                    "Identification for {} refers to unknown attribution {id}",
+                    identification.unit
+                )
+            };
+            if attribution.source.unit != identification.unit {
+                bail!(
+                    "Identification for {} refers to attribution {id} owned by {}",
+                    identification.unit,
+                    attribution.source.unit
+                );
+            }
+        }
+        for id in identification.candidates.iter().flat_map(|candidate| {
+            [
+                candidate.left_target_edge.adjacent_attribution_id.as_ref(),
+                candidate.right_target_edge.adjacent_attribution_id.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+        }) {
+            if !attributions.contains_key(id) {
+                bail!(
+                    "Identification for {} refers to unknown adjacent attribution {id}",
+                    identification.unit
+                );
+            }
+        }
+    }
+    Ok((identifications, attributions))
 }
 
 impl RunFacts {
@@ -863,6 +965,8 @@ impl RunFacts {
             use_manifest_baseline: false,
             allow_structural_baseline: true,
             stages: BTreeMap::new(),
+            identifications: BTreeMap::new(),
+            attributions: BTreeMap::new(),
         }
     }
 
@@ -986,6 +1090,13 @@ pub fn read_run(run: &Path) -> Result<RunFacts> {
         stage.offered = Some(recovered);
     }
 
+    let artifact = run.join("coverage").join("coverage.json");
+    let (identifications, attributions) = if artifact.is_file() {
+        typed_identifications(read_json(&artifact)?, &summary.source, &target)?
+    } else {
+        (BTreeMap::new(), BTreeMap::new())
+    };
+
     Ok(RunFacts {
         id: summary.id,
         source: summary.source,
@@ -1000,6 +1111,8 @@ pub fn read_run(run: &Path) -> Result<RunFacts> {
         use_manifest_baseline,
         allow_structural_baseline: false,
         stages: summary.stages,
+        identifications,
+        attributions,
     })
 }
 
@@ -1288,20 +1401,32 @@ pub fn score(manifest: &Manifest, run: &RunFacts) -> Score {
             let changed_full = !held.same_structure(&left);
 
             let found = trace(name, run);
+            let typed_identification = run.identifications.get(name);
             let selected_body = found.selected.as_ref().map(|lines| body_from_lines(name, lines));
+            let mut candidate_target_intervals =
+                typed_identification.map(typed_candidate_intervals).unwrap_or_default();
+            candidate_target_intervals.extend(
+                found.proposed.iter().map(|lines| body_from_lines(name, lines).intervals()),
+            );
+            candidate_target_intervals.sort();
+            candidate_target_intervals.dedup();
             UnitScore {
                 unit: name.clone(),
                 trust: truth.trust,
                 in_recall_set: manifest.recall_set.contains(name),
                 needed_change: truth.changed,
                 needed_code_change: truth.changed_code,
-                identification: identify(found.proposed.len(), &found.proposed),
-                identification_evidence: evidence_names(name, run),
-                candidate_target_intervals: found
-                    .proposed
-                    .iter()
-                    .map(|lines| body_from_lines(name, lines).intervals())
-                    .collect(),
+                identification: typed_identification.map_or_else(
+                    || identify(found.proposed.len(), &found.proposed),
+                    |identification| score_identification(identification.confidence),
+                ),
+                identification_evidence: typed_identification.map_or_else(
+                    || evidence_names(name, run),
+                    |identification| {
+                        typed_identification_evidence(identification, &run.attributions)
+                    },
+                ),
+                candidate_target_intervals,
                 code_recall: recall_for(name, &truth.oracle, &found, Scope::Code),
                 full_recall: recall_for(name, &truth.oracle, &found, Scope::Everything),
                 proposals: found.proposed.len(),
@@ -1622,6 +1747,64 @@ fn collect_evidence(value: &serde_json::Value, into: &mut BTreeSet<String>) {
         }
         _ => {}
     }
+}
+
+fn score_identification(confidence: IdentificationConfidence) -> Identification {
+    match confidence {
+        IdentificationConfidence::Absent => Identification::Absent,
+        IdentificationConfidence::Tentative => Identification::Tentative,
+        IdentificationConfidence::Corroborated => Identification::Corroborated,
+        IdentificationConfidence::Ambiguous => Identification::Ambiguous,
+    }
+}
+
+fn typed_identification_evidence(
+    identification: &UnitIdentification,
+    attributions: &BTreeMap<String, FunctionAttribution>,
+) -> Vec<String> {
+    let mut evidence: BTreeSet<String> = identification.evidence.iter().cloned().collect();
+    let basis = match identification.basis {
+        IdentificationBasis::None => "none",
+        IdentificationBasis::NamesOnly => "names-only",
+        IdentificationBasis::Binary => "binary",
+        IdentificationBasis::Mixed => "mixed",
+    };
+    evidence.insert(format!("basis:{basis}"));
+    evidence.insert(format!("binary-functions:{}", identification.binary_functions));
+    evidence.insert(format!(
+        "independent-functions:{}",
+        identification.independently_supported_functions
+    ));
+    for id in &identification.evidence {
+        let Some(attribution) = attributions.get(id) else { continue };
+        evidence.insert(format!("{id}:method:{}", attribution.method.as_str()));
+        evidence
+            .extend(attribution.evidence.iter().map(|item| format!("{id}:evidence:{}", item.kind)));
+    }
+    evidence
+        .extend(identification.boundary_blockers.iter().map(|reason| format!("boundary:{reason}")));
+    evidence.extend(
+        identification.application_blockers.iter().map(|reason| format!("application:{reason}")),
+    );
+    evidence.into_iter().collect()
+}
+
+fn parse_hex_address(value: &str) -> Option<u32> {
+    u32::from_str_radix(value.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+}
+
+fn typed_candidate_intervals(identification: &UnitIdentification) -> Vec<Vec<Range>> {
+    identification
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            Some(vec![Range {
+                section: candidate.section.clone(),
+                start: parse_hex_address(&candidate.start)?,
+                end: parse_hex_address(&candidate.end)?,
+            }])
+        })
+        .collect()
 }
 
 /// What the run's own record supports saying about identification.
@@ -2031,6 +2214,119 @@ mod tests {
         });
         assert_eq!(proposed_bodies(&coverage).len(), 2);
         assert!(proposed_bodies(&serde_json::json!({ "lines": [] })).is_empty());
+    }
+
+    #[test]
+    fn typed_identification_replaces_proposal_count_guessing() {
+        use crate::analysis::ownership::{CandidateSequence, EdgeEvidence};
+
+        let mut identification = UnitIdentification::absent("u.cpp", 2);
+        identification.confidence = IdentificationConfidence::Corroborated;
+        identification.basis = IdentificationBasis::Mixed;
+        identification.evidence = vec!["attribution-1".into(), "attribution-2".into()];
+        identification.boundary_blockers = vec!["right edge unresolved".into()];
+        identification.candidates.push(CandidateSequence {
+            module: "main".into(),
+            source_section: ".text".into(),
+            section: ".text".into(),
+            start: "0x80001000".into(),
+            end: "0x80001200".into(),
+            attribution_ids: identification.evidence.clone(),
+            matched_members: 2,
+            target_functions_in_envelope: 2,
+            contiguous_target_members: true,
+            left_source_edge_observed: true,
+            right_source_edge_observed: true,
+            left_target_edge: EdgeEvidence {
+                supported: true,
+                reason: "neighbor".into(),
+                adjacent_attribution_id: None,
+            },
+            right_target_edge: EdgeEvidence {
+                supported: false,
+                reason: "unknown".into(),
+                adjacent_attribution_id: None,
+            },
+            unexplained_target_members: Vec::new(),
+            current_owners: Vec::new(),
+        });
+
+        assert_eq!(score_identification(identification.confidence), Identification::Corroborated);
+        assert!(
+            typed_identification_evidence(&identification, &BTreeMap::new())
+                .contains(&"boundary:right edge unresolved".to_string())
+        );
+        assert_eq!(typed_candidate_intervals(&identification), vec![vec![Range {
+            section: ".text".into(),
+            start: 0x80001000,
+            end: 0x80001200
+        }]]);
+    }
+
+    #[test]
+    fn typed_identifications_are_bound_to_the_coverage_schema_that_defined_them() {
+        let identification = UnitIdentification::absent("u.cpp", 0);
+        let error = typed_identifications(
+            CoverageArtifact {
+                schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA - 1,
+                identifications: Some(IdentificationReport {
+                    schema: IDENTIFICATION_SCHEMA,
+                    source: "NTSC".into(),
+                    target: "PAL".into(),
+                    attributions: Vec::new(),
+                    units: vec![identification.clone()],
+                }),
+            },
+            "NTSC",
+            "PAL",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("typed identifications"), "{error}");
+
+        assert!(
+            typed_identifications(
+                CoverageArtifact {
+                    schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA - 1,
+                    identifications: None,
+                },
+                "NTSC",
+                "PAL"
+            )
+            .unwrap()
+            .0
+            .is_empty(),
+            "legacy summaries without the new field stay readable"
+        );
+        let error = typed_identifications(
+            CoverageArtifact {
+                schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA,
+                identifications: None,
+            },
+            "NTSC",
+            "PAL",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing its typed identification"), "{error}");
+        assert_eq!(
+            typed_identifications(
+                CoverageArtifact {
+                    schema: TYPED_IDENTIFICATION_COVERAGE_SCHEMA,
+                    identifications: Some(IdentificationReport {
+                        schema: IDENTIFICATION_SCHEMA,
+                        source: "NTSC".into(),
+                        target: "PAL".into(),
+                        attributions: Vec::new(),
+                        units: vec![identification],
+                    }),
+                },
+                "NTSC",
+                "PAL"
+            )
+            .unwrap()
+            .0
+            .len(),
+            1
+        );
     }
 
     #[test]
