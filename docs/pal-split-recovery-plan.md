@@ -974,6 +974,16 @@ independent boundary evidence. Coverage policy is 15 because its boundary-data
 match evidence uses the same stricter reference alignment. Per-range certificates, target-side BSS
 attributes and combined code/data transactions remain to be implemented.
 
+### H review correction: tentative data is not automatic evidence
+
+The ordinary proposal parser uncomments `# candidate` lines so code discovery
+can assess them against its separate ownership observations. Data discovery had
+used that parser too, silently treating tentative data ranges as confident.
+Its preparation now reads only the matcher's uncommented ranges. The parser
+test keeps a confident data interval and excludes both a tentative tail and a
+unit made entirely of tentative BSS. This is an eligibility correction, not a
+data ownership certificate; typed per-range evidence is still required.
+
 ## 8. Make refusals diagnostic and retries state-aware
 
 **Files:** `src/build/process.rs`, `src/build/context.rs`, `src/stages/mod.rs`, `src/stages/coverage/mod.rs`, `src/stages/discover.rs`, `src/stages/verify.rs`, `src/run/mod.rs`, `src/run/jobs.rs`.

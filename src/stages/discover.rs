@@ -400,6 +400,7 @@ impl Stage for Discover {
         let baseline = ctx.build(None)?;
         let blocks = Splits::read(&splits_path)?.blocks;
         let proposals = Splits::read(&proposals_path)?.blocks;
+        let confident_proposals = Splits::read_confident_proposals(&proposals_path)?.blocks;
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let evidence: CoverageReport = serde_json::from_slice(&std::fs::read(&coverage_path)?)?;
@@ -436,26 +437,30 @@ impl Stage for Discover {
             candidates.truncate(limit);
         }
 
+        // The ordinary parser includes commented, tentative ranges so code can
+        // ask the ownership gate to judge them. Data has no equivalent gate;
+        // only the matcher's uncommented ranges may enter its pass.
         // One unit must never yield two candidates. Each kind carries a complete
         // replacement body, so whichever landed second would revert the other's
         // sections. Code keeps the slot because it has to prove a matched-code
         // gain, which the data pass deliberately skips; the unit's data is
         // proposed again by the next run.
         let staged: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
-        let mut data: Vec<Candidate> = data_proposals(&proposals, &blocks, &source_blocks)
-            .into_iter()
-            .filter(|(name, _)| !staged.contains(name.as_str()))
-            .map(|(name, lines)| {
-                let before_lines = blocks.get(&name).cloned().unwrap_or_default();
-                candidate(name, Proposal {
-                    lines,
-                    kind: Kind::Data,
-                    before_lines,
-                    observation: None,
-                    ownership: None,
+        let mut data: Vec<Candidate> =
+            data_proposals(&confident_proposals, &blocks, &source_blocks)
+                .into_iter()
+                .filter(|(name, _)| !staged.contains(name.as_str()))
+                .map(|(name, lines)| {
+                    let before_lines = blocks.get(&name).cloned().unwrap_or_default();
+                    candidate(name, Proposal {
+                        lines,
+                        kind: Kind::Data,
+                        before_lines,
+                        observation: None,
+                        ownership: None,
+                    })
                 })
-            })
-            .collect::<Result<_>>()?;
+                .collect::<Result<_>>()?;
         if let Some(limit) = limit {
             data.truncate(limit);
         }

@@ -130,6 +130,34 @@ impl Splits {
         Self::parse(&text).with_context(|| format!("Failed to parse {}", path.display()))
     }
 
+    /// Reads only uncommented ranges from a `match --splits` proposal. The
+    /// ordinary parser deliberately exposes candidate lines for review, but a
+    /// data discovery pass must not silently treat them as confident evidence.
+    pub fn parse_confident_proposals(text: &str) -> Result<Self> {
+        let (header, bodies) = split_blocks(text, str::to_string);
+        let mut blocks = IndexMap::new();
+        for (name, body) in bodies {
+            let lines: Vec<String> = body
+                .into_iter()
+                .filter(|line| !line.trim_start().starts_with('#') && parse_range(line).is_some())
+                .collect();
+            if lines.is_empty() {
+                continue;
+            }
+            if blocks.insert(name.clone(), lines).is_some() {
+                bail!("Proposal file lists '{name}' more than once");
+            }
+        }
+        Ok(Self { header, blocks })
+    }
+
+    pub fn read_confident_proposals(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        Self::parse_confident_proposals(&text)
+            .with_context(|| format!("Failed to parse {}", path.display()))
+    }
+
     /// Renders the file. `header` already ends in the blank line that follows
     /// `Sections:`, so blocks are appended rather than joined.
     pub fn render(&self) -> String {
@@ -426,6 +454,22 @@ mod tests {
                         #\t.text       start:0x80005000 end:0x80005100  # candidate: thin evidence\n";
         let splits = Splits::parse(proposal).unwrap();
         assert_eq!(splits.blocks["Gamma.cpp"], ["\t.text       start:0x80005000 end:0x80005100"]);
+    }
+
+    #[test]
+    fn automatic_data_reader_excludes_commented_candidate_ranges() {
+        let proposal = "# banner\n\n\
+                        Gamma.cpp:\n\
+                        \t.data       start:0x80400000 end:0x80400010\n\
+                        #\t.data       start:0x80400010 end:0x80400020  # candidate: unpinned edge\n\
+                        Delta.cpp:\n\
+                        #\t.bss        start:0x80410000 end:0x80410010  # candidate: no ownership proof\n";
+        let confident = Splits::parse_confident_proposals(proposal).unwrap();
+        assert_eq!(confident.blocks["Gamma.cpp"], [
+            "\t.data       start:0x80400000 end:0x80400010"
+        ]);
+        assert!(!confident.blocks.contains_key("Delta.cpp"));
+        assert_eq!(Splits::parse(proposal).unwrap().blocks["Gamma.cpp"].len(), 2);
     }
 
     #[test]
