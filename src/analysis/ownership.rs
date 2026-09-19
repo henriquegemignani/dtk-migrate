@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 12;
+pub const IDENTIFICATION_SCHEMA: u32 = 13;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -448,6 +448,14 @@ impl ObservationIndex {
         {
             bail!("Identification schema {} cannot carry linker input inventories", report.schema);
         }
+        if report.schema < 13
+            && report
+                .object_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.retail_only_inputs.is_some())
+        {
+            bail!("Identification schema {} cannot carry retail-only linker inputs", report.schema);
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -692,11 +700,11 @@ impl ObservationIndex {
                     &report.attributions,
                 );
             }
-            // Schema-10 reports recorded these as diagnostics under the old
-            // proof rules. Preserve their canonical bytes so references from
-            // saved runs keep resolving; no policy consumes either record.
-            // Schema 11 regenerates them from the stronger raw inventory.
-            if report.schema >= 11 {
+            // Earlier reports used different inventory rules. Preserve their
+            // canonical diagnostic bytes so saved references keep resolving;
+            // no ownership policy consumes either record. Schema 13 accounts
+            // for configured retail-only linker inputs during rederivation.
+            if report.schema >= 13 {
                 evidence.relocation_placements =
                     crate::analysis::object_evidence::relocation_placements(
                         evidence,
@@ -3121,6 +3129,7 @@ mod tests {
             target_image_sha256: None,
             configured_objects: None,
             linked_object_inputs: None,
+            retail_only_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),

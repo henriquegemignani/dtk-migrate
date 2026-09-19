@@ -32,7 +32,10 @@ use crate::{
         matching::MatchTarget,
         ownership::{FunctionAttribution, SourceFunctionObservation, TargetFunctionObservation},
     },
-    project::{analyze::with_working_directory, report::ObjdiffConfig},
+    project::{
+        analyze::with_working_directory,
+        report::{ObjdiffConfig, ObjdiffUnit},
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +282,11 @@ pub struct ObjectEvidence {
     /// Absent when Ninja could not report them and in older schemas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_object_inputs: Option<Vec<String>>,
+    /// Configured extracted objects with no compiled-source counterpart.
+    /// They account for linker inputs, but cannot supply a source definition.
+    /// Introduced in identification schema 13.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retail_only_inputs: Option<Vec<String>>,
     /// Configured compiled-source objects omitted because they are outside
     /// the source split inventory. They may still define a competing body.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -315,6 +323,7 @@ impl ObjectEvidence {
             objects: Vec::new(),
             configured_objects: None,
             linked_object_inputs: None,
+            retail_only_inputs: None,
             unscanned_configured_units: 0,
             unmapped_units: Vec::new(),
             definitions: Vec::new(),
@@ -345,6 +354,7 @@ impl ObjectEvidence {
             && (!self.objects.is_empty()
                 || self.configured_objects.is_some()
                 || self.linked_object_inputs.is_some()
+                || self.retail_only_inputs.is_some()
                 || self.unscanned_configured_units != 0
                 || !self.definitions.is_empty()
                 || !self.unmapped_units.is_empty()
@@ -501,6 +511,11 @@ impl ObjectEvidence {
             if let Some(inputs) = &mut self.linked_object_inputs {
                 inputs.sort();
                 inputs.dedup();
+            }
+            if let Some(retail) = &mut self.retail_only_inputs {
+                retail.sort();
+                // Do not deduplicate: duplicate mappings cannot establish a
+                // unique emitter for a linker input.
             }
             let mapped: BTreeSet<&str> =
                 self.objects.iter().map(|item| item.unit.as_str()).collect();
@@ -697,6 +712,12 @@ fn linker_object(path: &str) -> bool {
     lower.ends_with(".o") || lower.ends_with(".a") || lower.ends_with(".lib")
 }
 
+fn main_executable_unit(entry: &ObjdiffUnit) -> bool {
+    // Some objdiff configurations omit module_id for RELs. Their unit name
+    // still carries the module prefix, so both facts must identify the DOL.
+    entry.metadata.module_id == 0 && entry.name.starts_with("main/")
+}
+
 fn linked_object_inputs(root: &Path, version: &str) -> Option<Vec<String>> {
     let output = Command::new("ninja")
         .args(["-t", "inputs", &format!("build/{version}/main.elf")])
@@ -791,7 +812,7 @@ pub fn inspect(
     // match loads another version's config.yml. Never label those objects as
     // compiled for the target version.
     if config.units.iter().any(|entry| {
-        entry.metadata.module_id == 0
+        main_executable_unit(entry)
             && ObjdiffConfig::source_name_of(entry).is_some_and(|unit| units.contains(unit))
             && entry.base_path.as_deref().is_some_and(|base| {
                 !versioned_object_path(base, target_version)
@@ -815,7 +836,7 @@ pub fn inspect(
             config
                 .units
                 .iter()
-                .filter(|entry| entry.metadata.module_id == 0)
+                .filter(|entry| main_executable_unit(entry))
                 .filter_map(|entry| {
                     Some(ConfiguredObject {
                         unit: ObjdiffConfig::source_name_of(entry).map(str::to_string),
@@ -826,10 +847,18 @@ pub fn inspect(
                 .collect(),
         ),
         linked_object_inputs: link_inputs,
+        retail_only_inputs: Some(
+            config
+                .units
+                .iter()
+                .filter(|entry| main_executable_unit(entry) && entry.base_path.is_none())
+                .filter_map(|entry| entry.target_path.as_deref().map(build_path))
+                .collect(),
+        ),
         unscanned_configured_units: config
             .units
             .iter()
-            .filter(|entry| entry.metadata.module_id == 0 && entry.base_path.is_some())
+            .filter(|entry| main_executable_unit(entry) && entry.base_path.is_some())
             .filter(|entry| {
                 !ObjdiffConfig::source_name_of(entry).is_some_and(|unit| units.contains(unit))
             })
@@ -844,7 +873,7 @@ pub fn inspect(
     };
     let mut seen = BTreeSet::new();
     for entry in config.units {
-        if entry.metadata.module_id != 0 {
+        if !main_executable_unit(&entry) {
             continue;
         }
         let Some(unit) = ObjdiffConfig::source_name_of(&entry) else { continue };
@@ -1268,9 +1297,11 @@ fn matching_neighbour(
 /// Inventory completeness is a requirement for an emitted-owner resolution,
 /// not for reporting a comparison among the available compiled objects.
 fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<String>) -> bool {
-    let (Some(configured), Some(inputs)) =
-        (&evidence.configured_objects, &evidence.linked_object_inputs)
-    else {
+    let (Some(configured), Some(inputs), Some(retail)) = (
+        &evidence.configured_objects,
+        &evidence.linked_object_inputs,
+        &evidence.retail_only_inputs,
+    ) else {
         return false;
     };
     if evidence.status != ScanStatus::Scanned
@@ -1281,6 +1312,9 @@ fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<
         || evidence.objects.len() != source_units.len()
         || configured.len() != source_units.len()
         || inputs.is_empty()
+        || retail
+            .iter()
+            .any(|path| !safe_relative(path) || !path.to_ascii_lowercase().ends_with(".o"))
         || evidence.objects.iter().any(|record| {
             !source_units.contains(&record.unit)
                 || record.status != ObjectStatus::Available
@@ -1318,7 +1352,8 @@ fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<
             .filter(|item| {
                 item.base_path == *input || item.target_path.as_deref() == Some(input.as_str())
             })
-            .count();
+            .count()
+            + retail.iter().filter(|path| *path == input).count();
         matches == 1
     }) && configured.iter().all(|item| {
         inputs.contains(&item.base_path)
@@ -2084,6 +2119,19 @@ mod tests {
     }
 
     #[test]
+    fn rel_without_module_id_is_not_a_main_executable_emitter() {
+        let config: ObjdiffConfig = serde_json::from_value(serde_json::json!({
+            "units": [
+                {"name": "main/A", "metadata": {"source_path": "src/A.cpp"}},
+                {"name": "NESPALemuP/NESPALemuP/emu", "metadata": {"source_path": "src/NESemu/emu.cpp"}}
+            ]
+        }))
+        .unwrap();
+        assert!(main_executable_unit(&config.units[0]));
+        assert!(!main_executable_unit(&config.units[1]));
+    }
+
+    #[test]
     fn objdiff_for_another_version_is_not_target_object_evidence() {
         let root = tempfile::tempdir().unwrap();
         for (base, target) in [
@@ -2121,6 +2169,7 @@ mod tests {
             target_image_sha256: None,
             configured_objects: None,
             linked_object_inputs: None,
+            retail_only_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),
@@ -2212,6 +2261,7 @@ mod tests {
             target_image_sha256: None,
             configured_objects: None,
             linked_object_inputs: None,
+            retail_only_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),
@@ -2315,6 +2365,7 @@ mod tests {
             target_image_sha256: None,
             configured_objects: None,
             linked_object_inputs: None,
+            retail_only_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),

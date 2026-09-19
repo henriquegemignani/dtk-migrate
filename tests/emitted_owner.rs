@@ -162,6 +162,7 @@ fn fixture() -> (
             },
         ]),
         linked_object_inputs: Some(vec!["build/PAL/obj/A.o".into(), "build/PAL/obj/B.o".into()]),
+        retail_only_inputs: Some(Vec::new()),
         unscanned_configured_units: 0,
         unmapped_units: Vec::new(),
         definitions,
@@ -278,6 +279,34 @@ fn the_linker_must_account_for_every_object_and_archive_input() {
     evidence.unscanned_configured_units = 0; // A serialized count cannot hide this entry.
     evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
     assert_eq!(evidence.unscanned_configured_units, 1);
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+}
+
+#[test]
+fn configured_retail_only_inputs_are_accounted_for_without_compiled_definitions() {
+    let (mut evidence, units, source, targets, attributions) = fixture();
+    let retail = "build/PAL/obj/auto_03_80003000_text.o".to_string();
+    evidence.retail_only_inputs.as_mut().unwrap().push(retail.clone());
+    evidence.linked_object_inputs.as_mut().unwrap().push(retail.clone());
+    assert_eq!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).len(),
+        2
+    );
+    evidence.retail_only_inputs.as_mut().unwrap().push(retail);
+    evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+}
+
+#[test]
+fn an_archive_cannot_be_whitelisted_as_one_retail_only_object() {
+    let (mut evidence, units, source, targets, attributions) = fixture();
+    let archive = "build/PAL/obj/unknown.a".to_string();
+    evidence.retail_only_inputs.as_mut().unwrap().push(archive.clone());
+    evidence.linked_object_inputs.as_mut().unwrap().push(archive);
     assert!(
         emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
     );
@@ -500,25 +529,31 @@ fn saved_resolutions_are_rebuilt_from_observations_and_rejected_in_older_schema(
 }
 
 #[test]
-fn schema_ten_keeps_its_diagnostic_records_and_saved_reference() {
+fn old_schemas_keep_their_diagnostic_records_and_saved_references() {
     let (mut evidence, units, source, targets, attributions) = fixture();
     evidence.emitted_owners =
         emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions);
     evidence.configured_objects = None;
     evidence.linked_object_inputs = None;
+    evidence.retail_only_inputs = None;
     let old_resolutions = evidence.emitted_owners.clone();
     let mut report = IdentificationReport::empty("NTSC", "PAL");
-    report.schema = 10;
     report.attributions = attributions;
     report.source_functions = source;
     report.target_functions = targets;
     report.object_evidence = Some(evidence);
     report.units =
         vec![UnitIdentification::absent("A.cpp", 2), UnitIdentification::absent("B.cpp", 2)];
-    let index = ObservationIndex::load_self_contained(report, "NTSC", "PAL").unwrap();
-    assert_eq!(index.report().object_evidence.as_ref().unwrap().emitted_owners, old_resolutions);
-    let directory = tempfile::tempdir().unwrap();
-    let reference = index.persist(directory.path()).unwrap();
-    assert_eq!(reference.schema, 10);
-    assert!(load_reference(&reference, "NTSC", "PAL").is_ok());
+    for schema in 10..=12 {
+        report.schema = schema;
+        let index = ObservationIndex::load_self_contained(report.clone(), "NTSC", "PAL").unwrap();
+        assert_eq!(
+            index.report().object_evidence.as_ref().unwrap().emitted_owners,
+            old_resolutions
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let reference = index.persist(directory.path()).unwrap();
+        assert_eq!(reference.schema, schema);
+        assert!(load_reference(&reference, "NTSC", "PAL").is_ok());
+    }
 }

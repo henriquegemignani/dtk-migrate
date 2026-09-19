@@ -10,6 +10,27 @@ helper families, optional object evidence, unresolved clusters and schema-12
 tail hypotheses; emitted ownership remains constrained by incomplete linker
 inventories. Changes H and I are still open.
 
+### Retail-only linker inputs (identification schema 13)
+
+The object inventory now distinguishes configured extracted inputs without a
+compiled-source counterpart from genuinely unknown linker objects or archives.
+Those retail-only inputs are saved and checked one-to-one against Ninja's
+linker graph, but cannot contribute a compiled definition. Duplicate mappings
+still refuse strict emitted-owner resolution. This removes an unnecessary
+completeness failure caused by auto-split retail objects while retaining the
+requirement to scan every configured source object and account for unknown
+archives. Older schema diagnostics retain their original digest on load.
+Some Prime REL units omit `module_id` in objdiff.json; the main-executable
+inventory now requires the `main/` unit prefix too.
+
+The read-only current F-drive scan accounts for all 1,426 linker inputs:
+614 are configured retail-only objects and none is an unknown path. It has
+812 configured DOL source objects, with three outside the source split set
+(`CTimeRemainderAndFraction`, `rstl_allocator`, `TypesMatch`), plus 15 source
+units without an objdiff mapping. Strict owner resolutions remain zero. This
+current checkout is not the frozen historical migration baseline, so these
+counts diagnose inventory completeness rather than recall.
+
 ## Implementation checkpoint after the first Change G slice
 
 Identification schema 5 carries two binary-only diagnostics. Exact normalized-body
