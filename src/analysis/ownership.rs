@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 6;
+pub const IDENTIFICATION_SCHEMA: u32 = 7;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -389,6 +389,17 @@ impl ObservationIndex {
         if report.schema < 6 && report.object_evidence.is_some() {
             bail!("Identification schema {} cannot carry compiled-object evidence", report.schema);
         }
+        if report.schema < 7
+            && report.object_evidence.as_ref().is_some_and(|evidence| {
+                evidence.objects.iter().any(|object| !object.functions.is_empty())
+                    || !evidence.order_matches.is_empty()
+            })
+        {
+            bail!(
+                "Identification schema {} cannot carry compiled-function inventories",
+                report.schema
+            );
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -617,7 +628,14 @@ impl ObservationIndex {
                 .iter()
                 .filter_map(|item| item.normalized_body_sha256.clone())
                 .collect();
-            evidence.canonicalize(expected_units, &target_hashes)?;
+            evidence.canonicalize(expected_units, &target_hashes, report.schema >= 7)?;
+            if report.schema >= 7 {
+                evidence.order_matches = crate::analysis::object_evidence::order_matches(
+                    evidence,
+                    &report.target_functions,
+                    &report.attributions,
+                );
+            }
         }
         // Schema 4+ aggregates are regenerated from canonical function facts.
         // Older reports never carried these fields; synthesizing clusters for
@@ -625,7 +643,13 @@ impl ObservationIndex {
         if report.schema >= 4 {
             report.helper_families = if report.schema == 4 {
                 helpers::families_schema_4(&report.source_functions, &report.target_functions)
-            } else if report.schema >= 6 {
+            } else if report.schema >= 7 {
+                helpers::families_with_inventory(
+                    &report.source_functions,
+                    &report.target_functions,
+                    report.object_evidence.as_ref().map_or(&[], |evidence| &evidence.definitions),
+                )
+            } else if report.schema == 6 {
                 helpers::families_with_compiled(
                     &report.source_functions,
                     &report.target_functions,
@@ -2960,6 +2984,88 @@ mod tests {
         let reference = historical.persist(directory.path()).unwrap();
         assert_eq!(reference.schema, 5);
         assert!(load_reference(&reference, "source", "target").is_ok());
+    }
+
+    #[test]
+    fn schema_seven_rebuilds_order_matches_from_complete_object_functions() {
+        use crate::analysis::object_evidence::{
+            CompiledDefinition, CompiledFunction, ObjectEvidence, ObjectOrderMatch, ObjectRecord,
+            ObjectStatus, ScanStatus,
+        };
+
+        let (mut report, expected) = with_helper(&[]);
+        let anchor_hash = "a".repeat(64);
+        let helper_hash = "b".repeat(64);
+        report
+            .target_functions
+            .iter_mut()
+            .find(|function| function.address == "0x00001200")
+            .unwrap()
+            .normalized_body_sha256 = Some(anchor_hash.clone());
+        report
+            .target_functions
+            .iter_mut()
+            .find(|function| function.address == "0x00001300")
+            .unwrap()
+            .normalized_body_sha256 = Some(helper_hash.clone());
+        let binary_only =
+            ObservationIndex::load(report.clone(), "source", "target", &expected).unwrap();
+        let compiled = |name: &str, start: &str, end: &str, hash: String| CompiledFunction {
+            name: name.into(),
+            section: ".text".into(),
+            address: start.into(),
+            end: end.into(),
+            normalized_body_sha256: Some(hash),
+            weak: false,
+            references: Vec::new(),
+        };
+        let object_hash = "c".repeat(64);
+        report.object_evidence = Some(ObjectEvidence {
+            status: ScanStatus::Scanned,
+            objdiff_sha256: Some("d".repeat(64)),
+            objects: vec![ObjectRecord {
+                unit: "A.cpp".into(),
+                base_path: "build/PAL/src/A.o".into(),
+                status: ObjectStatus::Available,
+                sha256: Some(object_hash.clone()),
+                functions: vec![
+                    compiled("a2", "0x00000000", "0x00000100", anchor_hash),
+                    compiled("helper", "0x00000100", "0x00000140", helper_hash.clone()),
+                ],
+            }],
+            unmapped_units: Vec::new(),
+            definitions: vec![CompiledDefinition {
+                unit: "A.cpp".into(),
+                name: "helper".into(),
+                section: ".text".into(),
+                address: "0x00000100".into(),
+                end: "0x00000140".into(),
+                normalized_body_sha256: helper_hash,
+                weak: false,
+                object_sha256: object_hash,
+            }],
+            order_matches: vec![ObjectOrderMatch {
+                unit: "forged.cpp".into(),
+                object_sha256: "0".repeat(64),
+                section: ".text".into(),
+                compiled_address: "0x00000000".into(),
+                target_address: "0x00000000".into(),
+                current_owner: None,
+                owner_autogenerated: false,
+                before: None,
+                after: None,
+            }],
+        });
+        let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        let matches = &index.report().object_evidence.as_ref().unwrap().order_matches;
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].unit, "A.cpp");
+        assert_eq!(matches[0].target_address, "0x00001300");
+        assert_eq!(matches[0].before.as_ref().unwrap().target_address, "0x00001200");
+        assert_eq!(
+            assess_claim(&index, (0x1000, 0x1300), (0x1000, 0x1340)).new_unresolved,
+            assess_claim(&binary_only, (0x1000, 0x1300), (0x1000, 0x1340)).new_unresolved,
+        );
     }
 
     #[test]

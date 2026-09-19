@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 14, evidence schema 11, identification schema 6. Every threshold
+Policy version 14, evidence schema 11, identification schema 7. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -79,6 +79,18 @@ an unavailable `objdiff.json` leave binary-only identification usable. An exact
 compiled body shows that an existing version-mapped object contains it; the
 scan does not prove that object was rebuilt from current source or selected by
 the linker. The ownership gate is unchanged.
+
+Identification schema 7 keeps each available object's complete sized code-symbol
+inventory, including bodies that differ from the target, with function order
+and outgoing relocation references. It derives immediate order matches where
+an exact compiled helper and an adjacent compiled function have the same
+respective bodies and order as two adjacent target functions. The neighbour
+must already belong to the candidate unit or have an independent attribution
+to it. It examines target bodies even when a different unit currently owns
+them, and records that owner alongside whether the neighbour's attribution
+is independent. A match
+does not assign the helper's emitted owner. Saved schema-6 reports still load
+with their original exact-body evidence and no invented order matches.
 
 Identification, boundary certainty and application are independent. A TU may be
 corroborated while an edge remains unresolved, or may have a complete observed

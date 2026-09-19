@@ -89,6 +89,36 @@ from 1,315 to 1,316. These counts describe a deliberately sparse object build,
 not the yield of an `all_source` build. Relocation/order corroboration, caching,
 and a linker-owner decision remain for later G work.
 
+### Complete object context and immediate order (schema 7)
+
+The next G slice retains every sized code function in each available compiled
+object, including bodies absent from the target exact-body inventory. It records
+local order, normalized-body hashes and outgoing relocation references. From
+those raw facts it derives immediate order matches to target functions, only
+when the neighbouring target function already belongs to the candidate unit
+or is independently attributed to it. A matched target function may still be
+owned by another unit; that conflict is reported, not silently resolved.
+The derived matches are regenerated on
+load; neither a shared body nor a matching neighbour assigns linker ownership.
+Policy 14 remains unchanged, and schema-6 reports retain their original meaning.
+
+The four compiled objects from the frozen `b65ad2a6` experiment still have
+their recorded SHA-256 hashes. Rescanning those exact bytes finds two immediate
+order matches: the `CGuiHeadWidget` type-ID body follows its destructor in both
+object and target, and the `CPowerBomb` destructor follows `ApplyDynamicDamage`.
+Neither neighbouring attribution is independent, so both remain diagnostic.
+The `CGuiGroup` and `CGuiTableGroup` exact bodies have no qualifying immediate
+order match in this sample; that absence does not contradict their identities.
+Relocation correlation, build freshness, caching and an emitted-owner decision
+remain for later G work.
+
+An F-drive full-object stress check loaded 809 available objects and 21,282
+code functions in about five seconds. Its compact object-evidence JSON was
+29.6 MB and round-tripped through the schema-7 canonical report unchanged.
+Objects beyond the four hash-frozen historical controls may contain later
+source work, so this stress check measures capacity and schema stability,
+not historical identification accuracy.
+
 ## Implementation checkpoint after Change F (joint runs)
 
 `src/analysis/unit_runs.rs` searches function-boundary cuts with explicit unknown target
