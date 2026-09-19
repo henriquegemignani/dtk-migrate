@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 5;
+pub const SCHEMA: u32 = 6;
 
 /// The stages, in the only order they may run in.
 ///

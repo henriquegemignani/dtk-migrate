@@ -178,6 +178,15 @@ fn a_candidate_and_the_neighbour_it_narrows_are_published_as_one_transaction() {
     assert_eq!(journal["status"], "published", "{journal:#}");
     let changed: Vec<&String> = journal["changes"].as_object().unwrap().keys().collect();
     assert_eq!(changed, ["config/PAL/splits.txt"]);
+    let graph = fixture.json(&format!("build/dtk-migrate/runs/{id}/final-certificates.json"));
+    assert_eq!(graph["units"]["B.cpp"]["coverage_transactions"].as_array().unwrap().len(), 1);
+    assert!(
+        graph["dependencies"].as_array().unwrap().iter().any(|edge| {
+            edge["reads"] == "P.cpp"
+                && edge["sections"].as_array().unwrap().contains(&serde_json::json!(".text"))
+        }),
+        "the joint boundary's read dependency is absent: {graph:#}"
+    );
 }
 
 #[test]

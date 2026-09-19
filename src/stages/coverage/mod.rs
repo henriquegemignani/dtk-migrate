@@ -81,7 +81,7 @@ fn changes_data(before: Option<&[String]>, after: &[String]) -> bool {
     })
 }
 
-fn changed_sections(transaction: &OwnershipTransaction) -> BTreeSet<String> {
+pub(crate) fn changed_sections(transaction: &OwnershipTransaction) -> BTreeSet<String> {
     let mut sections = BTreeSet::new();
     for member in &transaction.members {
         let before = body_by_section(member.before.as_deref().unwrap_or_default());

@@ -22,9 +22,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    project::report::Report,
+    project::{report::Report, splits::Splits},
     run::{RunDir, RunRecord, StageResult, context, read_json, stage_for, write_json},
-    stages::{FinalCertificates, Prepared},
+    stages::{FinalCertificates, Prepared, coverage::AppliedRecord, discover},
     workspace::{Manifest, Snapshot},
 };
 
@@ -45,6 +45,112 @@ pub struct Journal {
     pub changes: BTreeMap<String, Change>,
     #[serde(default)]
     pub conflicts: Vec<String>,
+    /// Digest of the final composed ownership and certificate graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_certificates_sha256: Option<String>,
+}
+
+/// The complete final body of every certified unit and the evidence chain
+/// that led to it. The stage results retain the detailed proposals; this
+/// index makes the composed final state and its cross-unit dependencies
+/// explicit for publication and resume audits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CertificateGraph {
+    pub schema: u32,
+    pub target: String,
+    pub splits_sha256: Option<String>,
+    pub units: BTreeMap<String, UnitCertificate>,
+    pub dependencies: Vec<CertificateDependency>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UnitCertificate {
+    pub body: Option<Vec<String>>,
+    pub coverage_transactions: Vec<String>,
+    pub discovery: Option<DiscoveryCertificate>,
+    pub verified_source_link: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryCertificate {
+    pub kind: discover::Kind,
+    pub evidence_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CertificateDependency {
+    pub transaction: String,
+    pub reads: String,
+    pub sections: Vec<String>,
+}
+
+fn certificate_graph(
+    root: &Path,
+    target: &str,
+    results: &BTreeMap<String, (StageResult, Prepared)>,
+    certificates: &FinalCertificates,
+) -> Result<CertificateGraph> {
+    let splits_path = root.join("config").join(target).join("splits.txt");
+    let splits = read_optional(&splits_path)?;
+    let blocks = match &splits {
+        Some(bytes) => Splits::parse(&String::from_utf8(bytes.clone())?)?.blocks,
+        None => Default::default(),
+    };
+    let mut units: BTreeMap<String, UnitCertificate> = BTreeMap::new();
+    let mut dependencies = Vec::new();
+    if let Some((coverage, _)) = results.get("coverage") {
+        for applied in &coverage.applied {
+            let record: AppliedRecord = serde_json::from_value(applied.record.clone())?;
+            let transaction = &record.alternative.transaction;
+            if transaction.id != applied.id {
+                bail!("Final certificate transaction differs from applied history");
+            }
+            let sections: Vec<String> =
+                crate::stages::coverage::changed_sections(transaction).into_iter().collect();
+            for member in &transaction.members {
+                units
+                    .entry(member.unit.clone())
+                    .or_default()
+                    .coverage_transactions
+                    .push(transaction.id.clone());
+            }
+            for read in &transaction.reads {
+                dependencies.push(CertificateDependency {
+                    transaction: transaction.id.clone(),
+                    reads: read.unit.clone(),
+                    sections: sections.clone(),
+                });
+            }
+        }
+    }
+    if let Some((discovery, _)) = results.get("discover") {
+        for candidate in &discovery.accepted {
+            let proposal: discover::Proposal = serde_json::from_value(candidate.evidence.clone())?;
+            units.entry(candidate.name.clone()).or_default().discovery =
+                Some(DiscoveryCertificate {
+                    kind: proposal.kind,
+                    evidence_sha256: hash_file_bytes(&serde_json::to_vec(&candidate.evidence)?),
+                });
+        }
+    }
+    for name in &certificates.source_linked {
+        units.entry(name.clone()).or_default().verified_source_link = true;
+    }
+    for (name, certificate) in &mut units {
+        certificate.body = blocks.get(name).cloned();
+        if certificate.body.is_none()
+            && (!certificate.coverage_transactions.is_empty() || certificate.discovery.is_some())
+        {
+            bail!("Final ownership certificate for {name} has no split body");
+        }
+    }
+    Ok(CertificateGraph {
+        schema: 1,
+        target: target.to_string(),
+        splits_sha256: splits.as_deref().map(hash_file_bytes),
+        units,
+        dependencies,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,8 +217,12 @@ pub fn publish(
         bail!("Integration changed files a migration may not publish: {unexpected:?}");
     }
 
-    let mut journal =
-        Journal { status: Status::Publishing, changes: BTreeMap::new(), conflicts: Vec::new() };
+    let mut journal = Journal {
+        status: Status::Publishing,
+        changes: BTreeMap::new(),
+        conflicts: Vec::new(),
+        final_certificates_sha256: None,
+    };
     for name in &changed {
         journal.changes.insert(name.clone(), Change {
             before_sha256: owner.manifest.get(name).cloned(),
@@ -125,7 +235,7 @@ pub fn publish(
     write_json(&journal_path, &journal)?;
 
     let ctx = context(root, run, dir.path.join("owner-validation"), None);
-    let outcome = (|| -> Result<Report> {
+    let outcome = (|| -> Result<(Report, String)> {
         for (name, change) in &journal.changes {
             let path = root.join(name);
             if read_optional(&path)?.map(|b| hash_file_bytes(&b)) != change.before_sha256 {
@@ -181,16 +291,21 @@ pub fn publish(
             bail!("The project changed during final validation");
         }
         ctx.restore_generated_graph()?;
-        Ok(report)
+        let graph = certificate_graph(root, &run.target, results, &certificates)?;
+        let path = dir.path.join("final-certificates.json");
+        write_json(&path, &graph)?;
+        Ok((report, hash_file_bytes(&std::fs::read(path)?)))
     })();
 
     match outcome {
-        Ok(report) => {
+        Ok((report, certificate_sha256)) => {
+            journal.final_certificates_sha256 = Some(certificate_sha256);
             journal.status = Status::Published;
             write_json(&journal_path, &journal)?;
             Ok(report)
         }
         Err(error) => {
+            let _ = std::fs::remove_file(dir.path.join("final-certificates.json"));
             journal.conflicts = roll_back(root, &journal)?;
             journal.status = if journal.conflicts.is_empty() {
                 Status::RolledBack
@@ -252,11 +367,22 @@ pub fn recover(root: &Path, dir: &RunDir) -> Result<Option<Status>> {
     }
     let mut journal: Journal = read_json(&journal_path)?;
     if journal.status != Status::Publishing {
+        if journal.status == Status::Published {
+            let expected = journal
+                .final_certificates_sha256
+                .as_ref()
+                .context("Published run has no final certificate graph digest")?;
+            let path = dir.path.join("final-certificates.json");
+            if hash_file_bytes(&std::fs::read(&path)?) != *expected {
+                bail!("Final certificate graph changed since publication");
+            }
+        }
         return Ok(Some(journal.status));
     }
     journal.conflicts = roll_back(root, &journal)?;
     journal.status =
         if journal.conflicts.is_empty() { Status::RolledBack } else { Status::UserEditConflict };
+    let _ = std::fs::remove_file(dir.path.join("final-certificates.json"));
     write_json(&journal_path, &journal)?;
     Ok(Some(journal.status))
 }
@@ -327,6 +453,7 @@ mod tests {
                 after: Some(encode(after.as_bytes())),
             })]),
             conflicts: Vec::new(),
+            final_certificates_sha256: None,
         }
     }
 
@@ -378,8 +505,10 @@ mod tests {
         let journal = journal(dir.path(), "published\n");
         std::fs::write(dir.path().join("configure.py"), "published\n").unwrap();
         write_json(&run.path.join("publication.json"), &journal).unwrap();
+        std::fs::write(run.path.join("final-certificates.json"), b"incomplete").unwrap();
         assert_eq!(recover(dir.path(), &run).unwrap(), Some(Status::RolledBack));
         assert_eq!(std::fs::read_to_string(dir.path().join("configure.py")).unwrap(), "original\n");
+        assert!(!run.path.join("final-certificates.json").exists());
     }
 
     #[test]
@@ -388,12 +517,36 @@ mod tests {
         let run = RunDir { path: dir.path().join("run") };
         let mut journal = journal(dir.path(), "published\n");
         journal.status = Status::Published;
+        std::fs::create_dir_all(&run.path).unwrap();
+        std::fs::write(run.path.join("final-certificates.json"), b"certificate").unwrap();
+        journal.final_certificates_sha256 = Some(hash_file_bytes(b"certificate"));
         std::fs::write(dir.path().join("configure.py"), "published\n").unwrap();
         write_json(&run.path.join("publication.json"), &journal).unwrap();
         assert_eq!(recover(dir.path(), &run).unwrap(), Some(Status::Published));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("configure.py")).unwrap(),
             "published\n"
+        );
+    }
+
+    #[test]
+    fn resuming_a_published_run_checks_its_final_certificate_graph() {
+        let dir = project();
+        let run = RunDir { path: dir.path().join("run") };
+        let mut journal = journal(dir.path(), "published\n");
+        journal.status = Status::Published;
+        let graph = run.path.join("final-certificates.json");
+        std::fs::create_dir_all(&run.path).unwrap();
+        std::fs::write(&graph, b"first").unwrap();
+        journal.final_certificates_sha256 = Some(hash_file_bytes(b"first"));
+        write_json(&run.path.join("publication.json"), &journal).unwrap();
+        assert_eq!(recover(dir.path(), &run).unwrap(), Some(Status::Published));
+        std::fs::write(&graph, b"changed").unwrap();
+        assert!(recover(dir.path(), &run).unwrap_err().to_string().contains("certificate graph"));
+        journal.final_certificates_sha256 = None;
+        write_json(&run.path.join("publication.json"), &journal).unwrap();
+        assert!(
+            recover(dir.path(), &run).unwrap_err().to_string().contains("no final certificate")
         );
     }
 

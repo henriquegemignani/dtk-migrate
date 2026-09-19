@@ -1044,11 +1044,20 @@ The final body retains both BSS ranges, the source object is linked, and
 publication rechecks both certificates. The typed discovery injection uses the
 same directory whose digest is already frozen in the run environment.
 
-The remaining H work is to record the final composed per-unit state and
-certificate dependency graph explicitly in the published result, and to
-broaden evidence for unproven target-side data. The latter must remain withheld
-until a real target-side witness exists; a compiler or source-version guess is
-not sufficient.
+### H final certificate checkpoint
+
+Run schema 6 records `final-certificates.json`: the final body, when present, of every
+certified unit, the full accepted coverage transaction chain, the selected
+discovery evidence digest, source-link verification by this run, and the
+sections and neighbouring units each transaction read. The journal binds the
+artifact by SHA-256 and resume checks it; a rollback removes an unfinished
+artifact. The two-unit transaction fixture checks the neighbour dependency,
+and the composed three-stage fixture checks the final code and two BSS ranges.
+
+H's executable path is complete for data with independent target-side
+evidence. Unproven target-side data remains intentionally withheld; broader
+evidence belongs to a later policy change rather than an inferred linker mode.
+Proceed to step 8's refusal diagnostics and retry state.
 
 ## 8. Make refusals diagnostic and retries state-aware
 

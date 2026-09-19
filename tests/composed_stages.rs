@@ -111,6 +111,20 @@ fn coverage_data_and_verify_publish_one_composed_body() {
     }
     let publication = fixture.json(&format!("build/dtk-migrate/runs/{id}/publication.json"));
     assert_eq!(publication["status"], "published", "{publication:#}");
+    assert!(publication["final_certificates_sha256"].as_str().is_some());
+    let graph = fixture.json(&format!("build/dtk-migrate/runs/{id}/final-certificates.json"));
+    assert_eq!(graph["schema"], 1);
+    assert_eq!(
+        graph["units"]["A.cpp"]["body"],
+        serde_json::json!([
+            line(".text", CODE.0, CODE.1),
+            bss(BSS_ONE.0, BSS_ONE.1),
+            bss(BSS_TWO.0, BSS_TWO.1),
+        ])
+    );
+    assert_eq!(graph["units"]["A.cpp"]["discovery"]["kind"], "data");
+    assert_eq!(graph["units"]["A.cpp"]["verified_source_link"], true);
+    assert_eq!(graph["units"]["A.cpp"]["coverage_transactions"].as_array().unwrap().len(), 1);
 }
 
 #[test]

@@ -97,6 +97,7 @@ tools/                  the frozen dtk, ninja and dtk-migrate
 pool/worker-N/          the private workspaces
 integration/            the workspace the stages chain through
 publication.json        the journal, written before the first write
+final-certificates.json the final per-unit bodies and certificate dependencies
 result.json             the whole run
 ```
 
@@ -127,6 +128,14 @@ data boundaries it read from neighbours; those dependencies are not counted
 as units changed by a focused `--only` request. Discovery retains a data-only
 candidate when a code candidate for the same unit is reserved or refused.
 
+Successful publication writes `final-certificates.json` with each certified
+unit's complete final body when one exists, its accepted coverage transaction chain, the
+selected discovery evidence digest, and whether this run verified its source
+link. Transaction read dependencies name the neighbouring unit and section.
+The journal stores the file's SHA-256; resuming an already published run
+refuses a changed certificate record. An interrupted publication removes an
+unfinished record while rolling back.
+
 A rollback never overwrites an edit made meanwhile. Someone else's work outranks
 undoing ours: the file is left as they made it and named in the journal.
 
@@ -144,8 +153,8 @@ A worker failure stops the other lanes but keeps what they finished, so a resume
 run picks up from there.
 
 Resuming a run that already published does nothing and says so. A run written
-by a tool with a different run schema (currently 5, which adds scoped
-reservations and data fallbacks) is refused rather than reinterpreted.
+by a tool with a different run schema (currently 6, which binds the final
+certificate graph) is refused rather than reinterpreted.
 
 ## Resource settings
 

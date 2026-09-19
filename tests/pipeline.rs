@@ -293,6 +293,12 @@ fn a_run_publishes_only_the_candidate_that_builds_to_retail() {
     let changed: Vec<&str> =
         journal["changes"].as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(changed, ["configure.py"], "only configure.py should have been published");
+    let graph: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run.join("final-certificates.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(graph["units"]["A.cpp"]["body"].is_null(), "verify-only has no split file");
+    assert_eq!(graph["units"]["A.cpp"]["verified_source_link"], true);
 
     // Several workspaces each ran real builds.
     assert!(fixture.build_logs().len() >= 3, "{:?}", fixture.build_logs());
