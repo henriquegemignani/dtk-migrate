@@ -2,8 +2,140 @@
 
 Status: living implementation plan. Change A landed through `0a351d2`; Change B landed at
 `c6e0039`; Change C landed at `beb8e2d`, with end-to-end compatibility fixes at `cfd1cfa` and
-`2dcea5a`. Change E (atomic ownership transactions) is described in the checkpoint below. The
-remaining plan is based on the architecture after those changes.
+`2dcea5a`. Change E (atomic ownership transactions) landed at `520a3f3`. Change D's first two
+rules are described in the checkpoint below. The remaining plan is based on the architecture
+after those changes.
+
+## Implementation checkpoint after Change D (edges and complete sequences)
+
+Coverage policy 13, identification schema 3 (schema 2 still reads, and a reference must state
+its artifact's own schema), coverage evidence schema 11. The measurements before the helper
+re-check were made with policy 12, whose helper rule was looser. The re-check shows they stand
+except for one claim.
+
+- **One policy module.** `src/analysis/policy.rs` holds every threshold and the serialized
+  `CoveragePolicy`; `coverage.rs` re-exports it, `alternatives.rs` no longer carries its own
+  copies in other integer types, and the stage's `POLICY_VERSION` is the module's.
+- **Typed edges.** `src/analysis/boundaries.rs` judges each end of a range separately: the
+  function inside must be the unit's (independent member or caller-confined helper), the function
+  outside independently someone else's or absent. Current splits never support an edge. Every
+  alternative records both judged edges, the families that proposed each, the unit whose
+  attribution pins the far side, and rival supported addresses on the same side.
+- **Composition.** Within a section, exactly one supported left and one supported right address
+  among the unit's drafts compose into one claim when no draft already proposes both, their
+  member records agree and keep source order, target functions tile the range with only
+  alignment padding, and no other split is crossed. The full ownership assessment still decides.
+  Source drafts stay as fallbacks; a range with both edges supported outranks an otherwise
+  equally attributed one. Only *both* edges count: an earlier version that let one supported edge
+  outrank bytes made fragment-built units pick small fragments (CollisionUtil 14,724 → 1,868
+  bytes) and was withdrawn.
+- **Explained new ground**, decided in `ObservationIndex::assess` so trials and publication
+  recompute it: an *order-bracketed member* (attributed to the unit, weakly, between two
+  independent members that bracket it in source order); a *caller-confined helper* (unattributed,
+  placed by position, with callers only corroborating; at most one per claim), which needs the
+  caller inventory added in identification schema 3; and a *complete-sequence member*. Following
+  §6, a sole caller is not ownership proof. The helper's target neighbours must either put it
+  inside the unit, or at a seam between the unit's first or last source function and the section
+  end or another unit's independently attributed outermost function. Only then do callers choose
+  between the parties the seam admits. Each caller must be independently attributed or be the
+  member that places the helper. An earlier version accepted any helper whose callers were the
+  unit's; see the helper re-check below.
+- **Complete small sequences.** Every source function of the unit in a section, one contiguous
+  source run, pairs in order and by exact source address with the target functions tiling the
+  range, same count, none ambiguous, at least two independent. Each end is the section end, an
+  independent foreign function, or a function attributed to the unit's source-order neighbour.
+  Global minimums are unchanged.
+
+### Calibration
+
+All five scenarios on a frozen export of `ca286f45` (the live checkout moved mid-session, so an
+earlier comparison was discarded), Change E binary against each rule added:
+
+| Scenario | Units | Exact E | + edges | + complete sequences | Wrong |
+|---|---:|---:|---:|---:|---:|
+| consecutive-units | 475 | 48 | 63 | 219 | 0 |
+| everything | 794 | 80 | 103 | 343 | 0 |
+| isolated-unit | 397 | 74 | 91 | 183 | 0 |
+| truncated-splits | 346 | 142 | 142 | 206 | 0 |
+| misplaced-helper | 245 | 0 | 0 | 0 | 0 |
+
+No unit lost bytes against the previous step, no neighbour lost or wrong bytes, and the only named
+fault is still the pre-existing ScriptLoader fragment. Edges alone changed 55 selections, every one
+to exact. Complete sequences turned four previously exact units partial — CFinalInput,
+CBallCameraFailsafeState, CFluidPlaneDoor, CNESEmulator — by extending over ground the oracle
+leaves to auto-split objects, never onto another unit. The PAL linker map explains the two that
+the oracle declares source-linked: their linked objects are larger than their splits (FinalInput
+0x10DC against 0xF24, the difference being NTSC `ScaleAnalogueSticks`) and the surplus is
+dead-stripped while retail copies, including the named `GetFailsafeBezierPoint`, are extracted
+from `auto_03_*` objects. The claims describe the TU; the oracle splits are linkage workarounds.
+The other two add a 4- and an 8-byte stub the oracle leaves unassigned; they remain unknown.
+
+### Historical migration (edges only)
+
+Fresh worktree at `b65ad2a6`, run `20714-174402`, all four stages; published and rebuilt to
+retail (`4d3780c7…`). Scored with the same manifest as run `20714-094411`, which reproduces that
+run's documented numbers:
+
+| Recall population | Change C | Change D edges |
+|---|---:|---:|
+| 25 changed `.text` bodies, exact | 1 | 2 |
+| correct code bytes gained | 692 | 1,320 |
+| newly wrong / lost bytes | 0 / 0 | 0 / 0 |
+
+Platform is code-exact: the composed `0x800AA344..0x800AD964` (layout start, sequence end,
+`GetSortingBounds` order-bracketed, PAL-only `uninitialized_copy<SRiders>` caller-confined) was
+selected and accepted; its data remains H's. No oracle-declared source-linked control changed
+(only CARDBios, flagged identically in both runs). Coverage accepted 28 transactions (19 before),
+adding trailing caller-confined helpers to seven units the oracle leaves unassigned; later Prime
+work has since assigned one of them, CSequenceHelper's `uninitialized_copy`, exactly so.
+Discovery accepted 48 (54): two units are now coverage's and reserved, and four data-only
+candidates were displaced by code candidates the wider gate admits and that then showed no
+matched-code gain — the code-before-data preference H is to remove. Those four had added only
+ground the oracle does not assign.
+
+### Historical migration (edges and complete sequences)
+
+Second fresh worktree at `b65ad2a6`, run `20714-203839`; published and rebuilt to retail. Coverage
+accepted 44 of 47, discovery 46, verify 5.
+
+| Recall population | Change C | D edges | D edges + complete sequences |
+|---|---:|---:|---:|
+| 25 changed `.text` bodies, exact | 1 | 2 | 7 |
+| 27 changed complete bodies, exact | 0 | 0 | 4 |
+| correct code bytes gained | 692 | 1,320 | 1,824 |
+| newly wrong / lost bytes, damaged units, ranking failures | 0 | 0 | 0 |
+
+Group, TableGroup, CompoundWidget, Pane and SliderGroup are now code-exact with Platform and Sound;
+all but SliderGroup are complete-body exact too. Pane's proposal, previously build-refused as
+`no-matched-code-gain`, was accepted. No oracle-declared source-linked control changed. Nine
+further units extend into ground the oracle leaves to auto-split objects, seven by stubs of 4–364
+bytes; the two larger, CSteeringBehaviors (three functions before its first oracle function) and
+CWeaponMgr (`operator delete` and one function after its constructor), are exactly the functions
+their source sequences pair with, and the PAL link map places them in unassigned `auto_03_*`
+objects.
+
+### Helper re-check (policy 13)
+
+Review found the policy 12 helper rule treated caller locality as ownership proof: any
+unattributed function called only by the unit, through callers that need not be independent,
+could be claimed anywhere. Policy 13 requires position first (see the rule above). Calibration
+summaries are unchanged; they exercise one helper claim. A third fresh worktree at `b65ad2a6`,
+run `20715-004120`, published and rebuilt to retail (`4d3780c7…`), scores identically to
+`20714-203839` on every recall row: 7 of 25 changed `.text` bodies exact, 4 of 27 complete bodies,
+1,824 correct code bytes, nothing wrong, lost or damaged.
+
+Of the seven helpers policy 12 accepted, six sit at genuine seams, each after its unit's last
+source function and before another unit's independently attributed first. Those are Platform,
+CSequenceHelper, CAnimationSet, CBodyStateInfo, CPlayerVisor and CMetroidAreaCollider, and all six
+are kept. The seventh is refused. CStateManager's `fn_800520E0` followed `__sort3`, a function in
+the middle of CStateManager's 183, and its only caller was elsewhere in the unit. Its claim is now
+unselected, and CStateManager keeps `0x80045108..0x800520E0`. That line is the only change in the
+published split map. The PAL link map leaves the function in its own `auto_03_800520E0_text.o`,
+so the oracle has no owner for it either way.
+
+The trust in these manifests is `unverified` for every unit because no verify run exists at the
+oracle revision; the declared-linkage population above stands in for it. A verify run at
+`ca286f45` would let the benchmark report these as proven controls.
 
 ## Implementation checkpoint after Change E
 
@@ -473,7 +605,7 @@ Each change should be reviewable and tested locally. The plan does not require o
 | B | Typed attribution, source-independent identification output, persisted blockers | A |
 | C | Full-range conflict validation, provenance, safe ranking and fallback validation | B |
 | E | Atomic ownership transaction, identity and coordinator/publication integration (landed) | A–C |
-| D | Independent edges, composition, conservative small complete-sequence rule | C, E before enabling policy |
+| D | Independent edges, composition, conservative small complete-sequence rule (first rules implemented) | C, E before enabling policy |
 | F | Joint run inference using atomic transactions | D, E |
 | G | Binary helper families, optional object corroboration, orphan clusters | B–D; E for transfers |
 | H | Data range recovery and scoped cross-stage certificates | E, G |

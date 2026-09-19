@@ -32,15 +32,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     analysis::{
+        boundaries::{self, EdgeHypothesis, Side},
         coverage::{
             AdjacentOwnerTransition, BoundarySequence, CoverageAnchor, CoverageUnit, GapHelper,
-            LayoutShiftAnchor, MIN_ANCHOR_BYTES, MIN_LAYOUT_SHIFT_BYTES,
-            MIN_LAYOUT_SHIFT_CHANGED_ACCESSES, MIN_LAYOUT_SHIFT_FUNCTIONS,
-            MIN_SEQUENCE_ALIGNMENT_MARGIN, MIN_SEQUENCE_DIRECT_ANCHORS, MIN_SEQUENCE_FUNCTIONS,
-            MIN_SEQUENCE_MATCH_RATIO, MIN_SEQUENCE_MATCHED_BYTES, MIN_SEQUENCE_STRONG_FUNCTIONS,
-            MIN_SEQUENCE_TARGET_COVERAGE, SequenceFunction, current_policy,
+            LayoutShiftAnchor, SequenceFunction,
         },
         ownership::{ClaimClass, ObservationIndex, OwnershipAssessment},
+        policy::*,
     },
     project::{
         ownership_transaction::{MODULE, OwnershipTransaction, Provenance},
@@ -140,41 +138,6 @@ const MATCH_TIERS: [&str; 3] = ["confident", "probable", "candidate"];
 /// Tiers strong enough to count toward a policy minimum.
 const STRONG_TIERS: [&str; 2] = ["confident", "probable"];
 
-pub const MIN_LAYOUT_BOUNDARY_FUNCTIONS: usize = 4;
-pub const MIN_LAYOUT_BOUNDARY_BYTES: u32 = 1024;
-pub const MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES: u32 = 16;
-pub const MAX_LAYOUT_BOUNDARY_SIZE_DELTA: f32 = 0.02;
-pub const MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA: i64 = 1;
-
-pub const MIN_VTABLE_BOUNDARY_FUNCTIONS: usize = 8;
-pub const MIN_VTABLE_BOUNDARY_MATCH_RATIO: f32 = 0.85;
-pub const MIN_VTABLE_BOUNDARY_TARGET_COVERAGE: f32 = 0.85;
-pub const MIN_VTABLE_BOUNDARY_MATCHED_SLOTS: u32 = 8;
-pub const MIN_VTABLE_BOUNDARY_UNIT_SLOTS: usize = 4;
-pub const MAX_VTABLE_BOUNDARY_SIZE_DELTA: f32 = 0.03;
-pub const MAX_VTABLE_BOUNDARY_FUNCTION_DELTA: i64 = 1;
-pub const MAX_VTABLE_BOUNDARY_GAP_HELPERS: usize = 1;
-pub const MAX_VTABLE_SIZE_PADDING: i64 = 16;
-
-pub const MIN_OWNERSHIP_TRANSITION_FUNCTIONS: usize = 8;
-pub const MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS: u32 = 2;
-pub const MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS: u32 = 1;
-pub const MAX_OWNERSHIP_TRANSITION_SIZE_DELTA: f32 = 0.02;
-
-pub const MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS: usize = 8;
-pub const MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS: u32 = 2;
-pub const MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS: u32 = 2;
-pub const MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS: usize = 4;
-pub const MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS: u32 = 2;
-pub const MAX_ADJACENT_OWNER_SIZE_DELTA: f32 = 0.10;
-pub const MAX_ADJACENT_OWNER_GAP_HELPERS: usize = 1;
-
-/// The smallest alignment margin a boundary decision may rest on.
-///
-/// Below this the best alignment and the runner-up are close enough that the
-/// choice between them is arbitrary.
-const MIN_ALIGNMENT_MARGIN: f32 = 0.1;
-
 /// What a generator says a neighbour gives up: one contiguous range narrowed
 /// at one end. Only generation reads this; it becomes the neighbour's complete
 /// after-body in the transaction, which is what is applied and checked.
@@ -221,6 +184,11 @@ pub struct Alternative {
     /// transaction names who receives each address they lose.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub receiver_ownership: BTreeMap<String, OwnershipAssessment>,
+    /// The two edges of the range the candidate holds in this section once the
+    /// transaction applies, as the observations judge them. Diagnostic, and a
+    /// ranking key between otherwise equally attributed claims.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boundaries: Vec<EdgeHypothesis>,
     /// Everything that applying this alternative changes, with its exact
     /// preconditions. The only thing ever applied.
     pub transaction: OwnershipTransaction,
@@ -261,9 +229,27 @@ impl Alternative {
             anchors: Vec::new(),
             ownership: OwnershipAssessment::default(),
             receiver_ownership: BTreeMap::new(),
+            boundaries: Vec::new(),
             transaction,
         })
     }
+
+    /// How many of the resulting range's two edges the observations support.
+    pub fn supported_boundaries(&self) -> u32 {
+        self.boundaries.iter().filter(|edge| edge.supported).count() as u32
+    }
+
+    /// Whether both edges of the resulting range are supported: a boundary
+    /// finished at both ends, which is what a composition exists to produce.
+    ///
+    /// Only both edges count. A range with one supported edge is still an
+    /// unfinished claim, and preferring it would let a small fragment that
+    /// happens to touch a foreign function outrank a much larger claim with
+    /// more corroborated members. The certificate's own edge count is no
+    /// substitute: it credits a range only when it equals the envelope of the
+    /// unit's attributed members, which never includes a helper nothing
+    /// matched.
+    fn finished_boundary(&self) -> bool { self.supported_boundaries() == 2 }
 }
 
 /// What a generator proposes, before it is a transaction.
@@ -276,6 +262,18 @@ struct Draft {
     end: u32,
     anchors: Vec<serde_json::Value>,
     owner_revisions: Vec<OwnerRevision>,
+    /// For a composed claim, the families behind its left and right edges.
+    /// Any other draft's edges are both its own.
+    edge_families: Option<(Vec<String>, Vec<String>)>,
+}
+
+impl Draft {
+    fn family(&self) -> String {
+        match &self.support_group {
+            Some(group) => format!("{}:{group}", self.evidence),
+            None => self.evidence.clone(),
+        }
+    }
 }
 
 /// A digest of the coverage policy a transaction was derived under.
@@ -313,6 +311,7 @@ fn alternative(
         end,
         anchors,
         owner_revisions,
+        edge_families: None,
     }
 }
 
@@ -525,6 +524,7 @@ fn finish(draft: Draft, setting: &Setting) -> Option<Alternative> {
     // The same checks a trial will make, made now, so that nothing is offered
     // which could only ever be refused.
     transaction.preview(setting.blocks).ok()?;
+    let boundaries = judge_edges(&draft, &lines, setting);
 
     Some(Alternative {
         id: transaction.id.clone(),
@@ -539,8 +539,66 @@ fn finish(draft: Draft, setting: &Setting) -> Option<Alternative> {
         anchors: draft.anchors,
         ownership,
         receiver_ownership,
+        boundaries,
         transaction,
     })
+}
+
+/// Names, on every judged edge, the other supported addresses the unit's
+/// alternatives place on the same side of the same section. A supported edge
+/// with a rival is one the evidence has not settled.
+fn record_competing_edges(alternatives: &mut [Alternative]) {
+    let supported: BTreeSet<(String, Side, String)> = alternatives
+        .iter()
+        .flat_map(|alternative| &alternative.boundaries)
+        .filter(|edge| edge.supported)
+        .map(|edge| (edge.section.clone(), edge.side, edge.address.clone()))
+        .collect();
+    for edge in alternatives.iter_mut().flat_map(|alternative| &mut alternative.boundaries) {
+        edge.competing = supported
+            .iter()
+            .filter(|(section, side, address)| {
+                *section == edge.section && *side == edge.side && *address != edge.address
+            })
+            .map(|(_, _, address)| address.clone())
+            .collect();
+    }
+}
+
+/// Both edges of the range in `lines` that contains the draft's claim.
+fn judge_edges(draft: &Draft, lines: &[String], setting: &Setting) -> Vec<EdgeHypothesis> {
+    let Some(range) = lines.iter().filter_map(|line| parse_range(line)).find(|range| {
+        range.section == draft.section && range.start <= draft.start && draft.end <= range.end
+    }) else {
+        return Vec::new();
+    };
+    let (left, right) =
+        draft.edge_families.clone().unwrap_or_else(|| (vec![draft.family()], vec![draft.family()]));
+    // An edge the claim did not move is still the unit's edge, but none of
+    // this draft's families proposed it.
+    let families = |address: u32, moved: u32, families: Vec<String>| {
+        if address == moved { families } else { Vec::new() }
+    };
+    vec![
+        boundaries::judge(
+            setting.observations,
+            setting.unit,
+            MODULE,
+            &draft.section,
+            Side::Left,
+            range.start,
+            families(range.start, draft.start, left),
+        ),
+        boundaries::judge(
+            setting.observations,
+            setting.unit,
+            MODULE,
+            &draft.section,
+            Side::Right,
+            range.end,
+            families(range.end, draft.end, right),
+        ),
+    ]
 }
 
 /// The one range a unit claims in a section, when it claims exactly one.
@@ -678,7 +736,7 @@ fn direct_anchor_count(
                 && anchor_start < anchor_end
                 && anchor_end <= end
                 && anchor_end - anchor_start == anchor.size
-                && anchor.size >= 16
+                && anchor.size >= MIN_SEQUENCE_ANCHOR_BYTES
                 && !anchor.source_weak
                 && !anchor.target_weak
                 && anchor.source_extent_known
@@ -722,6 +780,7 @@ fn sort_alternatives(alternatives: &mut [Alternative]) {
         b.ownership
             .complete_membership
             .cmp(&a.ownership.complete_membership)
+            .then_with(|| b.finished_boundary().cmp(&a.finished_boundary()))
             .then_with(|| b.ownership.supported_edges.cmp(&a.ownership.supported_edges))
             .then_with(|| b.ownership.independent_members.cmp(&a.ownership.independent_members))
             .then_with(|| a.ownership.padding_bytes.cmp(&b.ownership.padding_bytes))
@@ -857,6 +916,17 @@ pub fn build(
         .collect();
     sort_drafts(&mut adjacent);
 
+    // A left edge one kind of evidence places and a right edge another
+    // places, as one claim. It is tried ahead of the drafts it came from,
+    // which stay as fallbacks: if the composition does not hold, they are
+    // still what each family alone supports.
+    let composed = compositions(
+        &unit.name,
+        adjacent.iter().chain(&sequences).chain(&shifted).chain(&combined).chain(&individual),
+        target_blocks,
+        observations,
+    );
+
     // Strongest kind first, and within a kind the biggest range first. A range
     // reached two ways is listed once.
     //
@@ -868,8 +938,16 @@ pub fn build(
     // for when the run turns out not to hold.
     let mut drafts: Vec<Draft> = Vec::new();
     let mut seen: BTreeSet<(String, u32, u32, String)> = BTreeSet::new();
-    for item in
-        adjacent.into_iter().chain(sequences).chain(shifted).chain(combined).chain(individual)
+    let complete = complete_sequences(unit, target_blocks, observations);
+
+    for item in composed
+        .into_iter()
+        .chain(complete)
+        .chain(adjacent)
+        .chain(sequences)
+        .chain(shifted)
+        .chain(combined)
+        .chain(individual)
     {
         let key = (
             item.section.clone(),
@@ -892,10 +970,215 @@ pub fn build(
     };
     let mut result: Vec<Alternative> =
         drafts.into_iter().filter_map(|draft| finish(draft, &setting)).collect();
+    record_competing_edges(&mut result);
     // Evidence quality is global. Generator order must not let a broad but
     // weak sequence outrank a fully attributed exact-body alternative.
     sort_alternatives(&mut result);
     result
+}
+
+/// Claims composed from the independently supported edges of other drafts.
+///
+/// Every draft proposes a left and a right edge. Each distinct address is
+/// judged on its own evidence; within one section, a composition is formed
+/// only when exactly one left and exactly one right address are supported, and
+/// no single draft already proposes both. More than one supported address on a
+/// side is a competing hypothesis this rule does not settle. The drafts behind
+/// the two edges must agree about every function they both place and keep
+/// source order across their union, and the range between may not reach
+/// another unit's split. Whether its interior is the unit's is left to the
+/// complete ownership assessment every alternative faces, so a composition
+/// across an unrelated island is refused there on the island's attribution.
+fn compositions<'a>(
+    unit: &str,
+    drafts: impl Iterator<Item = &'a Draft>,
+    target_blocks: &Blocks,
+    observations: &ObservationIndex,
+) -> Vec<Draft> {
+    let mut by_section: BTreeMap<&str, Vec<&Draft>> = BTreeMap::new();
+    for draft in drafts.filter(|draft| draft.owner_revisions.is_empty()) {
+        by_section.entry(draft.section.as_str()).or_default().push(draft);
+    }
+    let mut found = Vec::new();
+    for (section, drafts) in by_section {
+        let mut lefts: BTreeMap<u32, Vec<&Draft>> = BTreeMap::new();
+        let mut rights: BTreeMap<u32, Vec<&Draft>> = BTreeMap::new();
+        for draft in &drafts {
+            lefts.entry(draft.start).or_default().push(draft);
+            rights.entry(draft.end).or_default().push(draft);
+        }
+        let supported = |side: Side, candidates: &BTreeMap<u32, Vec<&Draft>>| -> Vec<u32> {
+            candidates
+                .keys()
+                .copied()
+                .filter(|&address| {
+                    boundaries::judge(observations, unit, MODULE, section, side, address, vec![])
+                        .supported
+                })
+                .collect()
+        };
+        let (&[left], &[right]) =
+            (&supported(Side::Left, &lefts)[..], &supported(Side::Right, &rights)[..])
+        else {
+            continue;
+        };
+        if left >= right
+            || drafts.iter().any(|draft| draft.start == left && draft.end == right)
+            || overlaps_other(unit, section, left, right, target_blocks)
+            || !tiled(observations, section, left, right)
+        {
+            continue;
+        }
+        let (from_left, from_right) = (lefts[&left][0], rights[&right][0]);
+        let Some(anchors) = compatible_members(from_left, from_right, left, right) else {
+            continue;
+        };
+        let families = |drafts: &[&Draft]| {
+            let mut families: Vec<String> = drafts.iter().map(|draft| draft.family()).collect();
+            families.dedup();
+            families
+        };
+        found.push(Draft {
+            evidence: "composed-boundary".into(),
+            support_group: Some(format!(
+                "{}@{}|{}@{}",
+                from_left.family(),
+                format_address(left),
+                from_right.family(),
+                format_address(right)
+            )),
+            section: section.to_string(),
+            start: left,
+            end: right,
+            anchors,
+            owner_revisions: Vec::new(),
+            edge_families: Some((families(&lefts[&left]), families(&rights[&right]))),
+        });
+    }
+    found
+}
+
+/// The span of a unit's attributed members in each code section, when the
+/// observations confirm it is the unit's complete ordered sequence there.
+///
+/// This is the route for sequences too small for an ordinary boundary
+/// sequence's byte and function minimums. It asks for more than size would:
+/// every source function paired in order, nothing unexplained in between, an
+/// independent core, and both ends bounded by something other than a split.
+/// See [`ObservationIndex::complete_sequence`], which the ownership assessment
+/// consults again, so the claim is certified by the same rule that proposed it.
+fn complete_sequences(
+    unit: &CoverageUnit,
+    target_blocks: &Blocks,
+    observations: &ObservationIndex,
+) -> Vec<Draft> {
+    let mut members: BTreeMap<&str, Vec<&crate::analysis::ownership::FunctionAttribution>> =
+        BTreeMap::new();
+    for item in &observations.report().attributions {
+        if item.source.unit == unit.name
+            && item.target.module == MODULE
+            && item.target.section == item.source.section
+            && CODE_SECTIONS.contains(&item.target.section.as_str())
+        {
+            members.entry(item.target.section.as_str()).or_default().push(item);
+        }
+    }
+    let mut found = Vec::new();
+    for (section, mut members) in members {
+        members.sort_by_key(|item| parse_address(&item.target.address));
+        let (Some(start), Some(end)) = (
+            members.first().and_then(|item| parse_address(&item.target.address)),
+            members.last().and_then(|item| parse_address(&item.target.end)),
+        ) else {
+            continue;
+        };
+        let Some(sequence) =
+            observations.complete_sequence(&unit.name, MODULE, section, start, end)
+        else {
+            continue;
+        };
+        if overlaps_other(&unit.name, section, start, end, target_blocks) {
+            continue;
+        }
+        let anchors = members
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "section": section,
+                    "source_name": item.source.name,
+                    "source_address": item.source.address,
+                    "target_address": item.target.address,
+                    "target_end": item.target.end,
+                    "attribution_id": item.id,
+                    "independent": item.independent,
+                })
+            })
+            .collect();
+        found.push(alternative(
+            section,
+            start,
+            end,
+            anchors,
+            "complete-sequence",
+            Some(serde_json::to_string(&(&sequence.left, &sequence.right)).unwrap_or_default()),
+            vec![],
+        ));
+    }
+    found
+}
+
+/// Code sections a sequence may be recovered in.
+const CODE_SECTIONS: [&str; 2] = [".init", ".text"];
+
+/// Whether target functions tile `start..end` with nothing but alignment
+/// padding between them, and none reaching past either end.
+fn tiled(observations: &ObservationIndex, section: &str, start: u32, end: u32) -> bool {
+    let mut cursor = start;
+    for function in observations.section_functions(MODULE, section) {
+        let (Some(left), Some(right)) =
+            (parse_address(&function.address), parse_address(&function.end))
+        else {
+            return false;
+        };
+        if right <= start || left >= end {
+            continue;
+        }
+        if left < start || right > end || left - cursor > MAX_COMPOSED_PADDING_GAP {
+            return false;
+        }
+        cursor = right;
+    }
+    cursor > start && end - cursor <= MAX_COMPOSED_PADDING_GAP
+}
+
+/// The union of two drafts' member records, when they describe one ordered
+/// sequence: no target function placed from two different source functions,
+/// source order kept across the union, and every member inside the claim.
+fn compatible_members(
+    left: &Draft,
+    right: &Draft,
+    start: u32,
+    end: u32,
+) -> Option<Vec<serde_json::Value>> {
+    let mut members: BTreeMap<u32, (u32, serde_json::Value)> = BTreeMap::new();
+    for anchor in left.anchors.iter().chain(&right.anchors) {
+        let target = parse_address(anchor.get("target_address")?.as_str()?)?;
+        let source = parse_address(anchor.get("source_address")?.as_str()?)?;
+        let target_end = parse_address(anchor.get("target_end")?.as_str()?)?;
+        if target < start || target_end > end {
+            return None;
+        }
+        match members.get(&target) {
+            Some((known, _)) if *known != source => return None,
+            Some(_) => {}
+            None => {
+                members.insert(target, (source, anchor.clone()));
+            }
+        }
+    }
+    let sources: Vec<u32> = members.values().map(|(source, _)| *source).collect();
+    (!members.is_empty() && sources.windows(2).all(|pair| pair[0] < pair[1]))
+        .then(|| members.into_values().map(|(_, anchor)| anchor).collect())
 }
 
 /// Ranges claimed by a group of functions that differ only where a member
@@ -1026,11 +1309,11 @@ fn ownership_transition(
         observations.target_function_count("main", &sequence.section, start, end);
 
     if !sequence_is_observed(&unit.name, &sequence.section, functions, observations)
-        || functions.len() < MIN_OWNERSHIP_TRANSITION_FUNCTIONS
+        || functions.len() < MIN_OWNERSHIP_TRANSITION_FUNCTIONS as usize
         || source_functions as usize != functions.len()
         || target_functions as usize != functions.len()
         || alignment_margin(sequence.best_alignment_score, sequence.second_alignment_score)
-            < MIN_ALIGNMENT_MARGIN
+            < MIN_SEQUENCE_ALIGNMENT_MARGIN
         || strong < MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS
         // The run must tile the whole claimed range, end to end.
         || ranges.windows(2).any(|pair| pair[0].1 != pair[1].0)
@@ -1155,12 +1438,12 @@ fn layout_corroborated(
         // One constant offset shift, or two separated by a single breakpoint.
         || !(1..=2).contains(&delta_length)
         || breakpoints.len() != 1
-        || anchors.len() < MIN_LAYOUT_BOUNDARY_FUNCTIONS
+        || anchors.len() < MIN_LAYOUT_BOUNDARY_FUNCTIONS as usize
         || total_size < MIN_LAYOUT_BOUNDARY_BYTES
         || total_changed < MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES
         || size_delta > MAX_LAYOUT_BOUNDARY_SIZE_DELTA
         || (i64::from(source_functions) - i64::from(target_functions)).abs()
-            > MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA
+            > i64::from(MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA)
         || source_addresses.iter().any(Option::is_none)
         || !source_addresses.windows(2).all(|pair| pair[0] < pair[1])
         || ranges.iter().any(|(a, b)| a.is_none() || b.is_none())
@@ -1255,7 +1538,7 @@ fn vtable_corroborated(
     };
 
     if !sequence_is_observed(&unit.name, &sequence.section, functions, observations)
-        || functions.len() < MIN_VTABLE_BOUNDARY_FUNCTIONS
+        || functions.len() < MIN_VTABLE_BOUNDARY_FUNCTIONS as usize
         || source_functions == 0
         || (functions.len() as f32 / source_functions as f32) < MIN_VTABLE_BOUNDARY_MATCH_RATIO
         || (aligned_bytes as f32 / (end - start) as f32)
@@ -1263,7 +1546,7 @@ fn vtable_corroborated(
         // At most one source function may be unaccounted for.
         || !(0..=1).contains(&(i64::from(source_functions) - functions.len() as i64))
         || (i64::from(source_functions) - i64::from(target_functions)).abs()
-            > MAX_VTABLE_BOUNDARY_FUNCTION_DELTA
+            > i64::from(MAX_VTABLE_BOUNDARY_FUNCTION_DELTA)
         || size_delta > MAX_VTABLE_BOUNDARY_SIZE_DELTA
         || functions.iter().any(|f| !f.primary)
         || !source_addresses.windows(2).all(|pair| pair[0] < pair[1])
@@ -1273,7 +1556,7 @@ fn vtable_corroborated(
         || support.target_address.is_empty()
         || support.matched_slots < MIN_VTABLE_BOUNDARY_MATCHED_SLOTS
         || support.agreeing_slots != support.matched_slots
-        || support.unit_slots.len() < MIN_VTABLE_BOUNDARY_UNIT_SLOTS
+        || support.unit_slots.len() < MIN_VTABLE_BOUNDARY_UNIT_SLOTS as usize
         || support.unit_slots.len() > support.agreeing_slots as usize
         || slot_offsets.len() != support.unit_slots.len()
         || slot_offsets.iter().any(|offset| offset % 4 != 0 || *offset >= support.source_size)
@@ -1282,8 +1565,8 @@ fn vtable_corroborated(
         || support.source_size == 0
         || support.target_size == 0
         || (i64::from(support.source_size) - i64::from(support.target_size)).abs()
-            > MAX_VTABLE_SIZE_PADDING
-        || !(1..=MAX_VTABLE_BOUNDARY_GAP_HELPERS).contains(&helpers.len())
+            > i64::from(MAX_VTABLE_SIZE_PADDING)
+        || !(1..=MAX_VTABLE_BOUNDARY_GAP_HELPERS as usize).contains(&helpers.len())
         || helpers.len() as i64 != i64::from(target_functions) - functions.len() as i64
         || !(0..helpers.len()).all(helper_ok)
         || helper_ranges
@@ -1437,22 +1720,22 @@ fn adjacent_owner_alternative(
 
     if !sequence_is_observed(&unit.name, section, &transition.functions, observations)
         || !sequence_is_observed(&owner.unit, section, &owner.functions, observations)
-        || transition.functions.len() < MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS
+        || transition.functions.len() < MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS as usize
         || candidate_source_functions as usize != transition.functions.len()
         || candidate_target_functions as usize != transition.functions.len()
         || candidate_strong < MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS
         || direct_anchors < MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS
         || alignment_margin(transition.best_alignment_score, transition.second_alignment_score)
-            < MIN_ALIGNMENT_MARGIN
+            < MIN_SEQUENCE_ALIGNMENT_MARGIN
         || [start, end, revised_start, revised_end].iter().any(|value| value % 4 != 0)
         || candidate_delta > MAX_ADJACENT_OWNER_SIZE_DELTA
         || !partition_covers(start, end, &candidate_ranges, &[])
         || owner_source_functions as usize != owner.functions.len()
-        || owner.functions.len() < MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS
+        || owner.functions.len() < MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS as usize
         || owner_strong < MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS
         || owner_target_functions as usize != owner.functions.len() + helpers.len()
         || owner_delta > MAX_ADJACENT_OWNER_SIZE_DELTA
-        || helpers.len() > MAX_ADJACENT_OWNER_GAP_HELPERS
+        || helpers.len() > MAX_ADJACENT_OWNER_GAP_HELPERS as usize
         || !partition_covers(revised_start, revised_end, &owner_ranges, helpers)
         || helpers.iter().any(|helper| {
             let callers: Vec<Option<u32>> =
@@ -1983,6 +2266,477 @@ mod tests {
         ]);
         assert_eq!(transaction.net_bytes(), 0);
         assert!(joint.receiver_ownership.is_empty(), "B.cpp only gives ground up");
+    }
+
+    /// One target function of a hand-built world.
+    struct Placed {
+        /// The unit it is attributed to; `None` leaves it unattributed.
+        unit: Option<&'static str>,
+        start: u32,
+        end: u32,
+        /// Its source address, which sets source order.
+        source: u32,
+        independent: bool,
+        /// A weak symbol, which the ownership gate calls a shared helper.
+        shared: bool,
+        /// A runner-up close enough to make the identity undecided.
+        ambiguous: bool,
+        /// Target addresses of the functions calling it.
+        callers: Vec<u32>,
+    }
+
+    fn member(unit: &'static str, start: u32, end: u32, source: u32) -> Placed {
+        Placed {
+            unit: Some(unit),
+            start,
+            end,
+            source,
+            independent: true,
+            shared: false,
+            ambiguous: false,
+            callers: vec![],
+        }
+    }
+
+    fn shared(mut placed: Placed) -> Placed {
+        placed.shared = true;
+        placed.independent = false;
+        placed
+    }
+
+    fn ambiguous(mut placed: Placed) -> Placed {
+        placed.ambiguous = true;
+        placed
+    }
+
+    fn weak(mut placed: Placed) -> Placed {
+        placed.independent = false;
+        placed
+    }
+
+    fn helper(start: u32, end: u32, callers: Vec<u32>) -> Placed {
+        Placed { callers, unit: None, independent: false, ..member("", start, end, 0) }
+    }
+
+    /// Observations of exactly these functions, all in `section`.
+    fn world(section: &str, placed: &[Placed]) -> ObservationIndex {
+        let mut units: BTreeMap<&str, Vec<CoverageAnchor>> = BTreeMap::new();
+        for function in placed {
+            let Some(unit) = function.unit else { continue };
+            let mut anchor = coverage_fixture::anchor(
+                &format!("f{:X}", function.start),
+                function.start,
+                function.end,
+            );
+            anchor.section = section.into();
+            anchor.source_address = format_address(function.source);
+            anchor.source_weak = function.shared;
+            units.entry(unit).or_default().push(anchor);
+        }
+        let units: Vec<CoverageUnit> = units
+            .into_iter()
+            .map(|(name, anchors)| coverage_fixture::unit(name, anchors))
+            .collect();
+        let mut report =
+            coverage_fixture::report("source", "target", units.clone()).identifications;
+        for function in placed {
+            let address = format_address(function.start);
+            if !function.independent
+                && let Some(item) =
+                    report.attributions.iter_mut().find(|item| item.target.address == address)
+            {
+                // Nothing that makes an attribution decisive.
+                item.method = crate::analysis::matching::MatchMethod::Layout;
+                item.unique_exact_body = false;
+                item.distinctive_body = false;
+            }
+            if function.ambiguous
+                && let Some(item) =
+                    report.attributions.iter_mut().find(|item| item.target.address == address)
+            {
+                item.competing = Some(crate::analysis::ownership::CompetingAttribution {
+                    source_name: "rival".into(),
+                    source_unit: None,
+                    relative_score: 1.0,
+                });
+            }
+            if function.unit.is_none() {
+                report.target_functions.push(
+                    crate::analysis::ownership::TargetFunctionObservation {
+                        name: format!("fn_{:X}", function.start),
+                        module: "main".into(),
+                        section: section.into(),
+                        address: address.clone(),
+                        end: format_address(function.end),
+                        current_owner: None,
+                        owner_autogenerated: false,
+                        callers: Vec::new(),
+                    },
+                );
+            }
+            let observed =
+                report.target_functions.iter_mut().find(|item| item.address == address).unwrap();
+            observed.callers = function
+                .callers
+                .iter()
+                .map(|caller| crate::analysis::ownership::CallerReference {
+                    section: section.into(),
+                    address: format_address(*caller),
+                })
+                .collect();
+        }
+        let expected = units.iter().map(|unit| unit.name.clone()).collect();
+        ObservationIndex::load(report, "source", "target", &expected).unwrap()
+    }
+
+    fn block(section: &str, start: u32, end: u32) -> String { split_line(section, start, end) }
+
+    /// Everything `build` would offer for `unit` from these drafts, in order.
+    fn offered(
+        unit: &str,
+        drafts: Vec<Draft>,
+        blocks: &Blocks,
+        observations: &ObservationIndex,
+    ) -> Vec<Alternative> {
+        let setting =
+            Setting { unit, blocks, observations, required_extracts: &[], policy: policy_digest() };
+        let composed = compositions(unit, drafts.iter(), blocks, observations);
+        let mut found: Vec<Alternative> = composed
+            .into_iter()
+            .chain(drafts)
+            .filter_map(|draft| finish(draft, &setting))
+            .collect();
+        sort_alternatives(&mut found);
+        found
+    }
+
+    /// A Platform-shaped neighbourhood in `section`. Sound's tail is
+    /// independently Sound's though its split stops short; Platform's first
+    /// function is placed by layout evidence, its second only by the order of
+    /// its neighbours, and its last is a helper nothing matched that only
+    /// Platform calls. UserNames begins where Platform must end.
+    fn platform(section: &str) -> (ObservationIndex, Blocks, Vec<Draft>) {
+        let observations = world(section, &[
+            member("Sound.cpp", 0x1000, 0x1080, 0x9000),
+            member("Sound.cpp", 0x1080, 0x1100, 0x9080),
+            member("Platform.cpp", 0x1100, 0x1180, 0x5000),
+            weak(member("Platform.cpp", 0x1180, 0x1200, 0x5080)),
+            member("Platform.cpp", 0x1200, 0x1280, 0x5100),
+            member("Platform.cpp", 0x1280, 0x1300, 0x5180),
+            helper(0x1300, 0x1340, vec![0x1280]),
+            member("UserNames.cpp", 0x1340, 0x1380, 0x7000),
+        ]);
+        let mut blocks: Blocks = IndexMap::new();
+        blocks.insert("Sound.cpp".into(), vec![block(section, 0x1000, 0x1080)]);
+        blocks.insert("Platform.cpp".into(), vec![block(section, 0x1200, 0x1300)]);
+        blocks.insert("UserNames.cpp".into(), vec![block(section, 0x1340, 0x1380)]);
+        let placed = |start: u32, source: u32| {
+            serde_json::json!({
+                "target_address": format_address(start),
+                "target_end": format_address(start + 0x80),
+                "source_address": format_address(source),
+            })
+        };
+        let layout = alternative(
+            section,
+            0x1100,
+            0x1280,
+            vec![placed(0x1100, 0x5000), placed(0x1200, 0x5100)],
+            "this-layout-shift",
+            Some("group".into()),
+            vec![],
+        );
+        // Bounded by the neighbours' current splits, so its start is Sound's
+        // stale end.
+        let sequence = alternative(
+            section,
+            0x1080,
+            0x1340,
+            vec![placed(0x1100, 0x5000), placed(0x1200, 0x5100), placed(0x1280, 0x5180)],
+            "boundary-sequence",
+            Some("Sound.cpp|UserNames.cpp".into()),
+            vec![],
+        );
+        (observations, blocks, vec![sequence, layout])
+    }
+
+    #[test]
+    fn a_layout_start_and_a_sequence_end_compose_into_the_exact_range() {
+        let (observations, blocks, drafts) = platform(".text");
+        let found = offered("Platform.cpp", drafts, &blocks, &observations);
+
+        // The sequence reaches into Sound's independently attributed tail and
+        // is refused; the layout claim stands but stops at a stale end.
+        let ranges: Vec<(&str, &str, &str)> =
+            found.iter().map(|a| (a.evidence.as_str(), a.start.as_str(), a.end.as_str())).collect();
+        assert_eq!(ranges, [
+            ("composed-boundary", "0x00001100", "0x00001340"),
+            ("this-layout-shift", "0x00001100", "0x00001280"),
+        ]);
+        let composed = &found[0];
+        assert_eq!(composed.lines, [block(".text", 0x1100, 0x1340)]);
+        assert_eq!(composed.supported_boundaries(), 2);
+        assert_eq!(found[1].supported_boundaries(), 1);
+        // The layout claim is exactly the attributed members' envelope, which
+        // the certificate credits with its one supported edge.
+        assert_eq!(found[1].ownership.supported_edges, 1);
+        assert_eq!(composed.ownership.new_order_bracketed, 1);
+        assert_eq!(composed.ownership.new_caller_confined_helpers, 1);
+        assert_eq!(composed.ownership.new_unresolved, 0);
+        let [left, right] = &composed.boundaries[..] else { panic!() };
+        assert_eq!(
+            (left.address.as_str(), left.depends_on.as_deref()),
+            ("0x00001100", Some("Sound.cpp"))
+        );
+        assert_eq!(left.families, ["this-layout-shift:group"]);
+        assert_eq!(right.inside.party, boundaries::Party::CallerConfinedHelper);
+        assert_eq!(right.depends_on.as_deref(), Some("UserNames.cpp"));
+        assert_eq!(right.families, ["boundary-sequence:Sound.cpp|UserNames.cpp"]);
+        // Nothing anyone else holds moves.
+        assert_eq!(composed.transaction.writes().collect::<Vec<_>>(), ["Platform.cpp"]);
+    }
+
+    #[test]
+    fn composition_works_on_init_as_on_text() {
+        let (observations, blocks, drafts) = platform(".init");
+        let found = offered("Platform.cpp", drafts, &blocks, &observations);
+        assert_eq!(found[0].evidence, "composed-boundary");
+        assert_eq!(found[0].lines, [block(".init", 0x1100, 0x1340)]);
+    }
+
+    #[test]
+    fn composition_keeps_every_other_section_of_the_unit() {
+        let (observations, mut blocks, drafts) = platform(".text");
+        blocks["Platform.cpp"] = vec![
+            block(".init", 0x100, 0x140),
+            block(".text", 0x1200, 0x1300),
+            format!("{} align:8", block(".data", 0x8000, 0x8040)),
+        ];
+        let found = offered("Platform.cpp", drafts, &blocks, &observations);
+        assert_eq!(found[0].evidence, "composed-boundary");
+        assert_eq!(found[0].lines, [
+            block(".init", 0x100, 0x140),
+            block(".text", 0x1100, 0x1340),
+            format!("{} align:8", block(".data", 0x8000, 0x8040)),
+        ]);
+    }
+
+    #[test]
+    fn a_second_supported_edge_on_one_side_leaves_the_composition_undecided() {
+        // A foreign function interleaved in Platform's run gives each side two
+        // supported addresses. Which pair is Platform's is exactly what the
+        // evidence here cannot say.
+        let observations = world(".text", &[
+            member("Sound.cpp", 0x1080, 0x1100, 0x9080),
+            member("Platform.cpp", 0x1100, 0x1180, 0x5000),
+            member("Platform.cpp", 0x1180, 0x1200, 0x5080),
+            member("Other.cpp", 0x1200, 0x1280, 0x6000),
+            member("Platform.cpp", 0x1280, 0x1300, 0x5100),
+            member("UserNames.cpp", 0x1300, 0x1380, 0x7000),
+        ]);
+        let drafts = vec![
+            alternative(".text", 0x1100, 0x1180, vec![], "this-layout-shift", None, vec![]),
+            alternative(".text", 0x1180, 0x1200, vec![], "exact-body", None, vec![]),
+            alternative(".text", 0x1280, 0x1300, vec![], "exact-body", None, vec![]),
+        ];
+        let mut found = offered("Platform.cpp", drafts, &IndexMap::new(), &observations);
+        assert!(found.iter().all(|a| a.evidence != "composed-boundary"), "{found:#?}");
+        // The rivalry is recorded on the edges rather than decided.
+        record_competing_edges(&mut found);
+        let left = found
+            .iter()
+            .flat_map(|a| &a.boundaries)
+            .find(|edge| edge.side == Side::Left && edge.address == "0x00001100")
+            .unwrap();
+        assert_eq!(left.competing, ["0x00001280"]);
+    }
+
+    #[test]
+    fn composition_never_spans_an_unrelated_island() {
+        // A.cpp's two runs are separated by B.cpp's function, which nothing
+        // has split yet. Each run's outer edge is supported; the range between
+        // them is not A's.
+        let observations = world(".text", &[
+            member("A.cpp", 0x1000, 0x1080, 0x100),
+            weak(member("A.cpp", 0x1080, 0x1100, 0x180)),
+            member("B.cpp", 0x1100, 0x1200, 0x900),
+            weak(member("A.cpp", 0x1200, 0x1280, 0x200)),
+            member("A.cpp", 0x1280, 0x1300, 0x280),
+        ]);
+        let blocks: Blocks = IndexMap::new();
+        let drafts = vec![
+            alternative(".text", 0x1000, 0x1080, vec![], "exact-body", None, vec![]),
+            alternative(".text", 0x1280, 0x1300, vec![], "exact-body", None, vec![]),
+        ];
+        let found = offered("A.cpp", drafts, &blocks, &observations);
+        assert!(found.iter().all(|a| a.end != "0x00001300" || a.start != "0x00001000"));
+        assert!(found.iter().all(|a| a.evidence != "composed-boundary"), "{found:#?}");
+    }
+
+    #[test]
+    fn two_unexplained_functions_are_a_cluster_not_a_helper() {
+        let observations = world(".text", &[
+            member("Sound.cpp", 0x1080, 0x1100, 0x9080),
+            member("Platform.cpp", 0x1100, 0x1180, 0x5000),
+            member("Platform.cpp", 0x1180, 0x1200, 0x5080),
+            helper(0x1200, 0x1240, vec![0x1180]),
+            helper(0x1240, 0x1280, vec![0x1180]),
+            member("UserNames.cpp", 0x1280, 0x1300, 0x7000),
+        ]);
+        let blocks: Blocks = IndexMap::new();
+        let drafts = vec![
+            alternative(".text", 0x1100, 0x1200, vec![], "exact-body", None, vec![]),
+            alternative(".text", 0x1100, 0x1280, vec![], "boundary-sequence", None, vec![]),
+        ];
+        let found = offered("Platform.cpp", drafts, &blocks, &observations);
+        assert!(found.iter().all(|a| a.end != "0x00001280"), "{found:#?}");
+    }
+
+    #[test]
+    fn a_helper_called_from_outside_the_unit_is_not_its_helper() {
+        let observations = world(".text", &[
+            member("Platform.cpp", 0x1100, 0x1180, 0x5000),
+            member("Platform.cpp", 0x1180, 0x1200, 0x5080),
+            helper(0x1200, 0x1240, vec![0x1180, 0x1280]),
+            member("UserNames.cpp", 0x1280, 0x1300, 0x7000),
+        ]);
+        let drafts =
+            vec![alternative(".text", 0x1100, 0x1280, vec![], "boundary-sequence", None, vec![])];
+        assert!(offered("Platform.cpp", drafts, &IndexMap::new(), &observations).is_empty());
+    }
+
+    #[test]
+    fn a_helper_holds_up_an_edge_only_at_a_resolved_seam() {
+        // UserNames has an earlier function elsewhere, so the one after the
+        // helper need not be where UserNames begins: the helper could be its.
+        // Platform's call into it corroborates but does not decide.
+        let observations = world(".text", &[
+            member("UserNames.cpp", 0x0F00, 0x0F80, 0x6F00),
+            member("Sound.cpp", 0x1000, 0x1080, 0x9000),
+            member("Sound.cpp", 0x1080, 0x1100, 0x9080),
+            member("Platform.cpp", 0x1100, 0x1180, 0x5000),
+            weak(member("Platform.cpp", 0x1180, 0x1200, 0x5080)),
+            member("Platform.cpp", 0x1200, 0x1280, 0x5100),
+            member("Platform.cpp", 0x1280, 0x1300, 0x5180),
+            helper(0x1300, 0x1340, vec![0x1280]),
+            member("UserNames.cpp", 0x1340, 0x1380, 0x7000),
+        ]);
+        let (_, blocks, drafts) = platform(".text");
+        let found = offered("Platform.cpp", drafts, &blocks, &observations);
+        assert!(found.iter().all(|a| a.evidence != "composed-boundary"), "{found:#?}");
+        assert!(found.iter().all(|a| a.end != "0x00001340"), "{found:#?}");
+    }
+
+    #[test]
+    fn edges_whose_members_disagree_do_not_compose() {
+        let (observations, blocks, mut drafts) = platform(".text");
+        // The sequence now places a different source function at 0x1200.
+        drafts[0].anchors[1]["source_address"] = serde_json::json!(format_address(0x5200));
+        let found = offered("Platform.cpp", drafts, &blocks, &observations);
+        assert!(found.iter().all(|a| a.evidence != "composed-boundary"), "{found:#?}");
+    }
+
+    /// A Group-shaped neighbourhood: Frame, then Group's six functions, then
+    /// HeadWidget, in the same order in both versions. Only Group's middle
+    /// four are independently attributed; its first is a weak function its
+    /// split does not yet hold, and both neighbours are known only by name.
+    fn group() -> Vec<Placed> {
+        vec![
+            weak(member("Frame.cpp", 0x1000, 0x1100, 0x100)),
+            shared(member("Group.cpp", 0x1100, 0x110C, 0x200)),
+            member("Group.cpp", 0x110C, 0x1140, 0x300),
+            member("Group.cpp", 0x1140, 0x1160, 0x400),
+            member("Group.cpp", 0x1160, 0x11C0, 0x500),
+            member("Group.cpp", 0x11C0, 0x1220, 0x600),
+            weak(member("Group.cpp", 0x1220, 0x12C0, 0x700)),
+            weak(member("Head.cpp", 0x12C0, 0x1300, 0x900)),
+        ]
+    }
+
+    fn group_blocks() -> Blocks {
+        let mut blocks: Blocks = IndexMap::new();
+        blocks.insert("Frame.cpp".into(), vec![block(".text", 0x1000, 0x1100)]);
+        blocks.insert("Group.cpp".into(), vec![block(".text", 0x110C, 0x12C0)]);
+        blocks.insert("Head.cpp".into(), vec![block(".text", 0x12C0, 0x1300)]);
+        blocks
+    }
+
+    fn complete_for(placed: &[Placed], blocks: &Blocks) -> Vec<Alternative> {
+        let observations = world(".text", placed);
+        let unit = coverage_fixture::unit("Group.cpp", Vec::new());
+        let drafts = complete_sequences(&unit, blocks, &observations);
+        offered("Group.cpp", drafts, blocks, &observations)
+    }
+
+    #[test]
+    fn a_complete_small_sequence_recovers_its_weak_first_member() {
+        let found = complete_for(&group(), &group_blocks());
+        let [claim] = &found[..] else { panic!("{found:#?}") };
+        assert_eq!(claim.evidence, "complete-sequence");
+        assert_eq!(claim.lines, [block(".text", 0x1100, 0x12C0)]);
+        assert_eq!(claim.ownership.new_complete_sequence_members, 1);
+        assert_eq!(claim.ownership.new_shared_helpers, 0);
+        // Both ends are resolved by the source order, and the record says so.
+        let resolution = claim.support_group.as_deref().unwrap();
+        assert!(resolution.contains("source-order-neighbour"), "{resolution}");
+        assert!(resolution.contains("Frame.cpp") && resolution.contains("Head.cpp"));
+    }
+
+    #[test]
+    fn a_complete_sequence_with_an_unexplained_target_function_is_unresolved() {
+        let mut placed = group();
+        // A version-specific insertion nothing in the source accounts for.
+        for function in placed.iter_mut().skip(3) {
+            function.start += 0x20;
+            function.end += 0x20;
+        }
+        placed.push(helper(0x1140, 0x1160, vec![0x1160]));
+        let mut blocks = group_blocks();
+        blocks["Group.cpp"] = vec![block(".text", 0x110C, 0x12E0)];
+        blocks["Head.cpp"] = vec![block(".text", 0x12E0, 0x1320)];
+        assert!(complete_for(&placed, &blocks).is_empty());
+    }
+
+    #[test]
+    fn an_ambiguous_member_leaves_the_sequence_undecided() {
+        let mut placed = group();
+        placed[3] = ambiguous(member("Group.cpp", 0x1140, 0x1160, 0x400));
+        assert!(complete_for(&placed, &group_blocks()).is_empty());
+    }
+
+    #[test]
+    fn a_missing_source_member_is_not_a_complete_sequence() {
+        let mut placed = group();
+        // Group's last source function lands far away, so the local run is
+        // one function short of the unit.
+        placed.remove(6);
+        placed.push(member("Group.cpp", 0x9000, 0x9040, 0x700));
+        assert!(complete_for(&placed, &group_blocks()).is_empty());
+    }
+
+    #[test]
+    fn a_neighbour_known_only_by_name_must_be_the_source_order_neighbour() {
+        let mut placed = group();
+        // Something other than Frame precedes Group in the target, and it is
+        // not independently known to be foreign either.
+        placed[0] = weak(member("Elsewhere.cpp", 0x1000, 0x1100, 0xA00));
+        placed.push(member("Frame.cpp", 0x9000, 0x9040, 0x100));
+        assert!(complete_for(&placed, &group_blocks()).is_empty());
+    }
+
+    #[test]
+    fn weak_evidence_alone_does_not_complete_a_sequence() {
+        let placed: Vec<Placed> = group()
+            .into_iter()
+            .map(|function| {
+                if function.unit == Some("Group.cpp") && function.independent {
+                    weak(function)
+                } else {
+                    function
+                }
+            })
+            .collect();
+        assert!(complete_for(&placed, &group_blocks()).is_empty());
     }
 
     #[test]

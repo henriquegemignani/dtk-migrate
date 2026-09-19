@@ -5,6 +5,7 @@
 //! of it edits a project; that is the job of [`crate::stages`], which takes
 //! this evidence, tries it, and keeps only what the build agrees with.
 
+pub mod boundaries;
 pub mod callgraph;
 pub mod coverage;
 pub mod coverage_fixture;
@@ -14,4 +15,5 @@ pub mod mask;
 pub mod matching;
 pub mod ownership;
 pub mod ownership_score;
+pub mod policy;
 pub mod unit_matching;

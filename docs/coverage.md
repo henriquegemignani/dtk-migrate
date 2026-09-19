@@ -34,7 +34,9 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 11, evidence schema 11. Evidence comes from `match --coverage`;
+Policy version 13, evidence schema 11, identification schema 3. Every threshold
+lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
+generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
 strongest first until one survives a build. Every alternative is one
 [ownership transaction](#ownership-transactions) over all the units it changes.
@@ -93,6 +95,63 @@ own minimums:
 - **Ownership transition.** When a stale neighbouring split makes the gap too
   wide, the candidate's own complete aligned sequence trims it. Both edges must
   transfer cleanly to the stated adjacent units.
+
+**Composed boundaries.** A range's two ends are separate claims. Every
+alternative's left and right edge is judged on its own (`src/analysis/boundaries.rs`):
+an edge is *supported* when the function just inside it belongs to the unit —
+independently attributed, or a caller-confined helper (below) — and the function
+just outside is independently attributed to another unit, or the section ends
+there. A neighbour's current split never supports an edge; splits are what is
+being corrected. When, within one section, exactly one left and exactly one right
+address proposed by any of the unit's alternatives are supported, and no single
+alternative already proposes both, the two are composed into one claim. The
+alternatives behind the two edges must agree about every function they both
+place and keep source order across their union; the range must be tiled by target
+functions with no more than alignment padding between them, may not reach
+another unit's split, and faces the same complete ownership assessment as any
+other claim. More than one supported address on a side is left undecided. The
+original alternatives stay as fallbacks, and a range with both edges supported
+ranks ahead of any otherwise equally attributed range that lacks them. Every
+alternative records its judged edges, the evidence families behind each, and
+the unit whose attribution pins the far side.
+
+New ground must otherwise be independently attributed or padding. Two narrow
+explanations extend that, both decided from the observation report alone so that
+trial and publication recompute them identically:
+
+- an **order-bracketed member** is attributed to the unit without independent
+  support, but both of its target neighbours are independent members of the unit,
+  held by the same range, whose source addresses bracket its own;
+- a **caller-confined helper** is unattributed, and position, not its callers,
+  decides which units could own it. Its target neighbours (across alignment
+  padding at most) must either be two functions attributed to the unit in source
+  order, placing it inside the unit, or form a *seam*: on one side the unit's own
+  first or last source function, on the other the section's end or a function
+  independently attributed to another unit that is *that* unit's last or first
+  source function. A seam admits two owners, so callers then choose. Every
+  caller must be the unit's and held by the same body, and must be either
+  independently attributed or one of the members that place the helper. A
+  weakly attributed caller elsewhere would make the helper's owner rest on that
+  attribution alone. At most one helper per claim: two unexplained functions are
+  a cluster needing its own identification. An edge may rest on a helper only
+  when the helper sits at the unit's head (left edge) or tail (right edge) with
+  the bound outside. Identification schema 3 records each target function's
+  callers for this. A schema 2 report still loads and never explains a helper,
+  and its reference keeps saying schema 2: a reference whose schema differs from
+  its artifact's is refused, like one whose digest differs.
+
+**Complete small sequences.** A unit too small for a boundary sequence's byte and
+function minimums may still be recovered whole, but only when completeness
+replaces size. Within one code section: every source function of the unit (one
+contiguous run in the source) pairs, in order and by its exact source address,
+with the target functions that tile the range, and there are exactly as many of
+them, so no version-specific insertion is left unexplained; none is ambiguous; at
+least two are independently attributed. Each end must be bounded by the section's
+end, by an independently attributed foreign function, or by a function attributed
+to the unit that neighbours this one on that side in the source version. The
+global minimums are not lowered. A weak or weakly attributed member of such a
+range is classed `complete-sequence-member`, decided by the same check at trial
+and publication; the alternative records how each end was resolved.
 
 **Adjacent-owner transitions** go further: when the candidate's sequence occupies
 a prefix or suffix of an adjacent unit's declared range, that unit shrinks and

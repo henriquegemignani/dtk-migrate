@@ -17,47 +17,7 @@ use crate::analysis::{
 };
 
 pub const COVERAGE_SCHEMA: u32 = 11;
-/// Kept in step with [`crate::stages::coverage::POLICY_VERSION`], which gates
-/// the proposals this evidence produces; the two are checked against each other
-/// on every read, so they have to move together.
-pub const POLICY_VERSION: u32 = 11;
-pub const MIN_ANCHOR_BYTES: u32 = 128;
-pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
-pub const MIN_LAYOUT_SHIFT_CHANGED_ACCESSES: u32 = 4;
-pub const MIN_LAYOUT_SHIFT_BYTES: u32 = 128;
-pub const MIN_SEQUENCE_FUNCTIONS: u32 = 4;
-pub const MIN_SEQUENCE_MATCH_RATIO: f32 = 0.75;
-pub const MIN_SEQUENCE_ORDER_RATIO: f32 = 0.90;
-pub const MIN_SEQUENCE_MATCHED_BYTES: u32 = 512;
-pub const MIN_SEQUENCE_TARGET_COVERAGE: f32 = 0.40;
-pub const MIN_SEQUENCE_STRONG_FUNCTIONS: u32 = 2;
-pub const MIN_SEQUENCE_DIRECT_ANCHORS: u32 = 2;
-pub const MIN_SEQUENCE_ALIGNMENT_MARGIN: f32 = 0.10;
-pub const MIN_LAYOUT_BOUNDARY_FUNCTIONS: u32 = 4;
-pub const MIN_LAYOUT_BOUNDARY_BYTES: u32 = 1024;
-pub const MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES: u32 = 16;
-pub const MAX_LAYOUT_BOUNDARY_SIZE_DELTA: f32 = 0.02;
-pub const MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA: u32 = 1;
-pub const MIN_VTABLE_BOUNDARY_FUNCTIONS: u32 = 8;
-pub const MIN_VTABLE_BOUNDARY_MATCH_RATIO: f32 = 0.85;
-pub const MIN_VTABLE_BOUNDARY_TARGET_COVERAGE: f32 = 0.85;
-pub const MIN_VTABLE_BOUNDARY_MATCHED_SLOTS: u32 = 8;
-pub const MIN_VTABLE_BOUNDARY_UNIT_SLOTS: u32 = 4;
-pub const MAX_VTABLE_BOUNDARY_SIZE_DELTA: f32 = 0.03;
-pub const MAX_VTABLE_BOUNDARY_FUNCTION_DELTA: u32 = 1;
-pub const MAX_VTABLE_BOUNDARY_GAP_HELPERS: u32 = 1;
-pub const MAX_VTABLE_SIZE_PADDING: u32 = 16;
-pub const MIN_OWNERSHIP_TRANSITION_FUNCTIONS: u32 = 8;
-pub const MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS: u32 = 2;
-pub const MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS: u32 = 1;
-pub const MAX_OWNERSHIP_TRANSITION_SIZE_DELTA: f32 = 0.02;
-pub const MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS: u32 = 8;
-pub const MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS: u32 = 2;
-pub const MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS: u32 = 2;
-pub const MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS: u32 = 4;
-pub const MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS: u32 = 2;
-pub const MAX_ADJACENT_OWNER_SIZE_DELTA: f32 = 0.10;
-pub const MAX_ADJACENT_OWNER_GAP_HELPERS: u32 = 1;
+pub use crate::analysis::policy::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageReport {
@@ -74,90 +34,6 @@ pub struct CoverageReport {
     pub identifications: IdentificationReport,
     pub source_units: Vec<CoverageUnit>,
     pub target_layout: Vec<TargetFunction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoveragePolicy {
-    pub version: u32,
-    /// Every alternative carries the unit's whole body, and must claim ground
-    /// the unit does not already hold.
-    pub complete_replacement_bodies: bool,
-    /// A unit already holding a block may still be extended into unowned space.
-    pub refine_represented_units: bool,
-    /// Where a run of exact anchors and its members are equally supported, the
-    /// whole run is offered before any single anchor of it.
-    pub prefer_combined_exact_anchors: bool,
-    /// A change may not take ground from any unit without an owner revision
-    /// saying so.
-    pub refuse_unevidenced_ownership_loss: bool,
-    /// Every change is one ownership transaction over all the units it
-    /// touches, with exact before-state preconditions, a named receiver for
-    /// every transferred address, and a stable identity.
-    pub atomic_ownership_transactions: bool,
-    pub minimum_anchor_bytes: u32,
-    pub normalized_body_must_be_unique: bool,
-    pub confirm_normalized_bytes_after_hash: bool,
-    pub require_relocation_layout: bool,
-    pub require_known_extents: bool,
-    pub require_explicit_whole_source_ownership: bool,
-    pub reject_weak_symbols: bool,
-    pub reject_template_anchors: bool,
-    pub reject_conflicting_target_ownership: bool,
-    pub require_split_alignment: bool,
-    pub infer_this_relative_layout_shifts: bool,
-    pub minimum_layout_shift_functions: u32,
-    pub minimum_layout_shift_changed_accesses: u32,
-    pub minimum_layout_shift_bytes: u32,
-    pub maximum_layout_shift_segments: u32,
-    pub infer_boundary_constrained_sequences: bool,
-    pub minimum_sequence_functions: u32,
-    pub minimum_sequence_match_ratio: f32,
-    pub minimum_sequence_order_ratio: f32,
-    pub minimum_sequence_matched_bytes: u32,
-    pub minimum_sequence_target_coverage: f32,
-    pub minimum_sequence_strong_functions: u32,
-    pub minimum_sequence_direct_anchors: u32,
-    pub allow_small_exact_sequence_anchors: bool,
-    pub minimum_sequence_alignment_margin: f32,
-    pub minimum_sequence_size_ratio: f32,
-    pub maximum_sequence_size_ratio: f32,
-    pub require_explicit_sequence_neighbors: bool,
-    pub reject_sequence_runner_up: bool,
-    pub infer_boundary_data_matches: bool,
-    pub preserve_target_extract_extents: bool,
-    pub infer_layout_corroborated_boundaries: bool,
-    pub minimum_layout_boundary_functions: u32,
-    pub minimum_layout_boundary_bytes: u32,
-    pub minimum_layout_boundary_changed_accesses: u32,
-    pub maximum_layout_boundary_size_delta: f32,
-    pub maximum_layout_boundary_function_delta: u32,
-    pub infer_vtable_corroborated_boundaries: bool,
-    pub minimum_vtable_boundary_functions: u32,
-    pub minimum_vtable_boundary_match_ratio: f32,
-    pub minimum_vtable_boundary_target_coverage: f32,
-    pub minimum_vtable_boundary_matched_slots: u32,
-    pub minimum_vtable_boundary_unit_slots: u32,
-    pub maximum_vtable_boundary_size_delta: f32,
-    pub maximum_vtable_boundary_function_delta: u32,
-    pub maximum_vtable_boundary_gap_helpers: u32,
-    pub maximum_vtable_size_padding: u32,
-    pub infer_ownership_transition_boundaries: bool,
-    pub minimum_ownership_transition_functions: u32,
-    pub minimum_ownership_transition_strong_functions: u32,
-    pub minimum_ownership_transition_edge_strong_functions: u32,
-    pub maximum_ownership_transition_size_delta: f32,
-    pub require_complete_ownership_transition_sequence: bool,
-    pub require_nonempty_ownership_transition_correction: bool,
-    pub infer_adjacent_owner_transition_boundaries: bool,
-    pub minimum_adjacent_owner_transition_functions: u32,
-    pub minimum_adjacent_owner_transition_strong_functions: u32,
-    pub minimum_adjacent_owner_transition_direct_anchors: u32,
-    pub minimum_adjacent_owner_support_functions: u32,
-    pub minimum_adjacent_owner_support_strong_functions: u32,
-    pub maximum_adjacent_owner_size_delta: f32,
-    pub maximum_adjacent_owner_gap_helpers: u32,
-    pub require_complete_adjacent_owner_sequences: bool,
-    pub require_atomic_adjacent_owner_revision: bool,
 }
 
 /// Extraction metadata from a project configuration. It is supplied by the
@@ -439,90 +315,6 @@ pub struct SequenceFunction {
     pub method: String,
     pub confidence: f32,
     pub primary: bool,
-}
-
-/// The policy as this build of the tool applies it.
-///
-/// One constructor, because the report, the stage and the tests all have to
-/// agree about what the rules currently are — three copies of the literal
-/// drifted apart once already.
-pub fn current_policy() -> CoveragePolicy {
-    CoveragePolicy {
-        version: POLICY_VERSION,
-        complete_replacement_bodies: true,
-        refine_represented_units: true,
-        prefer_combined_exact_anchors: true,
-        refuse_unevidenced_ownership_loss: true,
-        atomic_ownership_transactions: true,
-        minimum_anchor_bytes: MIN_ANCHOR_BYTES,
-        normalized_body_must_be_unique: true,
-        confirm_normalized_bytes_after_hash: true,
-        require_relocation_layout: true,
-        require_known_extents: true,
-        require_explicit_whole_source_ownership: true,
-        reject_weak_symbols: true,
-        reject_template_anchors: true,
-        reject_conflicting_target_ownership: true,
-        require_split_alignment: true,
-        infer_this_relative_layout_shifts: true,
-        minimum_layout_shift_functions: MIN_LAYOUT_SHIFT_FUNCTIONS,
-        minimum_layout_shift_changed_accesses: MIN_LAYOUT_SHIFT_CHANGED_ACCESSES,
-        minimum_layout_shift_bytes: MIN_LAYOUT_SHIFT_BYTES,
-        maximum_layout_shift_segments: 2,
-        infer_boundary_constrained_sequences: true,
-        minimum_sequence_functions: MIN_SEQUENCE_FUNCTIONS,
-        minimum_sequence_match_ratio: MIN_SEQUENCE_MATCH_RATIO,
-        minimum_sequence_order_ratio: MIN_SEQUENCE_ORDER_RATIO,
-        minimum_sequence_matched_bytes: MIN_SEQUENCE_MATCHED_BYTES,
-        minimum_sequence_target_coverage: MIN_SEQUENCE_TARGET_COVERAGE,
-        minimum_sequence_strong_functions: MIN_SEQUENCE_STRONG_FUNCTIONS,
-        minimum_sequence_direct_anchors: MIN_SEQUENCE_DIRECT_ANCHORS,
-        allow_small_exact_sequence_anchors: true,
-        minimum_sequence_alignment_margin: MIN_SEQUENCE_ALIGNMENT_MARGIN,
-        minimum_sequence_size_ratio: 0.5,
-        maximum_sequence_size_ratio: 1.5,
-        require_explicit_sequence_neighbors: true,
-        reject_sequence_runner_up: true,
-        infer_boundary_data_matches: true,
-        preserve_target_extract_extents: true,
-        infer_layout_corroborated_boundaries: true,
-        minimum_layout_boundary_functions: MIN_LAYOUT_BOUNDARY_FUNCTIONS,
-        minimum_layout_boundary_bytes: MIN_LAYOUT_BOUNDARY_BYTES,
-        minimum_layout_boundary_changed_accesses: MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES,
-        maximum_layout_boundary_size_delta: MAX_LAYOUT_BOUNDARY_SIZE_DELTA,
-        maximum_layout_boundary_function_delta: MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA,
-        infer_vtable_corroborated_boundaries: true,
-        minimum_vtable_boundary_functions: MIN_VTABLE_BOUNDARY_FUNCTIONS,
-        minimum_vtable_boundary_match_ratio: MIN_VTABLE_BOUNDARY_MATCH_RATIO,
-        minimum_vtable_boundary_target_coverage: MIN_VTABLE_BOUNDARY_TARGET_COVERAGE,
-        minimum_vtable_boundary_matched_slots: MIN_VTABLE_BOUNDARY_MATCHED_SLOTS,
-        minimum_vtable_boundary_unit_slots: MIN_VTABLE_BOUNDARY_UNIT_SLOTS,
-        maximum_vtable_boundary_size_delta: MAX_VTABLE_BOUNDARY_SIZE_DELTA,
-        maximum_vtable_boundary_function_delta: MAX_VTABLE_BOUNDARY_FUNCTION_DELTA,
-        maximum_vtable_boundary_gap_helpers: MAX_VTABLE_BOUNDARY_GAP_HELPERS,
-        maximum_vtable_size_padding: MAX_VTABLE_SIZE_PADDING,
-        infer_ownership_transition_boundaries: true,
-        minimum_ownership_transition_functions: MIN_OWNERSHIP_TRANSITION_FUNCTIONS,
-        minimum_ownership_transition_strong_functions: MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS,
-        minimum_ownership_transition_edge_strong_functions:
-            MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS,
-        maximum_ownership_transition_size_delta: MAX_OWNERSHIP_TRANSITION_SIZE_DELTA,
-        require_complete_ownership_transition_sequence: true,
-        require_nonempty_ownership_transition_correction: true,
-        infer_adjacent_owner_transition_boundaries: true,
-        minimum_adjacent_owner_transition_functions: MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS,
-        minimum_adjacent_owner_transition_strong_functions:
-            MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS,
-        minimum_adjacent_owner_transition_direct_anchors:
-            MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS,
-        minimum_adjacent_owner_support_functions: MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS,
-        minimum_adjacent_owner_support_strong_functions:
-            MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS,
-        maximum_adjacent_owner_size_delta: MAX_ADJACENT_OWNER_SIZE_DELTA,
-        maximum_adjacent_owner_gap_helpers: MAX_ADJACENT_OWNER_GAP_HELPERS,
-        require_complete_adjacent_owner_sequences: true,
-        require_atomic_adjacent_owner_revision: true,
-    }
 }
 
 /// Turns two analysed executables into the evidence a coverage policy reasons
@@ -1545,7 +1337,7 @@ fn direct_anchor_count_for_owner_revision(
             anchor.section == section
                 && anchor_start >= start
                 && anchor_end <= end
-                && anchor.size >= 16
+                && anchor.size >= MIN_SEQUENCE_ANCHOR_BYTES
                 && !anchor.source_weak
                 && !anchor.target_weak
                 && anchor.source_extent_known
@@ -2002,7 +1794,7 @@ fn add_boundary_sequence_evidence(
                             .expect("coverage addresses are generated as hexadecimal");
                     anchor_start >= start
                         && anchor_end <= end
-                        && anchor.size >= 16
+                        && anchor.size >= MIN_SEQUENCE_ANCHOR_BYTES
                         && !anchor.source_weak
                         && !anchor.target_weak
                         && anchor.source_extent_known
@@ -2854,84 +2646,7 @@ mod tests {
     fn empty_evidence_serialization_is_deterministic() {
         let report = CoverageReport {
             schema: COVERAGE_SCHEMA,
-            policy: CoveragePolicy {
-                version: POLICY_VERSION,
-                complete_replacement_bodies: true,
-                refine_represented_units: true,
-                prefer_combined_exact_anchors: true,
-                refuse_unevidenced_ownership_loss: true,
-                atomic_ownership_transactions: true,
-                minimum_anchor_bytes: MIN_ANCHOR_BYTES,
-                normalized_body_must_be_unique: true,
-                confirm_normalized_bytes_after_hash: true,
-                require_relocation_layout: true,
-                require_known_extents: true,
-                require_explicit_whole_source_ownership: true,
-                reject_weak_symbols: true,
-                reject_template_anchors: true,
-                reject_conflicting_target_ownership: true,
-                require_split_alignment: true,
-                infer_this_relative_layout_shifts: true,
-                minimum_layout_shift_functions: MIN_LAYOUT_SHIFT_FUNCTIONS,
-                minimum_layout_shift_changed_accesses: MIN_LAYOUT_SHIFT_CHANGED_ACCESSES,
-                minimum_layout_shift_bytes: MIN_LAYOUT_SHIFT_BYTES,
-                maximum_layout_shift_segments: 2,
-                infer_boundary_constrained_sequences: true,
-                minimum_sequence_functions: MIN_SEQUENCE_FUNCTIONS,
-                minimum_sequence_match_ratio: MIN_SEQUENCE_MATCH_RATIO,
-                minimum_sequence_order_ratio: MIN_SEQUENCE_ORDER_RATIO,
-                minimum_sequence_matched_bytes: MIN_SEQUENCE_MATCHED_BYTES,
-                minimum_sequence_target_coverage: MIN_SEQUENCE_TARGET_COVERAGE,
-                minimum_sequence_strong_functions: MIN_SEQUENCE_STRONG_FUNCTIONS,
-                minimum_sequence_direct_anchors: MIN_SEQUENCE_DIRECT_ANCHORS,
-                allow_small_exact_sequence_anchors: true,
-                minimum_sequence_alignment_margin: MIN_SEQUENCE_ALIGNMENT_MARGIN,
-                minimum_sequence_size_ratio: 0.5,
-                maximum_sequence_size_ratio: 1.5,
-                require_explicit_sequence_neighbors: true,
-                reject_sequence_runner_up: true,
-                infer_boundary_data_matches: true,
-                preserve_target_extract_extents: true,
-                infer_layout_corroborated_boundaries: true,
-                minimum_layout_boundary_functions: MIN_LAYOUT_BOUNDARY_FUNCTIONS,
-                minimum_layout_boundary_bytes: MIN_LAYOUT_BOUNDARY_BYTES,
-                minimum_layout_boundary_changed_accesses: MIN_LAYOUT_BOUNDARY_CHANGED_ACCESSES,
-                maximum_layout_boundary_size_delta: MAX_LAYOUT_BOUNDARY_SIZE_DELTA,
-                maximum_layout_boundary_function_delta: MAX_LAYOUT_BOUNDARY_FUNCTION_DELTA,
-                infer_vtable_corroborated_boundaries: true,
-                minimum_vtable_boundary_functions: MIN_VTABLE_BOUNDARY_FUNCTIONS,
-                minimum_vtable_boundary_match_ratio: MIN_VTABLE_BOUNDARY_MATCH_RATIO,
-                minimum_vtable_boundary_target_coverage: MIN_VTABLE_BOUNDARY_TARGET_COVERAGE,
-                minimum_vtable_boundary_matched_slots: MIN_VTABLE_BOUNDARY_MATCHED_SLOTS,
-                minimum_vtable_boundary_unit_slots: MIN_VTABLE_BOUNDARY_UNIT_SLOTS,
-                maximum_vtable_boundary_size_delta: MAX_VTABLE_BOUNDARY_SIZE_DELTA,
-                maximum_vtable_boundary_function_delta: MAX_VTABLE_BOUNDARY_FUNCTION_DELTA,
-                maximum_vtable_boundary_gap_helpers: MAX_VTABLE_BOUNDARY_GAP_HELPERS,
-                maximum_vtable_size_padding: MAX_VTABLE_SIZE_PADDING,
-                infer_ownership_transition_boundaries: true,
-                minimum_ownership_transition_functions: MIN_OWNERSHIP_TRANSITION_FUNCTIONS,
-                minimum_ownership_transition_strong_functions:
-                    MIN_OWNERSHIP_TRANSITION_STRONG_FUNCTIONS,
-                minimum_ownership_transition_edge_strong_functions:
-                    MIN_OWNERSHIP_TRANSITION_EDGE_STRONG_FUNCTIONS,
-                maximum_ownership_transition_size_delta: MAX_OWNERSHIP_TRANSITION_SIZE_DELTA,
-                require_complete_ownership_transition_sequence: true,
-                require_nonempty_ownership_transition_correction: true,
-                infer_adjacent_owner_transition_boundaries: true,
-                minimum_adjacent_owner_transition_functions:
-                    MIN_ADJACENT_OWNER_TRANSITION_FUNCTIONS,
-                minimum_adjacent_owner_transition_strong_functions:
-                    MIN_ADJACENT_OWNER_TRANSITION_STRONG_FUNCTIONS,
-                minimum_adjacent_owner_transition_direct_anchors:
-                    MIN_ADJACENT_OWNER_TRANSITION_DIRECT_ANCHORS,
-                minimum_adjacent_owner_support_functions: MIN_ADJACENT_OWNER_SUPPORT_FUNCTIONS,
-                minimum_adjacent_owner_support_strong_functions:
-                    MIN_ADJACENT_OWNER_SUPPORT_STRONG_FUNCTIONS,
-                maximum_adjacent_owner_size_delta: MAX_ADJACENT_OWNER_SIZE_DELTA,
-                maximum_adjacent_owner_gap_helpers: MAX_ADJACENT_OWNER_GAP_HELPERS,
-                require_complete_adjacent_owner_sequences: true,
-                require_atomic_adjacent_owner_revision: true,
-            },
+            policy: current_policy(),
             source: "source".into(),
             target: "target".into(),
             mask: Masked::default(),

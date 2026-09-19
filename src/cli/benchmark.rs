@@ -51,8 +51,8 @@ use sha2::Sha256;
 use crate::{
     analysis::{
         ownership::{
-            FunctionAttribution, IDENTIFICATION_SCHEMA, IdentificationBasis,
-            IdentificationConfidence, IdentificationReport, UnitIdentification,
+            FunctionAttribution, IdentificationBasis, IdentificationConfidence,
+            IdentificationReport, UnitIdentification,
         },
         ownership_score::{
             Application, Blocks, Body, Identification, Ledger, Oracle, Outcome, Scope,
@@ -987,7 +987,7 @@ fn referenced_identifications(
     let reference = coverage.observation.ok_or_else(|| {
         anyhow::anyhow!("Coverage summary schema 11 is missing its ownership observation reference")
     })?;
-    if reference.schema != IDENTIFICATION_SCHEMA {
+    if !crate::analysis::ownership::identification_schema_supported(reference.schema) {
         bail!("Coverage observation uses unsupported identification schema {}", reference.schema);
     }
     let relative = Path::new(&reference.file);
@@ -999,9 +999,9 @@ fn referenced_identifications(
     let report: IdentificationReport = read_json(&coverage_dir.join(relative))?;
     let index =
         crate::analysis::ownership::ObservationIndex::load_self_contained(report, source, target)?;
-    if index.digest() != reference.sha256 {
-        bail!("Coverage observation digest does not match coverage.json");
-    }
+    index
+        .verify_reference(&reference)
+        .context("Coverage observation does not match coverage.json")?;
     let mut identifications = BTreeMap::new();
     for item in &index.report().units {
         identifications.insert(item.unit.clone(), item.clone());
@@ -2531,7 +2531,7 @@ mod tests {
             "schema": REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA,
             "identifications": [{ "unit": "u.cpp" }],
             "observation": {
-                "schema": IDENTIFICATION_SCHEMA,
+                "schema": crate::analysis::ownership::IDENTIFICATION_SCHEMA,
                 "sha256": "digest",
                 "file": "preparation/ownership-digest.json"
             }
