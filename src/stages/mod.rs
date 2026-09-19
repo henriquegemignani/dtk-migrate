@@ -270,6 +270,13 @@ impl Footprint {
 /// observation digest, so unrelated discoveries do not repeat builds.
 pub type Tried = BTreeMap<String, BTreeSet<String>>;
 
+/// The full refreshed work list from one coordinator-only rediscovery.
+pub struct Rediscovery {
+    pub candidates: Vec<Candidate>,
+    /// Alternative states already tried and withheld from another build.
+    pub skipped_unchanged: usize,
+}
+
 /// Facts proved against the final project, after all stages have run. A
 /// source-linked unit may supersede coverage's historical extracted-link
 /// trial condition without erasing the ownership certificate it proved.
@@ -348,7 +355,7 @@ pub trait Stage {
         _ctx: &BuildContext,
         _prepared: &Prepared,
         _tried: &Tried,
-    ) -> Result<Option<Vec<Candidate>>> {
+    ) -> Result<Option<Rediscovery>> {
         Ok(None)
     }
 

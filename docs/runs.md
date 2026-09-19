@@ -160,8 +160,9 @@ A worker failure stops the other lanes but keeps what they finished, so a resume
 run picks up from there.
 
 Resuming a run that already published does nothing and says so. A run written
-by a tool with a different run schema (currently 7, which also records typed
-trial refusals and their command-local evidence) is refused rather than reinterpreted.
+by a tool with a different run schema (currently 8, which also records typed
+trial refusals, their command-local evidence and retry counts) is refused rather
+than reinterpreted.
 
 ## Resource settings
 

@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 7;
+pub const SCHEMA: u32 = 8;
 
 /// The stages, in the only order they may run in.
 ///
@@ -195,7 +195,22 @@ pub struct StageResult {
     /// round superseded. What publication replays.
     #[serde(default)]
     pub applied: Vec<crate::stages::Applied>,
+    /// Coverage retry accounting across workers and coordinator rounds.
+    #[serde(default)]
+    pub retry: RetryCounts,
     pub seconds: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetryCounts {
+    /// Alternative trial executions, including coordinator revalidation.
+    pub attempted: usize,
+    /// Previously tried alternative states suppressed during rediscovery.
+    pub skipped_as_unchanged: usize,
+    /// Units offered under fresh evidence in coordinator rediscovery rounds.
+    pub regenerated: usize,
+    /// Times the coordinator stopped with acceptances still arriving.
+    pub budget_exhausted: usize,
 }
 
 impl StageResult {
@@ -452,6 +467,7 @@ pub fn run_stage(
     }
 
     let mut events: Vec<Event> = outcomes.iter().flat_map(|o| o.events.clone()).collect();
+    let mut retry = RetryCounts::default();
     let mut offered: Vec<Candidate> = Vec::new();
     let mut remember = |candidate: &Candidate| {
         if !offered
@@ -531,13 +547,16 @@ pub fn run_stage(
                 "stopped after {MAX_REDISCOVERY_ROUNDS} rounds with acceptances still arriving; \
                  the cascade was not followed to the end"
             )));
+            retry.budget_exhausted += 1;
             break;
         }
 
         // Something landed, so ask the stage what that made possible. This is
         // the only place it happens: one workspace holding every batch's result.
         let rediscovered = stage.rediscover(&ctx, &prepared.prepared, &tried)?;
-        let discovered = rediscovered.as_deref().unwrap_or_default();
+        let discovered = rediscovered.as_ref().map(|r| r.candidates.as_slice()).unwrap_or_default();
+        retry.skipped_as_unchanged += rediscovered.as_ref().map_or(0, |r| r.skipped_unchanged);
+        retry.regenerated += discovered.len();
         if !discovered.is_empty() {
             events.push(
                 Event::new("", "rediscovered")
@@ -548,7 +567,9 @@ pub fn run_stage(
         // Re-adding an old refusal here would retry it after any unrelated
         // acceptance. Stages without rediscovery retain their historical
         // integration retry of unsettled worker candidates.
-        queue = rediscovered.unwrap_or_else(|| unresolved.values().cloned().collect());
+        queue = rediscovered
+            .map(|r| r.candidates)
+            .unwrap_or_else(|| unresolved.values().cloned().collect());
     }
 
     // Round 0 always evaluates, so this holds however the loop left; it is
@@ -558,6 +579,12 @@ pub fn run_stage(
         bail!("{stage_name}: the first evaluation round did not run, so there is nothing to record")
     };
     selections.retain(|name, _| accepted.contains_key(name));
+    retry.attempted = events
+        .iter()
+        .filter(|event| {
+            event.alternative.is_some() && matches!(event.status.as_str(), "accepted" | "rejected")
+        })
+        .count();
     let result = StageResult {
         stage: stage_name.to_string(),
         offered,
@@ -572,6 +599,7 @@ pub fn run_stage(
         reserved_by_earlier_stage: prepared.reserved_by_earlier_stage.clone(),
         eligible_excluded_by_only: prepared.eligible_excluded_by_only.clone(),
         applied,
+        retry,
         seconds: started.elapsed().as_secs_f64(),
     };
     write_json(&stage_dir.join("result.json"), &result)?;
@@ -843,6 +871,7 @@ mod tests {
             reserved_by_earlier_stage: Vec::new(),
             eligible_excluded_by_only: Vec::new(),
             applied: Vec::new(),
+            retry: RetryCounts::default(),
             seconds: 0.0,
         };
         let reserved = result.changed_scopes(&Derive).unwrap();

@@ -331,6 +331,9 @@ fn the_coordinator_follows_the_cascade_it_was_never_told_about() {
         .filter(|event| event["status"] == "rediscovered")
         .count();
     assert_eq!(rediscovered, 2, "{result:#}");
+    assert_eq!(result["retry"]["regenerated"], 2, "{result:#}");
+    assert_eq!(result["retry"]["budget_exhausted"], 0, "{result:#}");
+    assert!(result["retry"]["attempted"].as_u64().unwrap() >= 4, "{result:#}");
     assert!(
         !result["events"]
             .as_array()
@@ -489,6 +492,7 @@ fn a_stage_whose_every_candidate_is_refused_finishes_with_them_deferred() {
     let result = fixture.json(&format!("{stage}/result.json"));
     assert!(names(&result["accepted"]).is_empty(), "{result:#}");
     assert_eq!(names(&result["deferred"]), ["Unlinked.cpp"], "{result:#}");
+    assert!(result["retry"]["attempted"].as_u64().unwrap() >= 1, "{result:#}");
     let rejection = result["events"]
         .as_array()
         .unwrap()

@@ -48,7 +48,7 @@ use crate::{
     },
     stages::{
         Applied, Candidate, Event, FinalCertificates, Footprint, MutationScope, Outcome, Permitted,
-        Prepared, Selections, Stage, Tried,
+        Prepared, Rediscovery, Selections, Stage, Tried,
         coverage::alternatives::{Alternative, assess_member, body_bytes, policy_digest},
         refusal::Refusal,
     },
@@ -711,7 +711,7 @@ impl Stage for Coverage {
         ctx: &BuildContext,
         prepared: &Prepared,
         tried: &Tried,
-    ) -> Result<Option<Vec<Candidate>>> {
+    ) -> Result<Option<Rediscovery>> {
         Ok(Some(revisit(ctx, &prepared.permitted, tried)?))
     }
 
@@ -1075,7 +1075,7 @@ fn revisit(
     ctx: &BuildContext,
     permitted: &Permitted,
     tried: &BTreeMap<String, BTreeSet<String>>,
-) -> Result<Vec<Candidate>> {
+) -> Result<Rediscovery> {
     let source_blocks =
         Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
     let expected_units = source_blocks.keys().cloned().collect();
@@ -1100,6 +1100,7 @@ fn revisit(
         .collect();
 
     let mut next = Vec::new();
+    let mut skipped_unchanged = 0;
     for (name, unit) in &by_name {
         if !permitted.allows(name) {
             continue;
@@ -1107,7 +1108,8 @@ fn revisit(
         let mut found =
             alternatives::build(unit, &target_blocks, &by_name, &source_blocks, &observations);
         alternatives::add_joint(&mut found, joint.remove(name).unwrap_or_default());
-        let found = untried(found, tried.get(name));
+        let (found, skipped) = untried(found, tried.get(name));
+        skipped_unchanged += skipped;
         if found.is_empty() {
             continue;
         }
@@ -1126,7 +1128,7 @@ fn revisit(
         next.push(Candidate { name: name.clone(), evidence: serde_json::to_value(proposal)? });
     }
     next.sort_by(compare_candidates);
-    Ok(next)
+    Ok(Rediscovery { candidates: next, skipped_unchanged })
 }
 
 /// Only pass genuinely new transactions to the next evaluation round. A new
@@ -1135,11 +1137,13 @@ fn revisit(
 fn untried(
     mut alternatives: Vec<Alternative>,
     tried: Option<&BTreeSet<String>>,
-) -> Vec<Alternative> {
+) -> (Vec<Alternative>, usize) {
+    let before = alternatives.len();
     if let Some(tried) = tried {
         alternatives.retain(|alternative| !tried.contains(&alternative.transaction.retry_key()));
     }
-    alternatives
+    let skipped = before - alternatives.len();
+    (alternatives, skipped)
 }
 
 /// Writes one alternative into a set of split blocks, as a trial would.
@@ -1394,6 +1398,8 @@ pub struct Summary {
     pub observation: ObservationReference,
     pub identifications: Vec<UnitIdentification>,
     pub events: Vec<Event>,
+    #[serde(default)]
+    pub retry: crate::run::RetryCounts,
     pub metrics: Metrics,
     pub measures: Measures,
     pub stunted_splits: Vec<Stunted>,
@@ -1608,6 +1614,7 @@ pub fn summarize(prepared: &Prepared, result: &crate::run::StageResult) -> Resul
         },
         identifications: inventory.identifications,
         events: result.events.clone(),
+        retry: result.retry.clone(),
         measures: result.final_measures.clone(),
         stunted_splits: stunted,
         validation: result.validation.clone(),
@@ -1628,6 +1635,13 @@ pub fn markdown(value: &Summary) -> String {
         format!("- Newly supported TUs: {}", value.newly_supported_units),
         format!("- Refined TUs (boundary moved, already represented): {}", value.refined_units),
         format!("- Newly owned code bytes: {}", value.newly_assigned_code_bytes),
+        format!(
+            "- Trial retries: {} attempted, {} skipped as unchanged, {} units regenerated, {} budget exhausted",
+            value.retry.attempted,
+            value.retry.skipped_as_unchanged,
+            value.retry.regenerated,
+            value.retry.budget_exhausted
+        ),
         format!("- Validation: `{}`", value.validation),
         String::new(),
         "This stage certifies only the newly selected ranges; pre-existing ownership is not \
@@ -2276,6 +2290,7 @@ mod tests {
             reserved_by_earlier_stage: Vec::new(),
             eligible_excluded_by_only: Vec::new(),
             applied,
+            retry: Default::default(),
             seconds: 0.0,
         }
     }
@@ -2405,10 +2420,12 @@ mod tests {
             body: Some(vec![line(".text", 0x8000_0200, 0x8000_0300)]),
         });
         let tried = BTreeSet::from([old.transaction.retry_key()]);
-        let offered = untried(vec![old.clone(), unrelated, repaired.clone()], Some(&tried));
+        let (offered, skipped) =
+            untried(vec![old.clone(), unrelated, repaired.clone()], Some(&tried));
         assert_eq!(offered.len(), 1);
+        assert_eq!(skipped, 2);
         assert_eq!(offered[0].id, repaired.id);
-        assert!(untried(vec![old], Some(&tried)).is_empty());
+        assert!(untried(vec![old], Some(&tried)).0.is_empty());
     }
 
     #[test]
@@ -2580,6 +2597,7 @@ mod tests {
             observation: observation_reference(),
             identifications: Vec::new(),
             events: Vec::new(),
+            retry: Default::default(),
             metrics: Metrics {
                 representation: Representation { baseline_tus: 40, final_tus: 42, source_tus: 100 },
                 objdiff_matching: BeforeAfter { baseline_code_bytes: 10, final_code_bytes: 20 },

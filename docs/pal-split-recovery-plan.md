@@ -1078,17 +1078,19 @@ Retain coordinator-only rediscovery. Report attempted, skipped-as-unchanged, reg
 
 **Tests and acceptance:** failures in adjacent trials cannot borrow each other's diagnostics; the same proposal is retried after a relevant dependency repair; an unrelated change does not cause a retry; no-candidate and all-refused baseline runs still succeed; the A → B → A cascade still publishes and resumes correctly.
 
-**Step 8 checkpoint (run schema 7):** command failures now retain their own
+**Step 8 checkpoint (run schema 8):** command failures now retain their own
 program, arguments, log byte span and bounded head/tail output. Trial refusals
 store a typed kind, affected names when extractable, and that command evidence;
 coverage, discovery, derivation and shared bisection carry it to run events.
 Coverage rediscovery offers only untried transaction states. Its retry key
 includes the write and read sets, evidence and policy, but excludes the digest
 of the whole observation report; the coordinator treats this refreshed set as
-authoritative instead of appending old refusals. Tests cover adjacent command
+authoritative instead of appending old refusals. The coverage result separately
+counts attempted alternative trials, states skipped as unchanged, units
+regenerated, and exhausted rediscovery budgets. Tests cover adjacent command
 failures, relevant versus unrelated state changes, and the cascade. The Pane
-historical reproduction, retry counters and immutable matching cache remain
-for the rest of this step.
+historical reproduction and immutable matching cache remain for the rest of
+this step.
 
 ## 9. Compatibility, reporting and documentation (continuous)
 
