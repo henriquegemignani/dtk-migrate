@@ -998,8 +998,12 @@ The new range-level witness gate found 187 candidates before discovery's
 foreign-overlap, BSS-mode and build checks; all 187 were whole-unit-tier
 candidates. These are offers, not accepted ownership. The report does not yet
 establish target-side common mode for a new unowned BSS-family block, so
-discovery still withholds those. Combined code/data
-transactions and cross-stage certificates remain open.
+discovery still withholds those. Discovery now composes a supported code claim
+and its supported data ranges into one complete candidate body, so it can test
+and publish both together. A failed combined build falls back to the code-only
+claim, with the tested body retained in the run record. This is still a
+discovery-local full-body write;
+cross-stage transactions and certificates remain open.
 
 ## 8. Make refusals diagnostic and retries state-aware
 

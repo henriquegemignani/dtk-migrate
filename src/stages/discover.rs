@@ -51,6 +51,10 @@ pub struct Proposal {
     pub kind: Kind,
     #[serde(default)]
     pub before_lines: Vec<String>,
+    /// For a code candidate that also adds data, this is the complete body
+    /// after code alone. Data evidence must reproduce `lines` from this body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_lines: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<ObservationReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -380,6 +384,26 @@ fn evidenced_data_lines(
         .collect()
 }
 
+/// Complete one code claim with every compatible, independently witnessed
+/// data range for the same unit. The projected map keeps the other owners in
+/// place while testing overlaps, and the result is one complete candidate.
+fn data_completion(
+    unit: &str,
+    code_lines: &[String],
+    witnessed_data: &IndexMap<String, Vec<String>>,
+    existing: &IndexMap<String, Vec<String>>,
+    source: &IndexMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let ranges = witnessed_data.get(unit)?;
+    let mut projected = existing.clone();
+    projected.insert(unit.to_string(), code_lines.to_vec());
+    let proposed = IndexMap::from([(unit.to_string(), ranges.clone())]);
+    data_proposals(&proposed, &projected, source)
+        .into_iter()
+        .find(|(name, _)| name == unit)
+        .map(|(_, lines)| lines)
+}
+
 /// Whether any unit's matched code went down.
 fn regresses(before: &Report, after: &Report) -> bool {
     let new = after.by_source_name();
@@ -462,17 +486,25 @@ impl Stage for Discover {
 
         let mut candidates: Vec<Candidate> = code_proposals(&proposals, &blocks)
             .into_iter()
-            .filter_map(|(name, lines)| {
+            .filter_map(|(name, code_lines)| {
                 let before = blocks.get(&name).cloned().unwrap_or_default();
-                let ownership = assess_code(&observations, &name, &before, &lines);
+                let ownership = assess_code(&observations, &name, &before, &code_lines);
                 ownership.permits_automatic_claim().then(|| {
+                    let completion = data_completion(
+                        &name,
+                        &code_lines,
+                        &witnessed_data,
+                        &blocks,
+                        &source_blocks,
+                    );
                     candidate(name, Proposal {
-                        lines,
+                        lines: completion.clone().unwrap_or_else(|| code_lines.clone()),
                         kind: Kind::Code,
                         before_lines: before,
+                        code_lines: completion.as_ref().map(|_| code_lines),
                         observation: Some(observation.clone()),
                         ownership: Some(ownership),
-                        data_evidence: None,
+                        data_evidence: completion.map(|_| data_evidence.clone()),
                     })
                 })
             })
@@ -485,11 +517,9 @@ impl Stage for Discover {
         // The ordinary parser includes commented, whole-unit candidate ranges.
         // A data range enters only when the typed member record independently
         // proves its own bytes, even if other data in that TU is still unknown.
-        // One unit must never yield two candidates. Each kind carries a complete
-        // replacement body, so whichever landed second would revert the other's
-        // sections. Code keeps the slot because it has to prove a matched-code
-        // gain, which the data pass deliberately skips; the unit's data is
-        // proposed again by the next run.
+        // One unit must never yield two candidates. Code and supported data
+        // have already been composed into one complete body above; data-only
+        // candidates now cover only units without a code candidate.
         let staged: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
         let mut data: Vec<Candidate> = data_proposals(&witnessed_data, &blocks, &source_blocks)
             .into_iter()
@@ -500,6 +530,7 @@ impl Stage for Discover {
                     lines,
                     kind: Kind::Data,
                     before_lines,
+                    code_lines: None,
                     observation: None,
                     ownership: None,
                     data_evidence: Some(data_evidence.clone()),
@@ -532,7 +563,7 @@ impl Stage for Discover {
         let mut splits = Splits::parse(&String::from_utf8(owned.original().to_vec())?)?;
 
         let mut state =
-            Trials { report: ctx.build(None)?, accepted: BTreeSet::new(), events: Vec::new() };
+            Trials { report: ctx.build(None)?, accepted: IndexMap::new(), events: Vec::new() };
         let baseline_cycles = cyclic_units(&splits.blocks);
         if !candidates.is_empty() {
             let mut queue = vec![candidates.to_vec()];
@@ -551,10 +582,9 @@ impl Stage for Discover {
         }
         owned.commit();
 
-        let accepted: Vec<Candidate> =
-            candidates.iter().filter(|c| state.accepted.contains(&c.name)).cloned().collect();
+        let accepted: Vec<Candidate> = state.accepted.values().cloned().collect();
         let deferred: Vec<Candidate> =
-            candidates.iter().filter(|c| !state.accepted.contains(&c.name)).cloned().collect();
+            candidates.iter().filter(|c| !state.accepted.contains_key(&c.name)).cloned().collect();
         Ok(Outcome {
             tried: Default::default(),
             accepted,
@@ -633,8 +663,19 @@ enum Retry {
 
 struct Trials {
     report: Report,
-    accepted: BTreeSet<String>,
+    accepted: IndexMap<String, Candidate>,
     events: Vec<Event>,
+}
+
+fn code_only_fallback(candidate: &Candidate) -> Result<Option<Candidate>> {
+    let mut proposal = proposal_of(candidate)?;
+    let Some(code_lines) = proposal.code_lines.take() else { return Ok(None) };
+    if proposal.kind != Kind::Code || proposal.data_evidence.is_none() {
+        bail!("Discovery code/data fallback has no paired data evidence for {}", candidate.name);
+    }
+    proposal.lines = code_lines;
+    proposal.data_evidence = None;
+    Ok(Some(self::candidate(candidate.name.clone(), proposal)?))
 }
 
 impl Trials {
@@ -651,9 +692,22 @@ impl Trials {
         }
         let mut staged = splits.clone();
         let mut new_names: Vec<String> = Vec::new();
-        for candidate in batch {
+        for (index, candidate) in batch.iter().enumerate() {
             let proposal = proposal_of(candidate)?;
-            validate_proposal(ctx, &candidate.name, &proposal, false)?;
+            if let Err(error) = validate_proposal(ctx, &candidate.name, &proposal, false) {
+                if let Some(fallback) = code_only_fallback(candidate)? {
+                    let code_proposal = proposal_of(&fallback)?;
+                    validate_proposal(ctx, &candidate.name, &code_proposal, false)?;
+                    self.events.push(
+                        Event::new(&candidate.name, "data-evidence-refused")
+                            .because(format!("{error:#}")),
+                    );
+                    let mut revised = batch.to_vec();
+                    revised[index] = fallback;
+                    return Ok(Retry::Split(vec![revised]));
+                }
+                return Err(error);
+            }
             if !staged.blocks.contains_key(&candidate.name) {
                 new_names.push(candidate.name.clone());
             }
@@ -693,8 +747,16 @@ impl Trials {
         if !dropped.is_empty() {
             self.events.extend(dropped.iter().map(|c| Event::new(&c.name, "no-matched-code-gain")));
             write(owned, splits)?;
-            let keep: Vec<Candidate> = keep.into_iter().cloned().collect();
-            return Ok(if keep.is_empty() { Retry::Done } else { Retry::Split(vec![keep]) });
+            let mut retry: Vec<Vec<Candidate>> = Vec::new();
+            if !keep.is_empty() {
+                retry.push(keep.into_iter().cloned().collect());
+            }
+            for candidate in dropped {
+                if let Some(fallback) = code_only_fallback(candidate)? {
+                    retry.push(vec![fallback]);
+                }
+            }
+            return Ok(if retry.is_empty() { Retry::Done } else { Retry::Split(retry) });
         }
         if regresses(&self.report, &tested) {
             return self.reject(owned, splits, batch, "regresses-existing-code");
@@ -712,7 +774,7 @@ impl Trials {
             if is_new {
                 splits.place_new_units(std::slice::from_ref(&candidate.name))?;
             }
-            self.accepted.insert(candidate.name.clone());
+            self.accepted.insert(candidate.name.clone(), candidate.clone());
         }
         self.report = tested;
         Ok(Retry::Done)
@@ -733,6 +795,9 @@ impl Trials {
             return Ok(Retry::Split(vec![batch[..middle].to_vec(), batch[middle..].to_vec()]));
         }
         self.events.push(Event::new(&batch[0].name, status));
+        if let Some(fallback) = code_only_fallback(&batch[0])? {
+            return Ok(Retry::Split(vec![vec![fallback]]));
+        }
         Ok(Retry::Done)
     }
 }
@@ -745,6 +810,9 @@ fn validate_proposal(
 ) -> Result<()> {
     if proposal.kind == Kind::Data {
         return validate_data_proposal(ctx, unit, proposal, applied);
+    }
+    if proposal.code_lines.is_some() != proposal.data_evidence.is_some() {
+        bail!("Discovery code/data evidence is incomplete for {unit}");
     }
     let reference = proposal
         .observation
@@ -767,6 +835,9 @@ fn validate_proposal(
     }
     if !actual.permits_automatic_claim() {
         bail!("Discovery ownership evidence does not support {unit}");
+    }
+    if proposal.data_evidence.is_some() {
+        validate_data_proposal(ctx, unit, proposal, applied)?;
     }
     Ok(())
 }
@@ -793,12 +864,30 @@ fn validate_data_proposal(
     } else {
         blocks.insert(unit.to_string(), proposal.before_lines.clone());
     }
+    if let Some(code_lines) = &proposal.code_lines {
+        if proposal.kind != Kind::Code
+            || code_ranges(code_lines) != code_ranges(&proposal.lines)
+            || unchanged_non_code(code_lines) != unchanged_non_code(&proposal.before_lines)
+        {
+            bail!("Discovery code and data bodies disagree for {unit}");
+        }
+        blocks.insert(unit.to_string(), code_lines.clone());
+    }
     let source =
         Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
     if reproduced_data_body(&report, unit, &blocks, &source).as_ref() != Some(&proposal.lines) {
         bail!("Discovery data evidence does not reproduce the complete body for {unit}");
     }
     Ok(())
+}
+
+fn unchanged_non_code(lines: &[String]) -> Vec<&String> {
+    lines
+        .iter()
+        .filter(|line| {
+            parse_range(line).is_none_or(|range| !CODE_SECTIONS.contains(&range.section.as_str()))
+        })
+        .collect()
 }
 
 fn reproduced_data_body(
@@ -889,9 +978,58 @@ mod tests {
             reproduced_data_body(&report, "a.cpp", &before, &source),
             Some(vec![text(0x100, 0x200), data(0x900, 0xA00)])
         );
+        let code_lines = vec![text(0x100, 0x300)];
+        let completed =
+            data_completion("a.cpp", &code_lines, &witnessed, &before, &source).unwrap();
+        assert_eq!(completed, vec![text(0x100, 0x300), data(0x900, 0xA00)]);
+        assert_eq!(code_ranges(&completed), code_ranges(&code_lines));
+        assert_eq!(unchanged_non_code(&code_lines), unchanged_non_code(&before["a.cpp"]));
+        let joint = candidate("a.cpp".into(), Proposal {
+            lines: completed,
+            kind: Kind::Code,
+            before_lines: before["a.cpp"].clone(),
+            code_lines: Some(code_lines.clone()),
+            observation: None,
+            ownership: None,
+            data_evidence: Some(DataEvidenceReference {
+                schema: crate::matching::data_evidence::SCHEMA,
+                sha256: "0".repeat(64),
+                file: "data-evidence.json".into(),
+            }),
+        })
+        .unwrap();
+        let fallback = code_only_fallback(&joint).unwrap().unwrap();
+        let fallback_body = proposal_of(&fallback).unwrap();
+        assert_eq!(fallback_body.lines, code_lines);
+        assert!(fallback_body.code_lines.is_none());
+        assert!(fallback_body.data_evidence.is_none());
+        assert_eq!(proposal_of(&joint).unwrap().lines.len(), 2);
+        let directory =
+            tempfile::Builder::new().prefix("discover-fallback-").tempdir_in("target").unwrap();
+        let splits_path = directory.path().join("splits.txt");
+        let splits = Splits::parse(&format!("a.cpp:\n{}\n", text(0x100, 0x200))).unwrap();
+        std::fs::write(&splits_path, splits.render()).unwrap();
+        let mut owned = Owned::take(&splits_path).unwrap();
+        let mut trials = Trials {
+            report: Report {
+                measures: Default::default(),
+                units: Vec::new(),
+                rest: Default::default(),
+            },
+            accepted: IndexMap::new(),
+            events: Vec::new(),
+        };
+        let retry = trials
+            .reject(&mut owned, &splits, std::slice::from_ref(&joint), "build-conflict")
+            .unwrap();
+        let Retry::Split(groups) = retry else { panic!("failed joint claim must retry code") };
+        assert_eq!(groups.len(), 1);
+        assert_eq!(proposal_of(&groups[0][0]).unwrap().lines, code_lines);
+        assert_eq!(trials.events[0].status, "build-conflict");
         let foreign =
             blocks(&[("a.cpp", &[&text(0x100, 0x200)]), ("b.cpp", &[&data(0x980, 0xA80)])]);
         assert!(reproduced_data_body(&report, "a.cpp", &foreign, &source).is_none());
+        assert!(data_completion("a.cpp", &code_lines, &witnessed, &foreign, &source).is_none());
     }
 
     #[test]
@@ -946,6 +1084,7 @@ mod tests {
                 lines: vec![text(0x100, end)],
                 kind: Kind::Code,
                 before_lines: Vec::new(),
+                code_lines: None,
                 observation: Some(ObservationReference {
                     schema: 2,
                     sha256: "observed".into(),

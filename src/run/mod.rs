@@ -443,6 +443,9 @@ pub fn run_stage(
             offered.push(candidate.clone());
         }
     };
+    for candidate in &candidates {
+        remember(candidate);
+    }
     for worker in &outcomes {
         for candidate in worker.accepted.iter().chain(&worker.deferred) {
             remember(candidate);

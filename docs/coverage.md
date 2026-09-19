@@ -358,17 +358,20 @@ its own output.
 ## discover — split boundaries by measured progress
 
 Proposes code ranges, including fragments and extensions to existing partial
-splits, then extends established units with non-code ranges the matcher already
-named but that were never carried over.
+splits, and extends units with non-code ranges the matcher already named but
+that were never carried over. When both claims are supported for one unit,
+discovery tests and publishes them as one complete candidate body.
 
 **Accepted when** the unit's own matched code went up, no other unit's went down,
 and the build reproduces retail bytes. That last check tests *split integrity*
 only: a file `configure.py` has not enabled still links from its extracted
 original, so it says nothing about the candidate's source.
 
-A data candidate is exempt from the code-gain test, because extending a matched
-unit's data ranges cannot move the matched-code count. It still faces the build,
-the retail check, and the aggregate regression check.
+A data-only candidate is exempt from the code-gain test, because extending a
+unit's data ranges cannot move the matched-code count. A combined code/data
+candidate still needs a code gain. Both face the build, retail, and aggregate
+regression checks. If a combined candidate fails, discovery retries its code
+claim alone and records the body that actually passed.
 
 Two things happen before a build is spent:
 
