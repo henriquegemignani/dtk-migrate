@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 13;
+pub const IDENTIFICATION_SCHEMA: u32 = 14;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -456,6 +456,13 @@ impl ObservationIndex {
         {
             bail!("Identification schema {} cannot carry retail-only linker inputs", report.schema);
         }
+        if report.schema < 14
+            && report.object_evidence.as_ref().is_some_and(|evidence| {
+                evidence.objects.iter().any(|record| !expected_units.contains(&record.unit))
+            })
+        {
+            bail!("Identification schema {} cannot carry external compiled objects", report.schema);
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -702,9 +709,10 @@ impl ObservationIndex {
             }
             // Earlier reports used different inventory rules. Preserve their
             // canonical diagnostic bytes so saved references keep resolving;
-            // no ownership policy consumes either record. Schema 13 accounts
-            // for configured retail-only linker inputs during rederivation.
-            if report.schema >= 13 {
+            // no ownership policy consumes either record. Schema 14 scans
+            // compiled objects outside the source split inventory as possible
+            // emitters and rederives both diagnostics with that complete view.
+            if report.schema >= 14 {
                 evidence.relocation_placements =
                     crate::analysis::object_evidence::relocation_placements(
                         evidence,

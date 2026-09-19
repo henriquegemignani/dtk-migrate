@@ -369,13 +369,25 @@ impl ObjectEvidence {
         let mut seen = BTreeSet::new();
         let mut available = BTreeSet::new();
         let mut inventory = BTreeSet::new();
+        let configured_external: BTreeSet<_> = self
+            .configured_objects
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let unit = item.unit.as_ref()?;
+                (!units.contains(unit)).then_some((unit.as_str(), item.base_path.as_str()))
+            })
+            .collect();
         for record in &mut self.objects {
             let status_and_hash_valid = match record.status {
                 ObjectStatus::Available => record.sha256.is_some(),
                 ObjectStatus::Missing => record.sha256.is_none(),
                 ObjectStatus::Unreadable => true,
             };
-            if !units.contains(&record.unit)
+            if (!units.contains(&record.unit)
+                && !configured_external
+                    .contains(&(record.unit.as_str(), build_path(&record.base_path).as_str())))
                 || !safe_relative(&record.base_path)
                 || !seen.insert((&record.unit, &record.base_path))
                 || record.sha256.as_deref().is_some_and(|hash| !valid_digest(hash))
@@ -461,8 +473,7 @@ impl ObjectEvidence {
                 definition.address = hex(start);
                 definition.end = hex(end);
             }
-            if !units.contains(&definition.unit)
-                || definition.name.is_empty()
+            if definition.name.is_empty()
                 || definition.section.is_empty()
                 || !valid_digest(&definition.normalized_body_sha256)
                 || !valid_digest(&definition.object_sha256)
@@ -503,10 +514,8 @@ impl ObjectEvidence {
                 });
                 // Keep duplicates: two config entries naming one linker input
                 // are ambiguous emitters, not a cleaner inventory.
-                self.unscanned_configured_units = configured
-                    .iter()
-                    .filter(|item| !item.unit.as_ref().is_some_and(|unit| units.contains(unit)))
-                    .count() as u32;
+                self.unscanned_configured_units =
+                    unscanned_configured_count(configured, &self.objects, units);
             }
             if let Some(inputs) = &mut self.linked_object_inputs {
                 inputs.sort();
@@ -604,6 +613,25 @@ fn valid_digest(value: &str) -> bool {
 fn is_unavailable(value: &BuildFreshness) -> bool { *value == BuildFreshness::Unavailable }
 
 fn is_zero(value: &u32) -> bool { *value == 0 }
+
+fn unscanned_configured_count(
+    configured: &[ConfiguredObject],
+    objects: &[ObjectRecord],
+    units: &BTreeSet<String>,
+) -> u32 {
+    let scanned: BTreeSet<_> =
+        objects.iter().map(|item| (item.unit.as_str(), build_path(&item.base_path))).collect();
+    configured
+        .iter()
+        .filter(|item| {
+            !item.unit.as_ref().is_some_and(|unit| units.contains(unit))
+                && !item
+                    .unit
+                    .as_deref()
+                    .is_some_and(|unit| scanned.contains(&(unit, item.base_path.clone())))
+        })
+        .count() as u32
+}
 
 fn sort_references(references: &mut [CompiledReference]) {
     references.sort_by(|left, right| {
@@ -813,7 +841,6 @@ pub fn inspect(
     // compiled for the target version.
     if config.units.iter().any(|entry| {
         main_executable_unit(entry)
-            && ObjdiffConfig::source_name_of(entry).is_some_and(|unit| units.contains(unit))
             && entry.base_path.as_deref().is_some_and(|base| {
                 !versioned_object_path(base, target_version)
                     || entry
@@ -877,9 +904,6 @@ pub fn inspect(
             continue;
         }
         let Some(unit) = ObjdiffConfig::source_name_of(&entry) else { continue };
-        if !units.contains(unit) {
-            continue;
-        }
         let Some(base_path) = entry.base_path.as_deref() else { continue };
         // An objdiff path outside this checkout cannot be attributed to this
         // build. Leave its unit unmapped rather than emitting a record that
@@ -1066,6 +1090,10 @@ pub fn inspect(
         }
     }
     evidence.objects.sort_by(|a, b| (&a.unit, &a.base_path).cmp(&(&b.unit, &b.base_path)));
+    if let Some(configured) = &evidence.configured_objects {
+        evidence.unscanned_configured_units =
+            unscanned_configured_count(configured, &evidence.objects, units);
+    }
     let mapped: BTreeSet<&str> = evidence.objects.iter().map(|item| item.unit.as_str()).collect();
     evidence.unmapped_units =
         units.iter().filter(|unit| !mapped.contains(unit.as_str())).cloned().collect();
@@ -1309,15 +1337,13 @@ fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<
         || evidence.target_image_sha256.is_none()
         || evidence.unscanned_configured_units != 0
         || !evidence.unmapped_units.is_empty()
-        || evidence.objects.len() != source_units.len()
-        || configured.len() != source_units.len()
+        || evidence.objects.len() != configured.len()
         || inputs.is_empty()
         || retail
             .iter()
             .any(|path| !safe_relative(path) || !path.to_ascii_lowercase().ends_with(".o"))
         || evidence.objects.iter().any(|record| {
-            !source_units.contains(&record.unit)
-                || record.status != ObjectStatus::Available
+            record.status != ObjectStatus::Available
                 || record.build_freshness != BuildFreshness::Clean
                 || record.sha256.is_none()
                 || record.compiler.is_none()
@@ -1331,9 +1357,12 @@ fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<
         .iter()
         .map(|record| (record.unit.as_str(), build_path(&record.base_path)))
         .collect();
-    if recorded.len() != source_units.len()
+    let recorded_units: BTreeSet<_> = recorded.iter().map(|(unit, _)| *unit).collect();
+    if recorded.len() != configured.len()
+        || recorded_units.len() != evidence.objects.len()
+        || source_units.iter().any(|unit| !recorded_units.contains(unit.as_str()))
         || configured.iter().any(|item| {
-            !item.unit.as_ref().is_some_and(|unit| source_units.contains(unit))
+            item.unit.is_none()
                 || !safe_relative(&item.base_path)
                 || item.target_path.as_deref().is_some_and(|path| !safe_relative(path))
                 || !recorded.contains(&(

@@ -313,6 +313,69 @@ fn an_archive_cannot_be_whitelisted_as_one_retail_only_object() {
 }
 
 #[test]
+fn external_compiled_object_is_scanned_and_can_block_a_shared_body_claim() {
+    let (mut evidence, units, source, targets, attributions) = fixture();
+    let mut external = evidence.objects[0].clone();
+    external.unit = "NewTargetOnly.cpp".into();
+    external.base_path = "build/PAL/src/NewTargetOnly.o".into();
+    external.functions[1].normalized_body_sha256 = Some("f".repeat(64));
+    evidence.configured_objects.as_mut().unwrap().push(ConfiguredObject {
+        unit: Some(external.unit.clone()),
+        base_path: external.base_path.clone(),
+        target_path: Some("build/PAL/obj/NewTargetOnly.o".into()),
+    });
+    evidence.linked_object_inputs.as_mut().unwrap().push(external.base_path.clone());
+    evidence.objects.push(external);
+    evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
+    assert_eq!(evidence.unscanned_configured_units, 0);
+    assert_eq!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).len(),
+        2
+    );
+
+    evidence.objects[2].functions[1].normalized_body_sha256 = Some("a".repeat(64));
+    let mut definition = evidence.definitions[0].clone();
+    definition.unit = "NewTargetOnly.cpp".into();
+    evidence.definitions.push(definition);
+    evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+
+    let mut report = IdentificationReport::empty("NTSC", "PAL");
+    report.attributions = attributions;
+    report.source_functions = source;
+    report.target_functions = targets;
+    report.object_evidence = Some(evidence);
+    report.units =
+        vec![UnitIdentification::absent("A.cpp", 2), UnitIdentification::absent("B.cpp", 2)];
+    report.schema = 13;
+    assert!(ObservationIndex::load_self_contained(report.clone(), "NTSC", "PAL").is_err());
+    report.schema = 14;
+    let loaded = ObservationIndex::load_self_contained(report, "NTSC", "PAL").unwrap();
+    assert!(loaded.report().object_evidence.as_ref().unwrap().emitted_owners.is_empty());
+}
+
+#[test]
+fn two_compiled_objects_mapped_to_one_unit_do_not_silently_replace_each_other() {
+    let (mut evidence, units, source, targets, attributions) = fixture();
+    let mut duplicate = evidence.objects[0].clone();
+    duplicate.base_path = "build/PAL/src/0A.o".into();
+    duplicate.functions.clear();
+    evidence.configured_objects.as_mut().unwrap().push(ConfiguredObject {
+        unit: Some("A.cpp".into()),
+        base_path: duplicate.base_path.clone(),
+        target_path: None,
+    });
+    evidence.linked_object_inputs.as_mut().unwrap().push(duplicate.base_path.clone());
+    evidence.objects.push(duplicate);
+    evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+}
+
+#[test]
 fn duplicated_configured_object_does_not_become_a_unique_emitter() {
     let (mut evidence, units, source, targets, attributions) = fixture();
     let duplicate = evidence.configured_objects.as_ref().unwrap()[0].clone();
@@ -544,7 +607,7 @@ fn old_schemas_keep_their_diagnostic_records_and_saved_references() {
     report.object_evidence = Some(evidence);
     report.units =
         vec![UnitIdentification::absent("A.cpp", 2), UnitIdentification::absent("B.cpp", 2)];
-    for schema in 10..=12 {
+    for schema in 10..=13 {
         report.schema = schema;
         let index = ObservationIndex::load_self_contained(report.clone(), "NTSC", "PAL").unwrap();
         assert_eq!(

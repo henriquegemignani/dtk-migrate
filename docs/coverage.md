@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 14, evidence schema 11, identification schema 13. Every threshold
+Policy version 14, evidence schema 11, identification schema 14. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -138,6 +138,14 @@ keep their original derived diagnostics and digests. The scanner also checks
 the `main/` unit prefix: some REL entries omit `module_id`, so that field
 alone cannot establish that an object belongs to the executable.
 
+Schema 14 scans configured DOL compiled objects even when their source file
+is absent from the baseline source split inventory. Their definitions can
+block a duplicate-body owner claim, while no baseline TU identity or
+attribution is invented for them. They must pass the same object hash,
+compiler, Ninja freshness and inventory checks as mapped objects. Two
+compiled objects mapped to one unit cannot establish a unique emitter. Earlier
+diagnostic records retain their original schema and digest.
+
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
 least one endpoint must be unique in both the observed objects and target.
@@ -147,9 +155,9 @@ symbol names. A recorded endpoint relocation disagreement refuses the entire
 body family. Symbol-name agreement does not prove equal referenced data, so
 relocation placements remain diagnostic. A placement records which competing
 definitions it excludes and whether the object inventory is complete.
-Schema-13 derived results are rebuilt on report load. Older diagnostic
+Schema-14 derived results are rebuilt on report load. Older diagnostic
 records are retained under their original schema so saved run references keep
-their digest; they do not gain the schema-13 proof status. Policy 14 makes
+their digest; they do not gain the schema-14 proof status. Policy 14 makes
 no ownership transfer from either result. Ninja freshness does not establish
 the source revision.
 

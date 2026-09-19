@@ -6,9 +6,28 @@ Status: living implementation plan. Change A landed through `0a351d2`; Change B 
 rules are described in the checkpoint below. The remaining plan is based on the architecture
 after those changes. Change F's bounded joint-run search is implemented under policy 14;
 its historical and held-out evaluation is recorded below. Change G has binary
-helper families, optional object evidence, unresolved clusters and schema-12
-tail hypotheses; emitted ownership remains constrained by incomplete linker
+helper families, optional object evidence, unresolved clusters, schema-12 tail
+hypotheses and schema-14 external compiled-object scanning; emitted ownership
+remains constrained by incomplete linker
 inventories. Changes H and I are still open.
+
+### Compiled objects outside the baseline split inventory (schema 14)
+
+The scanner now reads all configured main-DOL compiled objects, including
+target-version source files absent from the baseline source split set. Such
+objects contribute real definitions and can veto a shared-body owner claim;
+they do not receive a fabricated source attribution. Canonical loading checks
+that each external record comes from a configured path, and older schemas
+reject external records while retaining their saved diagnostics. The remaining
+unmapped baseline source units still prevent a strict complete-inventory
+claim until their possible emissions are accounted for.
+
+The current F-drive scan read all three previously omitted DOL source
+objects: `CTimeRemainderAndFraction` (2 code functions), `rstl_allocator` (1)
+and `TypesMatch` (275). All were available and Ninja-clean. The configured
+omission count is now zero, while 15 baseline source units still have no
+objdiff mapping; strict owner resolutions therefore remain zero. The run is a
+current-checkout inventory check, not a frozen historical recall result.
 
 ### Retail-only linker inputs (identification schema 13)
 
