@@ -7,9 +7,12 @@ use decomp_toolkit::util::file::buf_writer;
 use tracing::info;
 use typed_path::Utf8NativePath;
 
-use crate::analysis::{
-    matching::MatchTarget,
-    unit_matching::{UnitProposal, UnitTier},
+use crate::{
+    analysis::{
+        matching::MatchTarget,
+        unit_matching::{UnitProposal, UnitTier},
+    },
+    matching::data_evidence::DataEvidenceReport,
 };
 
 /// Writes proposed split boundaries in splits.txt syntax, grouped by unit.
@@ -20,6 +23,7 @@ pub fn write_unit_proposals(
     path: &Utf8NativePath,
     target: &MatchTarget,
     proposals: &[UnitProposal],
+    evidence: &DataEvidenceReport,
 ) -> Result<()> {
     let mut file = buf_writer(path)?;
     writeln!(file, "# Proposed split boundaries, derived from function matches.")?;
@@ -40,8 +44,21 @@ pub fn write_unit_proposals(
         for p in entries {
             let section_name =
                 target.obj.sections.get(p.section).map(|s| s.name.as_str()).unwrap_or("?");
-            let line =
-                format!("\t{:<11} start:{:#010X} end:{:#010X}", section_name, p.start, p.end);
+            let suffix = evidence
+                .ranges
+                .iter()
+                .find(|range| {
+                    range.unit == p.unit
+                        && range.section == section_name
+                        && range.start == p.start
+                        && range.end == p.end
+                })
+                .map(|range| range.split_suffix())
+                .unwrap_or_default();
+            let line = format!(
+                "\t{:<11} start:{:#010X} end:{:#010X}{suffix}",
+                section_name, p.start, p.end
+            );
             match p.tier {
                 UnitTier::Confident => {
                     writeln!(file, "{line}")?;

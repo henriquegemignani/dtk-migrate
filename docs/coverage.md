@@ -390,10 +390,14 @@ Two things happen before a build is spent:
   different attributes, or overlap another unit. Source-version section size
   alone does not establish ownership of an unmatched tail. The four-byte
   `musyx/runtime/synth.c` tail still needs symbol or relocation evidence before
-  discovery can claim it. The matcher does not emit `common` attributes yet;
-  discovery withholds every new unannotated BSS-family range until its target-side
-  linker attributes are known. It may still widen an existing ordinary BSS
-  range whose attributes are already recorded.
+  discovery can claim it. The matcher emits `common` only when each member has
+  target-side evidence for that mode: an explicit target symbol flag or an
+  existing split. Its emitted `align:` comes from target symbol or split
+  alignment, which may differ from the alignment required of split boundaries.
+  Absence of the flag does not establish ordinary BSS.
+  Discovery withholds every new unannotated BSS-family range until its
+  target-side linker attributes are known. It may still widen an existing
+  ordinary BSS range whose attributes are already recorded.
 
 ## verify — whole source files
 

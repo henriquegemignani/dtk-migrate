@@ -900,7 +900,12 @@ fn reproduced_data_body(
         .ranges
         .iter()
         .filter(|range| range.unit == unit && range.eligible())
-        .map(|range| (unit.to_string(), format_range(&range.section, range.start, range.end)))
+        .map(|range| {
+            (
+                unit.to_string(),
+                format_range(&range.section, range.start, range.end) + &range.split_suffix(),
+            )
+        })
         .fold(IndexMap::new(), |mut blocks, (name, line)| {
             blocks.entry(name).or_default().push(line);
             blocks
@@ -916,7 +921,9 @@ mod tests {
     use super::*;
     use crate::{
         analysis::unit_matching::UnitTier,
-        matching::data_evidence::{DataMemberEvidence, DataRangeEvidence, DataSizeBasis},
+        matching::data_evidence::{
+            CommonAlignBasis, DataMemberEvidence, DataRangeEvidence, DataSizeBasis,
+        },
     };
 
     fn blocks(entries: &[(&str, &[&str])]) -> IndexMap<String, Vec<String>> {
@@ -962,6 +969,9 @@ mod tests {
                     source_wholly_owned: true,
                     source_weak: false,
                     target_weak: false,
+                    target_symbol_common: false,
+                    target_common_align: None,
+                    target_common_align_basis: None,
                     reference_positions: 2,
                     target_owner: None,
                     target_common: None,
@@ -1030,6 +1040,20 @@ mod tests {
             blocks(&[("a.cpp", &[&text(0x100, 0x200)]), ("b.cpp", &[&data(0x980, 0xA80)])]);
         assert!(reproduced_data_body(&report, "a.cpp", &foreign, &source).is_none());
         assert!(data_completion("a.cpp", &code_lines, &witnessed, &foreign, &source).is_none());
+
+        let mut common_report = report.clone();
+        common_report.ranges[0].section = ".bss".into();
+        common_report.ranges[0].members[0].target_symbol_common = true;
+        common_report.ranges[0].members[0].target_common_align = Some(4);
+        common_report.ranges[0].members[0].target_common_align_basis =
+            Some(CommonAlignBasis::TargetSymbol);
+        let source_bss = blocks(&[("a.cpp", &[&text(0x100, 0x200), &bss(0x800, 0x900)])]);
+        assert_eq!(
+            reproduced_data_body(&common_report, "a.cpp", &before, &source_bss),
+            Some(vec![text(0x100, 0x200), format!("{} align:4 common", bss(0x900, 0xA00))])
+        );
+        common_report.ranges[0].members[0].target_symbol_common = false;
+        assert!(reproduced_data_body(&common_report, "a.cpp", &before, &source_bss).is_none());
     }
 
     #[test]

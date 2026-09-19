@@ -944,7 +944,7 @@ withhold that proposal. The splits helpers treat repeated code ranges as
 fragmented while retaining ordinary plus common BSS ranges. Source-version
 section size no longer grows an unowned tail: `musyx/runtime/synth.c` requires
 a symbol or relocation witness for its last four bytes. These changes correct
-data proposal shape. The matcher currently omits `common` attributes from its
+data proposal shape. At this checkpoint the matcher omitted `common` attributes from its
 split proposals, so discovery withholds a separate BSS addition when that
 proposal cannot distinguish common from ordinary BSS, regardless of the source
 version's BSS layout. An existing ordinary BSS range can still be widened using
@@ -1004,6 +1004,36 @@ and publish both together. A failed combined build falls back to the code-only
 claim, with the tested body retained in the run record. This is still a
 discovery-local full-body write;
 cross-stage transactions and certificates remain open.
+
+### H BSS-mode checkpoint: explicit target common evidence
+
+Data evidence schema 2 records the target symbol's explicit `common` flag
+separately from a mode inherited from an existing target split, and records
+whether alignment came from the target symbol or that split. The matcher
+emits `align:N common` only when every member of a BSS-family range supports
+common mode and the target establishes the common allocation's alignment. It
+keeps that alignment separate from the split-boundary requirement: in the
+current PAL inputs, known common `.bss` splits use `align:4` while their
+boundary gate requires 8. A symbol flag that contradicts an ordinary split is
+rejected. A `common` symbol without target alignment is withheld altogether,
+including from the ordinary-range extension route.
+Missing flags do not imply ordinary BSS. Discovery reconstructs the same
+attribute-bearing line from the saved evidence in trials and publication.
+Unknown new BSS ranges remain withheld; no linker mode is inferred from
+neighbouring splits or from the source version.
+The read-only matcher run against the current F-drive Prime workspace still
+reports 1,472 data ranges and 187 range-level witnesses. It found no target
+symbol with an explicit `common` flag among those ranges; 48 ranges inherited
+common mode from existing splits, but none of those passed the full range gate.
+
+For the remaining H work, publication and reservations must change together.
+Coverage publication currently reverses exact full bodies and requires its
+units to remain extracted inputs. A later data addition changes the body, and
+a successful verify changes the link input. First make publication validate
+the final composed ownership and distinguish coverage's historical trial link
+mode from verify's final source-link proof; then admit compatible later-stage
+mutations. Merely narrowing the reserved-name set would make publication fail
+on correctly composed results.
 
 ## 8. Make refusals diagnostic and retries state-aware
 

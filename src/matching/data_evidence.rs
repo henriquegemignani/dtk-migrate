@@ -21,7 +21,7 @@ use crate::analysis::{
     unit_matching::{UnitProposal, UnitTier, required_alignment},
 };
 
-pub const SCHEMA: u32 = 1;
+pub const SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +94,15 @@ pub struct DataMemberEvidence {
     pub source_wholly_owned: bool,
     pub source_weak: bool,
     pub target_weak: bool,
+    /// An explicit target symbol flag is positive evidence of common linkage.
+    /// Its absence says nothing about ordinary versus common BSS.
+    pub target_symbol_common: bool,
+    /// The common allocation's linker alignment, taken from an existing
+    /// target split or an explicit target symbol alignment. This differs from
+    /// the section boundary alignment required to place a split.
+    pub target_common_align: Option<u32>,
+    /// Which target-side record supplied `target_common_align`.
+    pub target_common_align_basis: Option<CommonAlignBasis>,
     pub reference_positions: u32,
     pub target_owner: Option<String>,
     /// This is known only when a target split already records it. In
@@ -108,6 +117,13 @@ pub enum DataSizeBasis {
     StringContent,
     ExistingSplit,
     Inferred,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommonAlignBasis {
+    TargetSplit,
+    TargetSymbol,
 }
 
 /// dtk guesses unknown object sizes from the next symbol and then marks them
@@ -160,6 +176,59 @@ fn size_basis(symbol: &ObjSymbol, section: &ObjSection, split_exact: bool) -> Da
 }
 
 impl DataRangeEvidence {
+    /// Target-side linker mode, only when every member agrees. A missing
+    /// `common` symbol flag never establishes ordinary BSS on its own.
+    pub fn common_mode(&self) -> Option<bool> {
+        let mut mode = None;
+        for member in &self.members {
+            let current = if member.target_symbol_common {
+                if member.target_common == Some(false) {
+                    return None;
+                }
+                true
+            } else {
+                member.target_common?
+            };
+            if mode.is_some_and(|previous| previous != current) {
+                return None;
+            }
+            mode = Some(current);
+        }
+        mode
+    }
+
+    pub fn common_alignment(&self) -> Option<u32> {
+        if self.common_mode() != Some(true) {
+            return None;
+        }
+        let mut align = 0u32;
+        for member in &self.members {
+            let supported = match member.target_common_align_basis {
+                Some(CommonAlignBasis::TargetSplit) => member.target_common == Some(true),
+                Some(CommonAlignBasis::TargetSymbol) => member.target_symbol_common,
+                None => false,
+            };
+            let member_align = member.target_common_align?;
+            if !supported || !member_align.is_power_of_two() {
+                return None;
+            }
+            align = align.max(member_align);
+        }
+        (align > 0 && self.start % align == 0).then_some(align)
+    }
+
+    /// Attributes that can be justified by this target-side record. A new
+    /// ordinary BSS range remains unannotated and is withheld by discovery.
+    pub fn split_suffix(&self) -> String {
+        if matches!(self.section.as_str(), ".bss" | ".sbss" | ".sbss2")
+            && let Some(align) = self.common_alignment()
+        {
+            format!(" align:{align} common")
+        } else {
+            String::new()
+        }
+    }
+
     /// A complete, aligned, contiguous row of independently paired, sized
     /// symbols proves its own bytes even when the source unit has other data
     /// that the matcher could not place. The whole-unit tier is diagnostic;
@@ -170,6 +239,9 @@ impl DataRangeEvidence {
             || self.required_alignment == 0
             || self.start % self.required_alignment != 0
             || self.end % self.required_alignment != 0
+            || (self.members.iter().any(|member| member.target_symbol_common)
+                && (!matches!(self.section.as_str(), ".bss" | ".sbss" | ".sbss2")
+                    || self.common_alignment().is_none()))
         {
             return false;
         }
@@ -183,6 +255,7 @@ impl DataRangeEvidence {
                 || !member.source_wholly_owned
                 || member.source_weak
                 || member.target_weak
+                || (member.target_symbol_common && member.target_common == Some(false))
                 || member.reference_positions == 0
                 || member.target_owner.as_ref().is_some_and(|owner| owner != &self.unit)
             {
@@ -248,20 +321,26 @@ impl DataEvidenceReport {
                             )
                     })
                 });
-                let target_common =
-                    section.splits.for_address(target_start).and_then(|(_, split)| {
-                        (u64::from(target_end) <= u64::from(split.end)).then_some(split.common)
-                    });
-                let target_owner =
-                    section.splits.for_address(target_start).and_then(|(_, split)| {
-                        (u64::from(target_end) <= u64::from(split.end)).then(|| split.unit.clone())
-                    });
-                let split_exact =
-                    section.splits.for_address(target_start).is_some_and(|(start, split)| {
-                        start == target_start
-                            && split.end == target_end
-                            && split.unit == proposal.unit
-                    });
+                let target_split = section
+                    .splits
+                    .for_address(target_start)
+                    .filter(|(_, split)| u64::from(target_end) <= u64::from(split.end));
+                let target_common = target_split.map(|(_, split)| split.common);
+                let (target_common_align, target_common_align_basis) =
+                    if let Some(align) = target_split.and_then(|(_, split)| split.align) {
+                        (Some(align), Some(CommonAlignBasis::TargetSplit))
+                    } else if target_symbol.flags.is_common() {
+                        (
+                            target_symbol.align,
+                            target_symbol.align.map(|_| CommonAlignBasis::TargetSymbol),
+                        )
+                    } else {
+                        (None, None)
+                    };
+                let target_owner = target_split.map(|(_, split)| split.unit.clone());
+                let split_exact = target_split.is_some_and(|(start, split)| {
+                    start == target_start && split.end == target_end && split.unit == proposal.unit
+                });
                 members.push(DataMemberEvidence {
                     source_index: pair.source,
                     target_index: pair.target,
@@ -282,6 +361,9 @@ impl DataEvidenceReport {
                     source_wholly_owned,
                     source_weak: source_symbol.flags.is_weak(),
                     target_weak: target_symbol.flags.is_weak(),
+                    target_symbol_common: target_symbol.flags.is_common(),
+                    target_common_align,
+                    target_common_align_basis,
                     reference_positions: pair.evidence,
                     target_owner,
                     target_common,
@@ -340,7 +422,7 @@ impl DataEvidenceReport {
 mod tests {
     use decomp_toolkit::obj::{
         ObjArchitecture, ObjInfo, ObjKind, ObjRelocations, ObjSection, ObjSplit, ObjSplits,
-        ObjSymbol, ObjSymbolKind,
+        ObjSymbol, ObjSymbolFlagSet, ObjSymbolFlags, ObjSymbolKind,
     };
 
     use super::*;
@@ -468,10 +550,77 @@ mod tests {
             &unowned_source,
             &target_obj,
             &[DataMatch { source: 0, target: 0, evidence: 2 }],
-            &[proposal],
+            std::slice::from_ref(&proposal),
             "NTSC",
             "PAL",
         );
         assert!(!unowned.ranges[0].eligible());
+
+        let mut common_target = target("target", 0x2000, None);
+        let mut common_symbol = common_target.obj.symbols[0].clone();
+        common_symbol.flags = ObjSymbolFlagSet(ObjSymbolFlags::Common.into());
+        common_symbol.align = Some(4);
+        common_target.obj.symbols.replace(0, common_symbol).unwrap();
+        common_target.obj.sections[0].name = ".bss".into();
+        common_target.obj.sections[0].kind = ObjSectionKind::Bss;
+        let common = DataEvidenceReport::build(
+            &source,
+            &common_target,
+            &[DataMatch { source: 0, target: 0, evidence: 2 }],
+            std::slice::from_ref(&proposal),
+            "NTSC",
+            "PAL",
+        );
+        assert!(common.ranges[0].eligible());
+        assert_eq!(common.ranges[0].common_mode(), Some(true));
+        assert_eq!(common.ranges[0].required_alignment, 8);
+        assert_eq!(common.ranges[0].common_alignment(), Some(4));
+        assert_eq!(common.ranges[0].split_suffix(), " align:4 common");
+        let mut missing_align = common.ranges[0].clone();
+        missing_align.members[0].target_common_align = None;
+        assert!(!missing_align.eligible());
+        let mut false_provenance = common.ranges[0].clone();
+        false_provenance.members[0].target_common_align_basis = Some(CommonAlignBasis::TargetSplit);
+        assert!(!false_provenance.eligible());
+        let mut wrong_section = common.ranges[0].clone();
+        wrong_section.section = ".data".into();
+        assert!(!wrong_section.eligible());
+        let mut over_aligned = common.ranges[0].clone();
+        over_aligned.start += 8;
+        over_aligned.end += 8;
+        over_aligned.members[0].target_start += 8;
+        over_aligned.members[0].target_end += 8;
+        over_aligned.members[0].target_common_align = Some(16);
+        assert_eq!(over_aligned.common_alignment(), None);
+        assert!(over_aligned.split_suffix().is_empty());
+        let common_path = directory.path().join("common-proposals.txt");
+        crate::matching::proposals::write_unit_proposals(
+            &typed_path::Utf8NativePathBuf::from(common_path.to_string_lossy().into_owned()),
+            &common_target,
+            std::slice::from_ref(&proposal),
+            &common,
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(common_path).unwrap().contains("end:0x00002008 align:4 common")
+        );
+
+        let mut conflicting = target("target", 0x2000, Some("unit.cpp"));
+        let mut conflicting_symbol = conflicting.obj.symbols[0].clone();
+        conflicting_symbol.flags = ObjSymbolFlagSet(ObjSymbolFlags::Common.into());
+        conflicting.obj.symbols.replace(0, conflicting_symbol).unwrap();
+        conflicting.obj.sections[0].name = ".bss".into();
+        conflicting.obj.sections[0].kind = ObjSectionKind::Bss;
+        let conflict = DataEvidenceReport::build(
+            &source,
+            &conflicting,
+            &[DataMatch { source: 0, target: 0, evidence: 2 }],
+            &[proposal],
+            "NTSC",
+            "PAL",
+        );
+        // A target split saying ordinary and a target symbol saying common
+        // cannot support an automatic ownership claim.
+        assert!(!conflict.ranges[0].eligible());
     }
 }

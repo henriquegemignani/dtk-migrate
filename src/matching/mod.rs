@@ -234,25 +234,25 @@ pub fn run(request: &Request) -> Result<()> {
     }
     if outputs.splits.is_some() || outputs.data_evidence.is_some() {
         let proposals = propose_units(&source, &target, &result, &data_matches);
+        let version = |config: &Utf8NativePath| -> String {
+            Path::new(config.as_str())
+                .parent()
+                .and_then(Path::file_name)
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let evidence = DataEvidenceReport::build(
+            &source,
+            &target,
+            &data_matches,
+            &proposals,
+            &version(&request.source_config),
+            &version(&request.target_config),
+        );
         if let Some(path) = native(outputs.splits.as_ref()) {
-            write_unit_proposals(&path, &target, &proposals)?;
+            write_unit_proposals(&path, &target, &proposals, &evidence)?;
         }
         if let Some(path) = native(outputs.data_evidence.as_ref()) {
-            let version = |config: &Utf8NativePath| -> Result<String> {
-                Path::new(config.as_str())
-                    .parent()
-                    .and_then(Path::file_name)
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .ok_or_else(|| anyhow::anyhow!("Cannot find version for {config}"))
-            };
-            let evidence = DataEvidenceReport::build(
-                &source,
-                &target,
-                &data_matches,
-                &proposals,
-                &version(&request.source_config)?,
-                &version(&request.target_config)?,
-            );
             let mut file = buf_writer(&path)?;
             serde_json::to_writer_pretty(&mut file, &evidence)?;
             file.flush()?;
