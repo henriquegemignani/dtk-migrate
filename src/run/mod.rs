@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 4;
+pub const SCHEMA: u32 = 5;
 
 /// The stages, in the only order they may run in.
 ///
@@ -201,16 +201,13 @@ pub struct StageResult {
 impl StageResult {
     /// Every name this stage changed, in its own namespace. Transaction
     /// neighbours are units even when the candidate has another scope.
-    pub fn changed_scopes(&self, stage: &dyn Stage) -> BTreeSet<MutationScope> {
-        self.accepted
-            .iter()
-            .map(|candidate| stage.scope(candidate))
-            .chain(
-                self.applied
-                    .iter()
-                    .flat_map(|entry| entry.units.iter().cloned().map(MutationScope::Unit)),
-            )
-            .collect()
+    pub fn changed_scopes(&self, stage: &dyn Stage) -> Result<BTreeSet<MutationScope>> {
+        let mut scopes = BTreeSet::new();
+        scopes.extend(stage.accepted_scopes(&self.accepted)?);
+        for entry in &self.applied {
+            scopes.extend(stage.applied_scopes(entry)?);
+        }
+        Ok(scopes)
     }
 }
 
@@ -329,13 +326,16 @@ pub fn run_stage(
         let limit = if run.only.is_empty() { run.limit } else { None };
         let mut prepared = stage.prepare(&ctx, limit)?;
 
-        let reserved_here: Vec<String> = prepared
-            .candidates
-            .iter()
-            .filter(|candidate| is_reserved(stage.as_ref(), candidate, reserved))
-            .map(|candidate| candidate.name.clone())
-            .collect();
-        prepared.candidates.retain(|candidate| !is_reserved(stage.as_ref(), candidate, reserved));
+        let mut reserved_here = Vec::new();
+        let mut available = Vec::new();
+        for candidate in prepared.candidates {
+            if is_reserved(stage.as_ref(), &candidate, reserved)? {
+                reserved_here.push(candidate.name);
+            } else {
+                available.push(candidate);
+            }
+        }
+        prepared.candidates = stage.choose_variants(available)?;
 
         let mut excluded: Vec<String> = Vec::new();
         let mut resolved: Vec<String> = Vec::new();
@@ -359,8 +359,26 @@ pub fn run_stage(
             reserved: reserved
                 .iter()
                 .filter_map(|scope| match scope {
-                    MutationScope::Unit(name) => Some(name.clone()),
-                    MutationScope::Symbol(_) => None,
+                    MutationScope::Unit(name) | MutationScope::CodeDependency(name) => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            reserved_data: reserved
+                .iter()
+                .filter_map(|scope| match scope {
+                    MutationScope::UnitData(name) | MutationScope::DataDependency(name) => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            reserved_link: reserved
+                .iter()
+                .filter_map(|scope| match scope {
+                    MutationScope::UnitLink(name) => Some(name.clone()),
+                    _ => None,
                 })
                 .collect(),
             only: run.only.iter().cloned().collect(),
@@ -566,8 +584,8 @@ fn is_reserved(
     stage: &dyn Stage,
     candidate: &Candidate,
     reserved: &BTreeSet<MutationScope>,
-) -> bool {
-    reserved.contains(&stage.scope(candidate))
+) -> Result<bool> {
+    stage.is_reserved(candidate, reserved)
 }
 
 /// What `--only` means for one stage.
@@ -599,7 +617,10 @@ fn focus(
     let mut roots = Vec::new();
     for candidate in candidates {
         let selected = match stage.scope(candidate) {
-            MutationScope::Unit(name) => requested.contains(name.as_str()),
+            MutationScope::Unit(name)
+            | MutationScope::UnitData(name)
+            | MutationScope::UnitLink(name) => requested.contains(name.as_str()),
+            MutationScope::CodeDependency(_) | MutationScope::DataDependency(_) => false,
             MutationScope::Symbol(_) => {
                 stage.writes(candidate)?.iter().any(|unit| requested.contains(unit.as_str()))
             }
@@ -611,12 +632,19 @@ fn focus(
     let mut involved: BTreeSet<String> = reserved
         .iter()
         .filter_map(|scope| match scope {
-            MutationScope::Unit(name) => Some(name.clone()),
-            MutationScope::Symbol(_) => None,
+            MutationScope::Unit(name)
+            | MutationScope::UnitData(name)
+            | MutationScope::UnitLink(name) => Some(name.clone()),
+            MutationScope::CodeDependency(_)
+            | MutationScope::DataDependency(_)
+            | MutationScope::Symbol(_) => None,
         })
         .collect();
     for root in &roots {
-        if let MutationScope::Unit(name) = stage.scope(root) {
+        if let MutationScope::Unit(name)
+        | MutationScope::UnitData(name)
+        | MutationScope::UnitLink(name) = stage.scope(root)
+        {
             involved.insert(name);
         }
         involved.extend(stage.writes(root)?);
@@ -743,6 +771,9 @@ mod tests {
         assert_eq!(focused.resolved, BTreeSet::from(["Q.cpp".into()]));
         let error = check_only_resolved(&only(&["Q.cpp", "B.cpp"]), &focused.resolved).unwrap_err();
         assert!(error.to_string().contains("B.cpp"), "{error}");
+        let neighbour_alone = focus(&stage(), &candidates(), &only(&["B.cpp"]), &none()).unwrap();
+        assert!(neighbour_alone.roots.is_empty());
+        assert!(neighbour_alone.resolved.is_empty());
     }
 
     #[test]
@@ -813,10 +844,10 @@ mod tests {
             applied: Vec::new(),
             seconds: 0.0,
         };
-        let reserved = result.changed_scopes(&Derive);
+        let reserved = result.changed_scopes(&Derive).unwrap();
         assert_eq!(reserved, BTreeSet::from([MutationScope::Symbol("A.cpp".into())]));
-        assert!(is_reserved(&Derive, &symbol, &reserved));
-        assert!(!is_reserved(&stage(), &Candidate::new("A.cpp"), &reserved));
+        assert!(is_reserved(&Derive, &symbol, &reserved).unwrap());
+        assert!(!is_reserved(&stage(), &Candidate::new("A.cpp"), &reserved).unwrap());
         let focused = focus(&stage(), &candidates(), &only(&["A.cpp"]), &reserved).unwrap();
         assert_eq!(focused.roots.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["A.cpp"]);
         assert_eq!(focused.resolved, BTreeSet::from(["A.cpp".into()]));

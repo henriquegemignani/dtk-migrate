@@ -110,11 +110,22 @@ The checkout must still be byte-for-byte what the run measured. Every replacemen
 is journalled with both the old and new bytes before it happens, so an
 interrupted publication is recognised on the next `--resume` and undone. The
 stage gate then runs again *there*, because a worker proved something in a copy.
-For coverage that means replaying the stage's `applied` history backwards from
-the published splits: each transaction's bodies must be exactly what stands, its
-certificate must replay against its own observations, and undoing it must leave
-what the one before it wrote. A refinement that superseded an earlier
-transaction does not hide the earlier one's effect on a neighbour.
+For coverage, final validation first checks that every code section and every
+data section coverage changed still agrees with its last accepted transaction.
+Data added later to an untouched section may remain in the final body. The
+validator then replays coverage's `applied` history backwards, checks the
+transaction's read dependencies in the sections it changed, and rechecks its
+evidence. A refinement cannot hide an earlier transaction's effect on a
+neighbour. Verification proves final source link inputs first; only units it
+actually source-links may supersede coverage's earlier extracted-input trial
+condition.
+
+Reservations have separate code, data and link scopes. Coverage's code claim
+can be followed by an independently witnessed data addition and then source
+verification for the same TU. A coverage transaction also reserves code or
+data boundaries it read from neighbours; those dependencies are not counted
+as units changed by a focused `--only` request. Discovery retains a data-only
+candidate when a code candidate for the same unit is reserved or refused.
 
 A rollback never overwrites an edit made meanwhile. Someone else's work outranks
 undoing ours: the file is left as they made it and named in the journal.
@@ -133,8 +144,8 @@ A worker failure stops the other lanes but keeps what they finished, so a resume
 run picks up from there.
 
 Resuming a run that already published does nothing and says so. A run written
-by a tool with a different run schema (currently 4, which added the applied
-transaction history) is refused rather than reinterpreted.
+by a tool with a different run schema (currently 5, which adds scoped
+reservations and data fallbacks) is refused rather than reinterpreted.
 
 ## Resource settings
 

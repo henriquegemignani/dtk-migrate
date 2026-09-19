@@ -215,6 +215,7 @@ fn build_fixture(worlds: &[CoverageReport]) -> Option<Fixture> {
             common::SPLITS_HEADER.trim_end()
         ),
         worlds: worlds.iter().cloned().map(Some).collect(),
+        discover: None,
     })
 }
 

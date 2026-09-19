@@ -81,6 +81,7 @@ fn fixture() -> Option<Fixture> {
         source_splits: common::render(&source),
         target_splits: common::render(&target),
         worlds: (0..=4).map(|named| (named >= 2).then(|| evidence_for(named))).collect(),
+        discover: None,
     })
 }
 
@@ -357,15 +358,19 @@ fn only_is_resolved_across_every_stage_of_the_run() {
         eprintln!("skipped: needs ninja and python on PATH");
         return;
     };
-    // Coverage changes and reserves both units; verification, the next stage,
-    // has no candidate for either. That is a request already satisfied, not a
-    // mistaken one.
+    // Coverage changes code ownership while verification changes the link
+    // input for those same units. Both claims must survive publication.
     let output =
         fixture.migrate(&["--stages", "verify", "--only", "A.cpp", "--only", "B.cpp"], &[]);
     assert!(output.status.success(), "{}", describe(&output));
     let id = fixture.run_id();
     let run = fixture.json(&format!("build/dtk-migrate/runs/{id}/run.json"));
     assert_eq!(run["stages"], serde_json::json!(["coverage", "verify"]));
+    let verify = fixture.json(&format!("build/dtk-migrate/runs/{id}/verify/result.json"));
+    assert_eq!(names(&verify["accepted"]), ["A.cpp", "B.cpp"], "{verify:#}");
+    let journal = fixture.json(&format!("build/dtk-migrate/runs/{id}/publication.json"));
+    assert_eq!(journal["status"], "published", "{journal:#}");
+    assert!(journal["changes"].get("configure.py").is_some(), "{journal:#}");
     let published = fixture.published_splits();
     let expected = expected_final();
     for name in ["A.cpp", "B.cpp"] {

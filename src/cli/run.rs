@@ -125,7 +125,7 @@ pub fn run(args: Args) -> Result<()> {
         // Reserve in the mutation's namespace. A derived symbol name must not
         // exclude a later unit with the same spelling. Transaction neighbours
         // remain unit-scoped because their ownership changed too.
-        reserved.extend(result.changed_scopes(stage_for(stage)?.as_ref()));
+        reserved.extend(result.changed_scopes(stage_for(stage)?.as_ref())?);
         let prepared: crate::run::StoredPreparation =
             crate::run::read_json(&dir.stage(stage).join("prepared.json"))?;
         resolved.extend(prepared.only_resolved.iter().cloned());

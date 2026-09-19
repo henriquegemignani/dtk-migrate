@@ -42,8 +42,38 @@ pub type Selections = BTreeMap<String, String>;
 /// string as a translation unit without reserving that unit's later work.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MutationScope {
+    /// Code ownership in a translation unit.
     Unit(String),
+    /// Data ownership in a translation unit.
+    UnitData(String),
+    /// Whether the unit's compiled object is a link input.
+    UnitLink(String),
+    /// A coverage certificate read this unit's code or data boundary without
+    /// changing it. These constrain later mutations but do not count as work
+    /// done for a focused `--only` request.
+    CodeDependency(String),
+    DataDependency(String),
     Symbol(String),
+}
+
+impl MutationScope {
+    pub fn conflicts_with(&self, reserved: &BTreeSet<Self>) -> bool {
+        reserved.contains(self)
+            || match self {
+                Self::Unit(name) => {
+                    reserved.contains(&Self::CodeDependency(name.clone()))
+                        || reserved.contains(&Self::UnitLink(name.clone()))
+                }
+                Self::UnitData(name) => {
+                    reserved.contains(&Self::DataDependency(name.clone()))
+                        || reserved.contains(&Self::UnitLink(name.clone()))
+                }
+                Self::UnitLink(_)
+                | Self::CodeDependency(_)
+                | Self::DataDependency(_)
+                | Self::Symbol(_) => false,
+            }
+    }
 }
 
 /// One thing a stage wants to try, and whatever evidence it carries.
@@ -120,9 +150,15 @@ pub struct Prepared {
 /// the candidate list afterwards.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Permitted {
-    /// Names reserved by an earlier stage. Never touch these.
+    /// Code owners reserved by an earlier stage.
     #[serde(default)]
     pub reserved: BTreeSet<String>,
+    /// Data owners reserved by an earlier stage.
+    #[serde(default)]
+    pub reserved_data: BTreeSet<String>,
+    /// Final source-link proofs cannot be changed without re-verification.
+    #[serde(default)]
+    pub reserved_link: BTreeSet<String>,
     /// When a run was narrowed, the only names it may touch.
     #[serde(default)]
     pub only: BTreeSet<String>,
@@ -130,7 +166,13 @@ pub struct Permitted {
 
 impl Permitted {
     pub fn allows(&self, name: &str) -> bool {
-        !self.reserved.contains(name) && (self.only.is_empty() || self.only.contains(name))
+        !self.reserved.contains(name)
+            && !self.reserved_link.contains(name)
+            && (self.only.is_empty() || self.only.contains(name))
+    }
+
+    pub fn allows_data(&self, name: &str) -> bool {
+        !self.reserved_data.contains(name) && !self.reserved_link.contains(name)
     }
 }
 
@@ -212,6 +254,14 @@ impl Footprint {
 /// tell a genuinely new proposal from the one that was just refused.
 pub type Tried = BTreeMap<String, BTreeSet<String>>;
 
+/// Facts proved against the final project, after all stages have run. A
+/// source-linked unit may supersede coverage's historical extracted-link
+/// trial condition without erasing the ownership certificate it proved.
+#[derive(Debug, Clone, Default)]
+pub struct FinalCertificates {
+    pub source_linked: BTreeSet<String>,
+}
+
 pub trait Stage {
     fn name(&self) -> &'static str;
 
@@ -219,6 +269,45 @@ pub trait Stage {
     /// a translation unit that happens to have the same spelling.
     fn scope(&self, candidate: &Candidate) -> MutationScope {
         MutationScope::Unit(candidate.name.clone())
+    }
+
+    /// Every part of the final project this candidate may change. A combined
+    /// code/data candidate reserves both; a later data-only candidate need not
+    /// be withheld merely because an earlier stage certified the code.
+    fn scopes(&self, candidate: &Candidate) -> Result<BTreeSet<MutationScope>> {
+        Ok(BTreeSet::from([self.scope(candidate)]))
+    }
+
+    /// Whether every supported form of a candidate would conflict with an
+    /// earlier certificate. Stages with alternatives may keep a narrower form.
+    fn is_reserved(
+        &self,
+        candidate: &Candidate,
+        reserved: &BTreeSet<MutationScope>,
+    ) -> Result<bool> {
+        Ok(self.scopes(candidate)?.iter().any(|scope| scope.conflicts_with(reserved)))
+    }
+
+    /// Scopes of accepted candidates not already accounted for by a stage's
+    /// applied transaction history.
+    fn accepted_scopes(&self, candidates: &[Candidate]) -> Result<BTreeSet<MutationScope>> {
+        let mut scopes = BTreeSet::new();
+        for candidate in candidates {
+            scopes.extend(self.scopes(candidate)?);
+        }
+        Ok(scopes)
+    }
+
+    /// Scopes changed by a recorded transaction, including neighbouring units.
+    fn applied_scopes(&self, entry: &Applied) -> Result<BTreeSet<MutationScope>> {
+        Ok(entry.units.iter().cloned().map(MutationScope::Unit).collect())
+    }
+
+    /// Select one candidate per unit after the coordinator applies stage
+    /// reservations. Discovery uses this for a data-only fallback when its
+    /// combined code/data candidate is excluded by an earlier code claim.
+    fn choose_variants(&self, candidates: Vec<Candidate>) -> Result<Vec<Candidate>> {
+        Ok(candidates)
     }
 
     /// Builds the baseline and works out what is worth trying.
@@ -283,6 +372,21 @@ pub trait Stage {
         applied: &[Applied],
     ) -> Result<Report>;
 
+    /// Rechecks this stage in the final composed project. Publication first
+    /// proves source-link certificates with `verify`, then passes them to
+    /// stages whose historical trial conditions can be superseded safely.
+    fn validate_final(
+        &self,
+        ctx: &BuildContext,
+        accepted: &[Candidate],
+        prepared: &Prepared,
+        selections: &Selections,
+        applied: &[Applied],
+        _certificates: &FinalCertificates,
+    ) -> Result<Report> {
+        self.validate(ctx, accepted, prepared, selections, applied)
+    }
+
     /// Extra files this stage wants written beside its result, as
     /// (name, contents).
     ///
@@ -295,6 +399,21 @@ pub trait Stage {
         _result: &crate::run::StageResult,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn final_source_link_proof_blocks_later_ownership_mutations() {
+        let linked = BTreeSet::from([MutationScope::UnitLink("A.cpp".into())]);
+        assert!(MutationScope::Unit("A.cpp".into()).conflicts_with(&linked));
+        assert!(MutationScope::UnitData("A.cpp".into()).conflicts_with(&linked));
+        assert!(!MutationScope::Unit("B.cpp".into()).conflicts_with(&linked));
+        let code = BTreeSet::from([MutationScope::Unit("A.cpp".into())]);
+        assert!(!MutationScope::UnitLink("A.cpp".into()).conflicts_with(&code));
     }
 }
 

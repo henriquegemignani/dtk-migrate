@@ -33,6 +33,7 @@ fn a_decisive_run_publishes_one_three_unit_transaction() {
         source_splits: common::render(&source),
         target_splits: common::render(&target),
         worlds: vec![None, Some(evidence(false)), None, Some(evidence(true))],
+        discover: None,
     }) else {
         eprintln!("skipped: needs ninja and python on PATH");
         return;

@@ -27,7 +27,10 @@
 
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
 
-use dtk_migrate::{analysis::coverage::CoverageReport, project::splits::Splits};
+use dtk_migrate::{
+    analysis::coverage::CoverageReport, matching::data_evidence::DataEvidenceReport,
+    project::splits::Splits,
+};
 use indexmap::IndexMap;
 
 pub type Blocks = IndexMap<String, Vec<String>>;
@@ -56,21 +59,24 @@ if sys.argv[1] == "object":
 # exactly the state a resume has to pick up from.
 if os.environ.get("DTK_MIGRATE_FIXTURE_ABORT") and "integration" in Path.cwd().parts:
     sys.exit("fixture: interrupted during integration")
+if os.environ.get("DTK_MIGRATE_FIXTURE_ABORT_DISCOVER") and "discover" in Path.cwd().parts:
+    sys.exit("fixture: interrupted before discovery")
 
 units = json.loads(Path("fixture_units.json").read_text())
+source_linked = set(json.loads(Path("build/PAL/fixture_linked.json").read_text()))
 out = Path("build/PAL")
 out.mkdir(parents=True, exist_ok=True)
 (out / "main.dol").write_bytes(Path("orig/PAL/sys/main.dol").read_bytes())
 (out / "main.elf").write_bytes(b"fixture elf")
 (out / "ok").write_text("ok")
 report = {
-    "measures": {"matched_code": 256 * len(units), "total_code": 768, "complete_code": 0},
+    "measures": {"matched_code": 256 * len(units), "total_code": 768,
+                 "complete_code": 256 * len(source_linked)},
     "units": [
         {
             "name": name,
-            # Never complete: coverage keeps candidate source objects disabled,
-            # and refuses a candidate whose unit says otherwise.
-            "metadata": {"source_path": "src/" + name, "complete": False},
+            "metadata": {"source_path": "src/" + name,
+                         "complete": name in source_linked},
             "measures": {"matched_code": 256},
             "sections": [{"name": ".text", "fuzzy_match_percent": 100}],
         }
@@ -87,10 +93,9 @@ with (out / "fixture-builds.log").open("a") as stream:
 ///
 /// Declared in the shape the verification stage's rewriter understands, so a
 /// multi-stage run can prepare verification too. The graph is the point.
-/// `main.elf` links `build/PAL/obj/*.o`, the objects split out of the shipped
-/// binary, and the compiled-source objects under `build/PAL/src/` are declared
-/// but linked by nothing — which is the shape `validate_extracted_inputs`
-/// exists to check.
+/// `main.elf` links extracted objects until verification enables a source
+/// object. Both object rules exist throughout so the link-input checks can
+/// distinguish the two modes.
 const CONFIGURE: &str = r#"import argparse, json, sys
 from pathlib import Path
 
@@ -136,11 +141,16 @@ lines = [
     "",
 ]
 linked = []
-for name in OBJECTS:
+source_linked = []
+for name, status in objects:
     stem = Path(name).stem
     lines.append(f"build build/PAL/obj/{stem}.o: object orig/PAL/sys/main.dol")
-    linked.append(f"build/PAL/obj/{stem}.o")
     lines.append(f"build build/PAL/src/{stem}.o: object src/{name}")
+    linked.append(f"build/PAL/{'src' if status else 'obj'}/{stem}.o")
+    if status:
+        source_linked.append(name)
+Path("build/PAL").mkdir(parents=True, exist_ok=True)
+Path("build/PAL/fixture_linked.json").write_text(json.dumps(source_linked))
 outputs = "build/PAL/main.elf build/PAL/main.dol build/PAL/report.json build/PAL/ok"
 lines.append(f"build {outputs}: link {' '.join(linked)}")
 lines.append("build build.ninja objdiff.json: configure | configure.py")
@@ -192,6 +202,13 @@ pub struct Layout {
     /// `worlds[n]` is what the matcher says when the target names `n` units.
     /// `None` leaves that world absent.
     pub worlds: Vec<Option<CoverageReport>>,
+    /// Typed discovery evidence for a coverage → data → verify fixture.
+    pub discover: Option<DiscoverEvidence>,
+}
+
+pub struct DiscoverEvidence {
+    pub proposals: String,
+    pub data: DataEvidenceReport,
 }
 
 pub struct Fixture {
@@ -256,6 +273,15 @@ pub fn build(layout: &Layout) -> Option<Fixture> {
         let Some(world) = world else { continue };
         let text = serde_json::to_string_pretty(world).ok()?;
         std::fs::write(evidence.join(format!("{named}.json")), text).ok()?;
+    }
+    if let Some(discover) = &layout.discover {
+        std::fs::write(evidence.join("discover-proposals.txt"), &discover.proposals).ok()?;
+        std::fs::write(
+            evidence.join("discover-data-evidence.json"),
+            serde_json::to_string_pretty(&discover.data).ok()?,
+        )
+        .ok()?;
+        std::fs::write(evidence.join("discover-renames.txt"), "").ok()?;
     }
     Some(Fixture { _dir: dir, root, evidence, ninja, python })
 }

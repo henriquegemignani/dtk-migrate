@@ -43,12 +43,12 @@ use crate::{
         audit::{self, Stunted},
         ownership_transaction::OwnershipTransaction,
         report::{Measures, ObjdiffConfig, Report},
-        splits::Splits,
+        splits::{Splits, parse_range},
         transaction::Owned,
     },
     stages::{
-        Applied, Candidate, Event, Footprint, Outcome, Permitted, Prepared, Selections, Stage,
-        Tried,
+        Applied, Candidate, Event, FinalCertificates, Footprint, MutationScope, Outcome, Permitted,
+        Prepared, Selections, Stage, Tried,
         coverage::alternatives::{Alternative, assess_member, body_bytes, policy_digest},
     },
 };
@@ -60,6 +60,136 @@ pub const EVIDENCE_SCHEMA: u32 = 11;
 pub const POLICY_VERSION: u32 = crate::analysis::policy::POLICY_VERSION;
 
 const VALIDATION: &str = "atomic-ownership-transactions-with-exact-preconditions-and-canonical-attributed-ownership-and-unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-or-composed-independent-edges-or-decisive-joint-unit-runs-required-extracts-and-extracted-link-inputs-and-retail-bytes";
+
+const CODE_SECTIONS: [&str; 2] = [".text", ".init"];
+const OTHER_LINES: &str = "<unparsed>";
+
+fn body_by_section(lines: &[String]) -> BTreeMap<String, Vec<String>> {
+    let mut sections = BTreeMap::new();
+    for line in lines {
+        let section = parse_range(line).map_or_else(|| OTHER_LINES.to_string(), |r| r.section);
+        sections.entry(section).or_insert_with(Vec::new).push(line.clone());
+    }
+    sections
+}
+
+fn changes_data(before: Option<&[String]>, after: &[String]) -> bool {
+    let before = body_by_section(before.unwrap_or_default());
+    let after = body_by_section(after);
+    before.keys().chain(after.keys()).any(|section| {
+        !CODE_SECTIONS.contains(&section.as_str()) && before.get(section) != after.get(section)
+    })
+}
+
+fn changed_sections(transaction: &OwnershipTransaction) -> BTreeSet<String> {
+    let mut sections = BTreeSet::new();
+    for member in &transaction.members {
+        let before = body_by_section(member.before.as_deref().unwrap_or_default());
+        let after = body_by_section(&member.after);
+        for section in before.keys().chain(after.keys()) {
+            if before.get(section) != after.get(section) {
+                sections.insert(section.clone());
+            }
+        }
+    }
+    sections
+}
+
+fn read_dependency_scopes(transaction: &OwnershipTransaction) -> BTreeSet<MutationScope> {
+    let sections = changed_sections(transaction);
+    let code = sections.iter().any(|section| CODE_SECTIONS.contains(&section.as_str()));
+    let data = sections.iter().any(|section| !CODE_SECTIONS.contains(&section.as_str()));
+    let mut scopes = BTreeSet::new();
+    for read in &transaction.reads {
+        if code {
+            scopes.insert(MutationScope::CodeDependency(read.unit.clone()));
+        }
+        if data {
+            scopes.insert(MutationScope::DataDependency(read.unit.clone()));
+        }
+    }
+    scopes
+}
+
+fn validate_read_dependencies(
+    transaction: &OwnershipTransaction,
+    blocks: &IndexMap<String, Vec<String>>,
+) -> Result<()> {
+    let sections = changed_sections(transaction);
+    for read in &transaction.reads {
+        let expected = body_by_section(read.body.as_deref().unwrap_or_default());
+        let current =
+            body_by_section(blocks.get(&read.unit).map(Vec::as_slice).unwrap_or_default());
+        for section in &sections {
+            if expected.get(section) != current.get(section) {
+                bail!(ValidationError(format!(
+                    "Coverage dependency {} changed in {section} after transaction {}",
+                    read.unit, transaction.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn transaction_scopes(transaction: &OwnershipTransaction) -> BTreeSet<MutationScope> {
+    let mut scopes = BTreeSet::new();
+    for member in &transaction.members {
+        let before = body_by_section(member.before.as_deref().unwrap_or_default());
+        let after = body_by_section(&member.after);
+        if CODE_SECTIONS.iter().any(|section| before.get(*section) != after.get(*section)) {
+            scopes.insert(MutationScope::Unit(member.unit.clone()));
+        }
+        if changes_data(member.before.as_deref(), &member.after) {
+            scopes.insert(MutationScope::UnitData(member.unit.clone()));
+        }
+    }
+    scopes
+}
+
+/// Reconstructs the last exact coverage state for historical transaction
+/// replay, but only after confirming the final project retains every section
+/// coverage certified. Later data additions in untouched sections are checked
+/// by their own stage; they must not invalidate an otherwise unchanged code
+/// boundary certificate.
+fn coverage_history_projection(
+    final_blocks: &IndexMap<String, Vec<String>>,
+    transactions: &[&OwnershipTransaction],
+) -> Result<IndexMap<String, Vec<String>>> {
+    let mut protected: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut last_after: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for transaction in transactions {
+        for member in &transaction.members {
+            let before = body_by_section(member.before.as_deref().unwrap_or_default());
+            let after = body_by_section(&member.after);
+            let sections = protected.entry(member.unit.clone()).or_default();
+            sections.extend(CODE_SECTIONS.iter().map(|name| (*name).to_string()));
+            sections.insert(OTHER_LINES.to_string());
+            for section in before.keys().chain(after.keys()) {
+                if before.get(section) != after.get(section) {
+                    sections.insert(section.clone());
+                }
+            }
+            last_after.insert(member.unit.clone(), member.after.clone());
+        }
+    }
+
+    let mut projected = final_blocks.clone();
+    for (unit, after) in last_after {
+        let final_sections =
+            body_by_section(final_blocks.get(&unit).map(Vec::as_slice).unwrap_or_default());
+        let after_sections = body_by_section(&after);
+        for section in &protected[&unit] {
+            if final_sections.get(section) != after_sections.get(section) {
+                bail!(ValidationError(format!(
+                    "Coverage ownership for {unit} changed in {section} after its certificate"
+                )));
+            }
+        }
+        projected.insert(unit, after);
+    }
+    Ok(projected)
+}
 
 fn validate_evidence(
     mut evidence: CoverageReport,
@@ -234,6 +364,49 @@ pub struct Inventory {
 
 impl Stage for Coverage {
     fn name(&self) -> &'static str { "coverage" }
+
+    fn scopes(&self, candidate: &Candidate) -> Result<BTreeSet<MutationScope>> {
+        let proposal = proposal_of(candidate)?;
+        let mut scopes = BTreeSet::new();
+        for alternative in &proposal.alternatives {
+            scopes.extend(transaction_scopes(&alternative.transaction));
+        }
+        Ok(scopes)
+    }
+
+    fn is_reserved(
+        &self,
+        candidate: &Candidate,
+        reserved: &BTreeSet<MutationScope>,
+    ) -> Result<bool> {
+        let proposal = proposal_of(candidate)?;
+        Ok(proposal.alternatives.iter().all(|alternative| {
+            transaction_scopes(&alternative.transaction)
+                .iter()
+                .any(|scope| scope.conflicts_with(reserved))
+        }))
+    }
+
+    fn accepted_scopes(&self, _candidates: &[Candidate]) -> Result<BTreeSet<MutationScope>> {
+        // The chosen transaction, including its neighbours, is recorded in
+        // `applied`; alternatives that were never applied reserve nothing.
+        Ok(BTreeSet::new())
+    }
+
+    fn applied_scopes(&self, entry: &Applied) -> Result<BTreeSet<MutationScope>> {
+        let record: AppliedRecord = serde_json::from_value(entry.record.clone())?;
+        let transaction = &record.alternative.transaction;
+        let writes: Vec<String> = transaction.writes().map(str::to_string).collect();
+        if writes != entry.units {
+            bail!(ValidationError(format!(
+                "Applied transaction record for {} does not describe its writes",
+                entry.unit
+            )));
+        }
+        let mut scopes = transaction_scopes(transaction);
+        scopes.extend(read_dependency_scopes(transaction));
+        Ok(scopes)
+    }
 
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared> {
         std::fs::create_dir_all(&ctx.output)?;
@@ -505,8 +678,14 @@ impl Stage for Coverage {
         let deferred: Vec<Candidate> =
             candidates.iter().filter(|c| !taken.contains(c.name.as_str())).cloned().collect();
 
-        let final_report =
-            self.validate_selected(ctx, &accepted, &selections, &applied, &mut observations)?;
+        let final_report = self.validate_selected(
+            ctx,
+            &accepted,
+            &selections,
+            &applied,
+            &BTreeSet::new(),
+            &mut observations,
+        )?;
         if regresses(&report, &final_report) {
             bail!("Final coverage report regressed after validation");
         }
@@ -541,7 +720,33 @@ impl Stage for Coverage {
         selections: &Selections,
         applied: &[Applied],
     ) -> Result<Report> {
-        self.validate_selected(ctx, accepted, selections, applied, &mut Observations::default())
+        self.validate_selected(
+            ctx,
+            accepted,
+            selections,
+            applied,
+            &BTreeSet::new(),
+            &mut Observations::default(),
+        )
+    }
+
+    fn validate_final(
+        &self,
+        ctx: &BuildContext,
+        accepted: &[Candidate],
+        _prepared: &Prepared,
+        selections: &Selections,
+        applied: &[Applied],
+        certificates: &FinalCertificates,
+    ) -> Result<Report> {
+        self.validate_selected(
+            ctx,
+            accepted,
+            selections,
+            applied,
+            &certificates.source_linked,
+            &mut Observations::default(),
+        )
     }
 
     fn artifacts(
@@ -595,6 +800,7 @@ impl Coverage {
         accepted: &[Candidate],
         selections: &Selections,
         applied: &[Applied],
+        final_source_linked: &BTreeSet<String>,
         observations: &mut Observations,
     ) -> Result<Report> {
         let expected: BTreeMap<&str, Proposal> = accepted
@@ -640,7 +846,13 @@ impl Coverage {
             }
         }
 
-        let mut blocks = Splits::read(&splits_path(ctx))?.blocks;
+        let transactions: Vec<&OwnershipTransaction> =
+            records.iter().map(|record| &record.alternative.transaction).collect();
+        let final_blocks = Splits::read(&splits_path(ctx))?.blocks;
+        for transaction in &transactions {
+            validate_read_dependencies(transaction, &final_blocks)?;
+        }
+        let mut blocks = coverage_history_projection(&final_blocks, &transactions)?;
         for (entry, record) in applied.iter().zip(&records).rev() {
             let index = observations.load(&record.observation, ctx)?;
             if !record.unit_extracts.is_empty() {
@@ -658,6 +870,7 @@ impl Coverage {
                 }
             }
             validate_certificate(&entry.unit, &record.observation, &record.alternative, index)?;
+            validate_read_dependencies(&record.alternative.transaction, &blocks)?;
             record.alternative.transaction.undo(&mut blocks).map_err(|error| {
                 ValidationError(format!(
                     "Coverage split for {} changed after selection: {error:#}",
@@ -667,8 +880,11 @@ impl Coverage {
         }
 
         let report = ctx.build(None)?;
-        let written: BTreeSet<&str> =
-            applied.iter().flat_map(|entry| entry.units.iter().map(String::as_str)).collect();
+        let written: BTreeSet<&str> = applied
+            .iter()
+            .flat_map(|entry| entry.units.iter().map(String::as_str))
+            .filter(|unit| !final_source_linked.contains(*unit))
+            .collect();
         validate_extracted_inputs(ctx, &written, &report)?;
         let required: Vec<&RequiredExtract> = records
             .iter()
@@ -707,6 +923,15 @@ impl Trial<'_> {
         if let Some(unit) = transaction.writes().find(|unit| !self.permitted.allows(unit)) {
             bail!(ValidationError(format!(
                 "{name} requires changing {unit}, which this run does not permit"
+            )));
+        }
+        if let Some(member) = transaction.members.iter().find(|member| {
+            changes_data(member.before.as_deref(), &member.after)
+                && !self.permitted.allows_data(&member.unit)
+        }) {
+            bail!(ValidationError(format!(
+                "{name} requires changing {}'s certified data, which this run does not permit",
+                member.unit
             )));
         }
         if transaction.required_extracts
@@ -1057,7 +1282,7 @@ fn failure_category(error: &anyhow::Error) -> &'static str {
 /// world they are in.
 const EVIDENCE_DIRECTORY: &str = "DTK_MIGRATE_EVIDENCE_DIR";
 
-fn injected() -> Option<std::path::PathBuf> {
+pub(crate) fn injected_evidence_dir() -> Option<std::path::PathBuf> {
     std::env::var_os(EVIDENCE_DIRECTORY)
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
@@ -1065,7 +1290,7 @@ fn injected() -> Option<std::path::PathBuf> {
 
 /// A digest over every prepared evidence file, or `None` in a real migration.
 pub fn injected_evidence_digest() -> Result<Option<String>> {
-    let Some(directory) = injected() else { return Ok(None) };
+    let Some(directory) = injected_evidence_dir() else { return Ok(None) };
     let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&directory)
         .with_context(|| format!("Failed to read {}", directory.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -1081,7 +1306,7 @@ pub fn injected_evidence_digest() -> Result<Option<String>> {
 
 fn generate_evidence(ctx: &BuildContext) -> Result<CoverageReport> {
     let path = ctx.output.join("coverage-evidence.json");
-    match injected() {
+    match injected_evidence_dir() {
         Some(directory) => {
             // Which world the fixture is in: how much the target already owns.
             let named = Splits::read(&splits_path(ctx))?.blocks.len();
@@ -1629,7 +1854,10 @@ fn stunted_section(stunted: &[Stunted]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::coverage_fixture::{anchor, report as evidence_report, unit};
+    use crate::{
+        analysis::coverage_fixture::{anchor, report as evidence_report, unit},
+        project::ownership_transaction::Provenance,
+    };
 
     fn blocks(entries: &[(&str, u32, u32)]) -> IndexMap<String, Vec<String>> {
         let mut map: IndexMap<String, Vec<String>> = IndexMap::new();
@@ -1639,6 +1867,72 @@ mod tests {
                 .push(format!("\t{:11} start:0x{start:08X} end:0x{end:08X}", ".text"));
         }
         map
+    }
+
+    #[test]
+    fn final_coverage_projection_keeps_its_code_and_allows_later_data() {
+        let original = blocks(&[("a.cpp", 0x100, 0x200)]);
+        let code = blocks(&[("a.cpp", 0x100, 0x300)]);
+        let transaction = OwnershipTransaction::build(
+            &original,
+            [("a.cpp".into(), code["a.cpp"].clone())],
+            Provenance { evidence: vec!["test-code-boundary".into()], ..Default::default() },
+        )
+        .unwrap();
+        let mut final_blocks = code.clone();
+        final_blocks.get_mut("a.cpp").unwrap().extend([
+            "\t.bss        start:0x00001000 end:0x00001020".into(),
+            "\t.bss        start:0x00002000 end:0x00002040 align:4 common".into(),
+        ]);
+        let projected = coverage_history_projection(&final_blocks, &[&transaction]).unwrap();
+        assert_eq!(projected["a.cpp"], code["a.cpp"]);
+        assert_eq!(final_blocks["a.cpp"].len(), 3);
+
+        let mut moved_code = final_blocks.clone();
+        moved_code.get_mut("a.cpp").unwrap()[0] =
+            "\t.text       start:0x00000100 end:0x00000320".into();
+        assert!(coverage_history_projection(&moved_code, &[&transaction]).is_err());
+
+        let data_transaction = OwnershipTransaction::build(
+            &code,
+            [("a.cpp".into(), final_blocks["a.cpp"].clone())],
+            Provenance::default(),
+        )
+        .unwrap();
+        let mut changed_certified_data = final_blocks.clone();
+        changed_certified_data
+            .get_mut("a.cpp")
+            .unwrap()
+            .push("\t.bss        start:0x00003000 end:0x00003010".into());
+        assert!(
+            coverage_history_projection(&changed_certified_data, &[&data_transaction]).is_err()
+        );
+    }
+
+    #[test]
+    fn coverage_read_boundaries_survive_later_data_but_not_code_changes() {
+        let original = blocks(&[("a.cpp", 0x100, 0x200), ("b.cpp", 0x200, 0x300)]);
+        let transaction = OwnershipTransaction::build(
+            &original,
+            [("a.cpp".into(), vec!["\t.text       start:0x00000080 end:0x00000200".into()])],
+            Provenance { evidence: vec!["test-code-boundary".into()], ..Default::default() },
+        )
+        .unwrap();
+        assert!(transaction.reads.iter().any(|read| read.unit == "b.cpp"));
+        assert!(
+            read_dependency_scopes(&transaction)
+                .contains(&MutationScope::CodeDependency("b.cpp".into()))
+        );
+        let mut final_blocks = original.clone();
+        transaction.apply(&mut final_blocks).unwrap();
+        final_blocks
+            .get_mut("b.cpp")
+            .unwrap()
+            .push("\t.data       start:0x00001000 end:0x00001020".into());
+        validate_read_dependencies(&transaction, &final_blocks).unwrap();
+        final_blocks.get_mut("b.cpp").unwrap()[0] =
+            "\t.text       start:0x00000200 end:0x00000320".into();
+        assert!(validate_read_dependencies(&transaction, &final_blocks).is_err());
     }
 
     #[test]
@@ -2246,6 +2540,7 @@ mod tests {
         let permitted = Permitted {
             reserved: BTreeSet::from(["reserved.cpp".to_string()]),
             only: BTreeSet::from(["wanted.cpp".to_string()]),
+            ..Default::default()
         };
         assert!(permitted.allows("wanted.cpp"));
         assert!(!permitted.allows("newly-eligible.cpp"));
@@ -2255,6 +2550,7 @@ mod tests {
         let open = Permitted {
             reserved: BTreeSet::from(["reserved.cpp".to_string()]),
             only: BTreeSet::new(),
+            ..Default::default()
         };
         assert!(open.allows("newly-eligible.cpp"));
         assert!(!open.allows("reserved.cpp"));

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     project::report::Report,
     run::{RunDir, RunRecord, StageResult, context, read_json, stage_for, write_json},
-    stages::Prepared,
+    stages::{FinalCertificates, Prepared},
     workspace::{Manifest, Snapshot},
 };
 
@@ -140,17 +140,38 @@ pub fn publish(
         // Prove it again here. The worker proved it in a copy; this is the
         // project that will keep it.
         let mut report = ctx.build(None)?;
-        for stage_name in &run.stages {
-            let Some((result, prepared)) = results.get(stage_name) else { continue };
-            if result.accepted.is_empty() && result.applied.is_empty() {
-                continue;
-            }
-            report = stage_for(stage_name)?.validate(
+        let mut certificates = FinalCertificates::default();
+        // A source-link proof is a fact about the *final* graph. Establish it
+        // first, then coverage can stop requiring the older extracted-input
+        // condition for exactly those units while still replaying ownership.
+        if run.stages.iter().any(|name| name == "verify")
+            && let Some((result, prepared)) = results.get("verify")
+            && (!result.accepted.is_empty() || !result.applied.is_empty())
+        {
+            report = stage_for("verify")?.validate(
                 &ctx,
                 &result.accepted,
                 prepared,
                 &result.selections,
                 &result.applied,
+            )?;
+            certificates.source_linked.extend(result.accepted.iter().map(|c| c.name.clone()));
+        }
+        for stage_name in &run.stages {
+            if stage_name == "verify" {
+                continue;
+            }
+            let Some((result, prepared)) = results.get(stage_name) else { continue };
+            if result.accepted.is_empty() && result.applied.is_empty() {
+                continue;
+            }
+            report = stage_for(stage_name)?.validate_final(
+                &ctx,
+                &result.accepted,
+                prepared,
+                &result.selections,
+                &result.applied,
+                &certificates,
             )?;
         }
         crate::run::check_environment(run)?;

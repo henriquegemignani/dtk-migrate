@@ -1026,14 +1026,29 @@ reports 1,472 data ranges and 187 range-level witnesses. It found no target
 symbol with an explicit `common` flag among those ranges; 48 ranges inherited
 common mode from existing splits, but none of those passed the full range gate.
 
-For the remaining H work, publication and reservations must change together.
-Coverage publication currently reverses exact full bodies and requires its
-units to remain extracted inputs. A later data addition changes the body, and
-a successful verify changes the link input. First make publication validate
-the final composed ownership and distinguish coverage's historical trial link
-mode from verify's final source-link proof; then admit compatible later-stage
-mutations. Merely narrowing the reserved-name set would make publication fail
-on correctly composed results.
+### H composition checkpoint: scoped certificates and final validation
+
+Run schema 5 separates code, data and link reservations. Coverage transactions
+reserve the sections they write and the neighbour sections they read; discovery
+keeps combined, code-only and data-only forms so a reserved or refused code
+claim does not suppress independently witnessed data. Verification can source
+link a unit whose code and data were completed earlier in the same run.
+Publication proves final source link inputs, checks that coverage's code and
+any data it actually changed still stand, and replays the coverage history and
+its read dependencies. It permits later data in untouched sections without
+pretending that the old full-body precondition is still the final body.
+
+The coordinator fixture runs coverage → two separately witnessed common BSS
+ranges → verify on one TU, including interruption before discovery and resume.
+The final body retains both BSS ranges, the source object is linked, and
+publication rechecks both certificates. The typed discovery injection uses the
+same directory whose digest is already frozen in the run environment.
+
+The remaining H work is to record the final composed per-unit state and
+certificate dependency graph explicitly in the published result, and to
+broaden evidence for unproven target-side data. The latter must remain withheld
+until a real target-side witness exists; a compiler or source-version guess is
+not sufficient.
 
 ## 8. Make refusals diagnostic and retries state-aware
 

@@ -25,7 +25,7 @@ use crate::{
         report::{ObjdiffConfig, ObjdiffUnit, Report, strip_source_root},
         transaction::Owned,
     },
-    stages::{Candidate, Event, Outcome, Prepared, Selections, Stage, bisect},
+    stages::{Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage, bisect},
 };
 
 pub struct Verify;
@@ -35,6 +35,10 @@ const VALIDATION: &str = "compiled-link-inputs-and-retail-bytes";
 
 impl Stage for Verify {
     fn name(&self) -> &'static str { "verify" }
+
+    fn scopes(&self, candidate: &Candidate) -> Result<BTreeSet<MutationScope>> {
+        Ok(BTreeSet::from([MutationScope::UnitLink(candidate.name.clone())]))
+    }
 
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared> {
         if limit == Some(0) {
