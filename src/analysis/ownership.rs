@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::analysis::{
     callgraph::NodeIndex,
     fingerprint::normalized_body,
-    helpers::{self, HelperFamily, UnresolvedTargetCluster},
+    helpers::{self, HelperFamily, HelperTailHypothesis, UnresolvedTargetCluster},
     matching::{
         CONTESTED_MARGIN, Match, MatchMethod, MatchResult, MatchTarget, MatchTier, classify_tier,
     },
@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 11;
+pub const IDENTIFICATION_SCHEMA: u32 = 12;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -56,6 +56,9 @@ pub struct IdentificationReport {
     /// baseline. A cluster is not a proposed split or a guessed filename.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_target_clusters: Vec<UnresolvedTargetCluster>,
+    /// Generated-looking functions at bounded TU tails; diagnostic only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub helper_tail_hypotheses: Vec<HelperTailHypothesis>,
     /// Optional target-version compiled-source inventory. The channel may be
     /// absent without weakening any binary-only identification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +77,7 @@ impl IdentificationReport {
             target_functions: Vec::new(),
             helper_families: Vec::new(),
             unresolved_target_clusters: Vec::new(),
+            helper_tail_hypotheses: Vec::new(),
             object_evidence: None,
             units: Vec::new(),
         }
@@ -371,6 +375,9 @@ impl ObservationIndex {
         }
         if report.source != source || report.target != target {
             bail!("Identification source/target does not match its enclosing evidence");
+        }
+        if report.schema < 12 && !report.helper_tail_hypotheses.is_empty() {
+            bail!("Identification schema {} cannot carry helper tail hypotheses", report.schema);
         }
         if report.schema < 4
             && (!report.helper_families.is_empty()
@@ -731,6 +738,14 @@ impl ObservationIndex {
             };
             report.unresolved_target_clusters =
                 helpers::unresolved_clusters(&report.target_functions, &report.attributions);
+        }
+        if report.schema >= 12 {
+            report.helper_tail_hypotheses = helpers::tail_hypotheses(
+                &report.source_functions,
+                &report.target_functions,
+                &report.attributions,
+                report.object_evidence.as_ref().map_or(&[], |evidence| &evidence.definitions),
+            );
         }
 
         let bytes = serde_json::to_vec(&report)?;
@@ -2039,12 +2054,19 @@ pub fn identify_units(
             .collect(),
         helper_families: Vec::new(),
         unresolved_target_clusters: Vec::new(),
+        helper_tail_hypotheses: Vec::new(),
         object_evidence: None,
         units,
     };
     report.helper_families = helpers::families(&report.source_functions, &report.target_functions);
     report.unresolved_target_clusters =
         helpers::unresolved_clusters(&report.target_functions, &report.attributions);
+    report.helper_tail_hypotheses = helpers::tail_hypotheses(
+        &report.source_functions,
+        &report.target_functions,
+        &report.attributions,
+        &[],
+    );
     report
 }
 

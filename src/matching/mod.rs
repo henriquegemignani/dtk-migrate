@@ -181,6 +181,12 @@ pub fn run(request: &Request) -> Result<()> {
             &identifications.target_functions,
             compiled,
         );
+        identifications.helper_tail_hypotheses = crate::analysis::helpers::tail_hypotheses(
+            &identifications.source_functions,
+            &identifications.target_functions,
+            &identifications.attributions,
+            compiled,
+        );
     }
     let report = Report::build(&source, &target, &result, request.validate);
     report.print_summary();

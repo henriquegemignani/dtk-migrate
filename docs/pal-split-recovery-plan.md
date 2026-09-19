@@ -5,7 +5,10 @@ Status: living implementation plan. Change A landed through `0a351d2`; Change B 
 `2dcea5a`. Change E (atomic ownership transactions) landed at `520a3f3`. Change D's first two
 rules are described in the checkpoint below. The remaining plan is based on the architecture
 after those changes. Change F's bounded joint-run search is implemented under policy 14;
-its historical and held-out evaluation is recorded below.
+its historical and held-out evaluation is recorded below. Change G has binary
+helper families, optional object evidence, unresolved clusters and schema-12
+tail hypotheses; emitted ownership remains constrained by incomplete linker
+inventories. Changes H and I are still open.
 
 ## Implementation checkpoint after the first Change G slice
 
@@ -250,6 +253,35 @@ units. It produced 21 relocation placements and zero strict emitted-owner
 resolutions. This checkout and its PAL edits differ from the frozen
 `b65ad2a6` experiment, so those counts are not a before/after recall score.
 Coverage policy 14 still consumes neither diagnostic.
+
+### Generated helper-tail hypotheses (identification schema 12)
+
+The next G slice records an unattributed function at a bounded TU seam as a
+hypothesis. It requires the candidate unit's independently identified last
+source function immediately before it and an independently identified first
+function of another unit immediately after it. A destructor or
+static-initializer name can come from the target, a matching source body, or
+an optional compiled definition; a caller attributed to the candidate is
+another reason to report an otherwise opaque tail. Candidate and outside
+callers remain explicit; neither names nor
+calls grant emitted ownership. The record is rederived on load and policy 14
+does not consume it. This covers the plan's compiler-generated tail inventory
+without making a split claim from source order alone.
+
+On the frozen historical identification report, the strict seam and caller
+rule reports `0x802944F0` beside `WorldFormat/CMetroidAreaCollider.cpp`:
+its one observed caller is independently attributed to that unit. The report
+contains no matching compiled definition or generated name for this function,
+so the record is explicitly an opaque helper hypothesis, not a compiler-origin
+or emitted-owner conclusion. Three other tight seams lacked both a generated
+name and a caller in the candidate unit and were withheld.
+
+The plan's G→H→I order still fits. The next G gate is emitted-owner evidence:
+account for the actual linked members of archives and the configured source
+objects omitted from the split inventory, then require a decisive owner before
+turning any tail hypothesis into a transaction. This diagnostic does not make
+the existing incomplete linker inventory complete. H's data-range and
+cross-stage certificate work remains separate.
 
 ## Implementation checkpoint after Change F (joint runs)
 

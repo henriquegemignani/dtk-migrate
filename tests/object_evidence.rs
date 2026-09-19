@@ -4,6 +4,7 @@ use std::{collections::BTreeSet, path::PathBuf, time::Instant};
 
 use dtk_migrate::{
     analysis::{
+        helpers::tail_hypotheses,
         matching::MatchTarget,
         object_evidence::{
             BuildFreshness, ObjectStatus, ScanStatus, capture_target_references,
@@ -15,6 +16,36 @@ use dtk_migrate::{
     project::analyze::load_analyzed,
 };
 use typed_path::Utf8NativePath;
+
+#[test]
+fn historical_pal_report_identifies_collider_tail_from_caller() {
+    let Some(path) = std::env::var_os("DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT") else {
+        eprintln!("skipped: set DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT");
+        return;
+    };
+    let mut report: IdentificationReport =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let compiled = &report.object_evidence.as_ref().unwrap().definitions;
+    let hypotheses = tail_hypotheses(
+        &report.source_functions,
+        &report.target_functions,
+        &report.attributions,
+        compiled,
+    );
+    assert!(hypotheses.iter().any(|item| {
+        item.candidate_unit == "WorldFormat/CMetroidAreaCollider.cpp"
+            && item.address == "0x802944F0"
+            && item.generated_name_evidence.is_empty()
+            && !item.candidate_definition_observed
+            && item.candidate_caller_ids.len() == 1
+            && item.other_or_unattributed_callers == 0
+    }));
+    report.schema = IDENTIFICATION_SCHEMA;
+    let canonical =
+        ObservationIndex::load_self_contained(report.clone(), &report.source, &report.target)
+            .unwrap();
+    assert_eq!(canonical.report().helper_tail_hypotheses, hypotheses);
+}
 
 #[test]
 fn historical_pal_get_generator_desc_does_not_exclude_an_unproved_competitor() {

@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 14, evidence schema 11, identification schema 11. Every threshold
+Policy version 14, evidence schema 11, identification schema 12. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -143,6 +143,18 @@ records are retained under their original schema so saved run references keep
 their digest; they do not gain the schema-11 proof status. Policy 14 makes
 no ownership transfer from either result. Ninja freshness does not establish
 the source revision.
+
+Identification schema 12 records one-function helper-tail hypotheses. An
+unattributed, unowned or auto-split function must follow the candidate unit's
+last independently attributed source function and precede an independently
+attributed first function of another unit, with gaps of at most 31 bytes. A
+destructor or static-initializer name in the target, source, or optional
+compiled object, or an attributed caller from the candidate, makes the tail
+worth reporting. The record retains callers from the candidate, callers
+elsewhere or without attribution, whether the candidate has an observed
+definition, and other units defining the same body. It is regenerated from raw
+observations on load and never certifies linker emission or changes ownership.
+Older identification reports retain their original contents and digests.
 
 Identification, boundary certainty and application are independent. A TU may be
 corroborated while an edge remains unresolved, or may have a complete observed

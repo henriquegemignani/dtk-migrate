@@ -285,6 +285,7 @@ pub fn report(source: &str, target: &str, units: Vec<CoverageUnit>) -> CoverageR
             .collect(),
         helper_families: Vec::new(),
         unresolved_target_clusters: Vec::new(),
+        helper_tail_hypotheses: Vec::new(),
         object_evidence: None,
         units: units
             .iter()
