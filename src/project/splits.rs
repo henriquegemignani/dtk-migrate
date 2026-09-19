@@ -1,7 +1,8 @@
 //! Reading and writing a version's `splits.txt`, and the proposal files that
 //! share its syntax.
 //!
-//! A splits file is a list of units, each owning one address range per section.
+//! A splits file is a list of units and their address ranges. Non-code sections
+//! may have more than one range in a unit, including ordinary and common BSS.
 //! It is a project input under version control, so the writer's job is to keep
 //! every line it did not deliberately change exactly as it found it: the file is
 //! not sorted by address, and re-sorting it would turn every untouched unit into
@@ -293,18 +294,19 @@ fn split_blocks(
     (header, blocks)
 }
 
-/// True if a proposed unit puts two or more disjoint ranges in one section.
+/// True if a proposed unit puts two or more ranges in one code section.
 ///
-/// A translation unit compiles to one contiguous chunk per section, so this
+/// A translation unit compiles to one contiguous code chunk per section, so this
 /// means the matcher found two separate clusters of functions it believes belong
 /// to the same source file with something else's code between them. Staging it
 /// asks the unit to sit both before and after whatever is in the gap, which no
-/// link order can satisfy. It is not a low-confidence guess to verify; it is
-/// already self-contradictory.
+/// link order can satisfy. Data may legitimately occupy disjoint ranges.
 pub fn is_fragmented(lines: &[String]) -> bool {
     let mut per_section: HashMap<String, usize> = HashMap::new();
     for line in lines {
-        if let Some(range) = parse_range(line) {
+        if let Some(range) = parse_range(line)
+            && matches!(range.section.as_str(), ".text" | ".init")
+        {
             *per_section.entry(range.section).or_default() += 1;
         }
     }
@@ -327,8 +329,8 @@ pub fn drop_misaligned_sections(lines: &[String], raw_lines: &[String]) -> Vec<S
         .collect()
 }
 
-/// Reduces a fragmented proposal to a stageable one: per section, keep only the
-/// largest aligned range and drop the rest.
+/// Reduces a fragmented code proposal to a stageable one: per code section,
+/// keep only the largest aligned range. Preserve aligned data ranges separately.
 ///
 /// This is a bet, not a structural fix. dtk validates that a staged split's
 /// compiled object matches its declared range exactly, so keeping only the
@@ -363,7 +365,13 @@ pub fn dominant_cluster(raw_lines: &[String]) -> Option<Vec<String>> {
     }
 
     let mut kept = Vec::new();
-    for ranges in per_section.into_values() {
+    for (section, ranges) in per_section {
+        if !matches!(section.as_str(), ".text" | ".init") {
+            kept.extend(
+                ranges.into_iter().filter(|range| !range.misaligned).map(|range| range.line),
+            );
+            continue;
+        }
         if ranges.len() == 1 {
             // Not fragmented, but still do not forward a misaligned single range
             // just because it sits alongside a fragmented section in the same
@@ -484,6 +492,17 @@ mod tests {
             "\t.data       start:0x80400000 end:0x80400010".to_string(),
         ];
         assert!(!is_fragmented(&lines));
+    }
+
+    #[test]
+    fn ordinary_and_common_bss_ranges_are_not_a_fragmented_code_unit() {
+        let raw = vec![
+            "#\t.bss        start:0x804025F0 end:0x804026E0".to_string(),
+            "#\t.bss        start:0x80468C00 end:0x80468C50 align:4 common".to_string(),
+        ];
+        let clean: Vec<_> = raw.iter().map(|line| clean_entry_line(line)).collect();
+        assert!(!is_fragmented(&clean));
+        assert_eq!(dominant_cluster(&raw), Some(clean));
     }
 
     #[test]

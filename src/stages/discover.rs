@@ -30,7 +30,7 @@ use crate::{
     project::{
         link_order::cyclic_units,
         report::Report,
-        splits::{Splits, parse_range},
+        splits::{Splits, entry_line, entry_suffix, parse_attributes, parse_range},
         transaction::Owned,
     },
     stages::{Candidate, Event, Outcome, Prepared, Selections, Stage},
@@ -233,43 +233,6 @@ fn data_only_in_source(source: &IndexMap<String, Vec<String>>, name: &str) -> bo
     })
 }
 
-/// How many bytes a unit's body claims in one section, if it claims any.
-fn section_size(body: Option<&Vec<String>>, section: &str) -> Option<u32> {
-    let ranges = ranges_in(body?, section);
-    let start = ranges.iter().map(|r| r.0).min()?;
-    let end = ranges.iter().map(|r| r.1).max()?;
-    Some(end - start)
-}
-
-/// Grows a proposed range over an unowned remainder that would strand a symbol.
-///
-/// The matcher ends a proposed range at the last symbol it could match, so an
-/// unmatched symbol sitting immediately after lands in a remainder nothing
-/// owns. Nothing emits it, and the unit's own code still references it, so the
-/// link fails on an undefined symbol — `musyx/runtime/synth.c` lost its whole
-/// data migration to a four-byte tail of exactly this shape.
-///
-/// Claiming that remainder needs evidence it belongs here, so the growth is
-/// bounded twice: never into the next owner's range, and never past the size
-/// the same unit has in the source version.
-fn extended_end(
-    start: u32,
-    end: u32,
-    taken: &[(u32, u32)],
-    source_body: Option<&Vec<String>>,
-    section: &str,
-) -> u32 {
-    let Some(expected) = section_size(source_body, section) else { return end };
-    if end - start >= expected {
-        return end;
-    }
-    let mut limit = start + expected;
-    if let Some(next) = taken.iter().map(|r| r.0).filter(|&a| a >= end).min() {
-        limit = limit.min(next);
-    }
-    end.max(limit)
-}
-
 /// Proposals that extend an established unit with its non-code sections.
 ///
 /// The matcher proposes a range for every section by symbol-name
@@ -295,26 +258,61 @@ pub fn data_proposals(
     for name in names {
         let body = existing.get(&name).cloned().unwrap_or_default();
         let Some(lines) = proposals.get(&name) else { continue };
-        let sections: BTreeSet<String> = lines
-            .iter()
-            .filter_map(|line| parse_range(line))
-            .filter(|range| !CODE_SECTIONS.contains(&range.section.as_str()))
-            .map(|range| range.section)
-            .collect();
-        if sections.is_empty() {
-            continue;
-        }
         let mut new_body = body.clone();
-        for section in &sections {
-            let proposed = ranges_in(lines, section);
-            let current = ranges_in(&new_body, section);
-            let taken = occupied(existing, &name, section);
-            let Some((start, mut end)) = merged_span(&proposed, &current, &taken) else {
+        for line in lines {
+            let Some(range) = parse_range(line) else { continue };
+            if CODE_SECTIONS.contains(&range.section.as_str()) || range.start >= range.end {
                 continue;
-            };
-            end = extended_end(start, end, &taken, source.get(&name), section);
-            new_body.retain(|line| parse_range(line).is_none_or(|r| &r.section != section));
-            new_body.push(format_range(section, start, end));
+            }
+            // A matched data range is evidence for its own addresses only.
+            // Neither a gap between two ranges nor the source version's total
+            // section size establishes ownership of intervening bytes.
+            if occupied(existing, &name, &range.section)
+                .iter()
+                .any(|&(start, end)| range.start < end && start < range.end)
+            {
+                continue;
+            }
+            let proposed_attributes = parse_attributes(line);
+            let mut overlapping = Vec::new();
+            let mut conflict = false;
+            for (index, current_line) in new_body.iter().enumerate() {
+                let Some(current) = parse_range(current_line) else { continue };
+                if current.section != range.section {
+                    continue;
+                }
+                let same_attributes = parse_attributes(current_line) == proposed_attributes;
+                if range.start < current.end && current.start < range.end && !same_attributes {
+                    conflict = true;
+                    break;
+                }
+                if range.start < current.end && current.start < range.end && same_attributes {
+                    overlapping.push((index, current.start, current.end));
+                }
+            }
+            // One existing interval may be widened without changing its
+            // split attributes. Several overlapping intervals remain separate;
+            // folding them together would erase a potentially real allocation
+            // boundary inside this section.
+            if conflict || overlapping.len() > 1 {
+                continue;
+            }
+            if let Some((index, start, end)) = overlapping.into_iter().next() {
+                let suffix = entry_suffix(&new_body[index]);
+                new_body[index] =
+                    entry_line(&range.section, start.min(range.start), end.max(range.end), &suffix);
+            } else {
+                let insert_at = new_body
+                    .iter()
+                    .rposition(|current| {
+                        parse_range(current).is_some_and(|current| current.section == range.section)
+                    })
+                    .map_or(new_body.len(), |index| index + 1);
+                new_body.insert(
+                    insert_at,
+                    entry_line(&range.section, range.start, range.end, &entry_suffix(line)),
+                );
+            }
         }
         if new_body != body {
             result.push((name, new_body));
@@ -719,6 +717,7 @@ mod tests {
 
     fn text(start: u32, end: u32) -> String { format_range(".text", start, end) }
     fn data(start: u32, end: u32) -> String { format_range(".data", start, end) }
+    fn bss(start: u32, end: u32) -> String { format_range(".bss", start, end) }
 
     #[test]
     fn a_new_code_unit_is_proposed_whole() {
@@ -818,31 +817,40 @@ mod tests {
     }
 
     #[test]
-    fn a_range_grows_over_a_remainder_that_would_strand_a_symbol() {
-        // synth.c: the proposal stops at the last matched symbol and leaves a
-        // four-byte tail nothing owns, which fails the link.
+    fn source_size_does_not_prove_the_unmatched_tail() {
+        // synth.c's four-byte tail needs a symbol or relocation witness. The
+        // source version's section size alone does not establish its owner.
         let proposals = blocks(&[("synth.c", &[&data(0x900, 0x9FC)])]);
         let existing = blocks(&[("synth.c", &[&text(0x100, 0x200)])]);
         let source = blocks(&[("synth.c", &[&data(0x800, 0x900)])]);
         let result = data_proposals(&proposals, &existing, &source);
-        assert!(result[0].1.contains(&data(0x900, 0xA00)), "{:?}", result[0].1);
+        assert_eq!(result[0].1, vec![text(0x100, 0x200), data(0x900, 0x9FC)]);
     }
 
     #[test]
-    fn growth_stops_at_the_next_owner() {
+    fn a_proposed_range_overlapping_another_owner_is_withheld() {
+        let proposals = blocks(&[("a.cpp", &[&data(0x900, 0xA00)])]);
+        let existing =
+            blocks(&[("a.cpp", &[&text(0x100, 0x200)]), ("b.cpp", &[&data(0x9FE, 0xB00)])]);
+        assert!(data_proposals(&proposals, &existing, &IndexMap::new()).is_empty());
+    }
+
+    #[test]
+    fn a_range_near_another_owner_is_not_grown_into_it() {
         let proposals = blocks(&[("a.cpp", &[&data(0x900, 0x9FC)])]);
         let existing =
             blocks(&[("a.cpp", &[&text(0x100, 0x200)]), ("b.cpp", &[&data(0x9FE, 0xB00)])]);
         let source = blocks(&[("a.cpp", &[&data(0x800, 0x900)])]);
         let result = data_proposals(&proposals, &existing, &source);
-        assert!(result[0].1.contains(&data(0x900, 0x9FE)), "{:?}", result[0].1);
+        assert!(result[0].1.contains(&data(0x900, 0x9FC)), "{:?}", result[0].1);
     }
 
     #[test]
-    fn growth_never_exceeds_the_size_the_source_version_has() {
+    fn a_source_size_smaller_than_the_proposal_does_not_discard_evidence() {
         let proposals = blocks(&[("a.cpp", &[&data(0x900, 0x9FC)])]);
         let existing = blocks(&[("a.cpp", &[&text(0x100, 0x200)])]);
-        // The source unit is smaller than the proposal, so nothing is added.
+        // The proposal's own interval remains usable regardless of the source
+        // version's shorter section.
         let source = blocks(&[("a.cpp", &[&data(0x800, 0x810)])]);
         let result = data_proposals(&proposals, &existing, &source);
         assert!(result[0].1.contains(&data(0x900, 0x9FC)), "{:?}", result[0].1);
@@ -854,5 +862,64 @@ mod tests {
         let existing = blocks(&[("a.cpp", &[&text(0x100, 0x200)])]);
         let result = data_proposals(&proposals, &existing, &IndexMap::new());
         assert!(result[0].1.contains(&data(0x900, 0x9FC)), "{:?}", result[0].1);
+    }
+
+    #[test]
+    fn separate_bss_and_common_bss_ranges_keep_their_gap_and_attributes() {
+        let ordinary = bss(0x1000, 0x1100);
+        let common = format!("{} align:4 common", bss(0x2000, 0x2050));
+        let proposals = blocks(&[("stream.cpp", &[&ordinary, &common])]);
+        let after_bss = data(0x3000, 0x3010);
+        let existing = blocks(&[("stream.cpp", &[&text(0x100, 0x200), &ordinary, &after_bss])]);
+        let result = data_proposals(&proposals, &existing, &IndexMap::new());
+        assert_eq!(result[0].1, vec![text(0x100, 0x200), ordinary, common, after_bss]);
+        assert!(!result[0].1.iter().any(|line| {
+            parse_range(line).is_some_and(|range| {
+                range.section == ".bss" && range.start < 0x2000 && range.end > 0x1100
+            })
+        }));
+    }
+
+    #[test]
+    fn data_extension_preserves_existing_attributes_and_widens_one_range() {
+        let old = format!("{} align:4 common", bss(0x2000, 0x2040));
+        let proposed = format!("{} align:4 common", bss(0x2000, 0x2050));
+        let proposals = blocks(&[("stream.cpp", &[&proposed])]);
+        let existing = blocks(&[("stream.cpp", &[&text(0x100, 0x200), &old])]);
+        let result = data_proposals(&proposals, &existing, &IndexMap::new());
+        assert_eq!(result[0].1, vec![
+            text(0x100, 0x200),
+            format!("{} align:4 common", bss(0x2000, 0x2050))
+        ]);
+    }
+
+    #[test]
+    fn a_broad_proposal_does_not_collapse_two_existing_bss_ranges() {
+        let proposals = blocks(&[("stream.cpp", &[&bss(0x1000, 0x2050)])]);
+        let existing = blocks(&[("stream.cpp", &[
+            &text(0x100, 0x200),
+            &bss(0x1000, 0x1100),
+            &bss(0x2000, 0x2050),
+        ])]);
+        assert!(data_proposals(&proposals, &existing, &IndexMap::new()).is_empty());
+    }
+
+    #[test]
+    fn adjacent_data_allocations_stay_separate_even_with_matching_attributes() {
+        let first = bss(0x1000, 0x1100);
+        let second = bss(0x1100, 0x1150);
+        let proposals = blocks(&[("stream.cpp", &[&second])]);
+        let existing = blocks(&[("stream.cpp", &[&text(0x100, 0x200), &first])]);
+        let result = data_proposals(&proposals, &existing, &IndexMap::new());
+        assert_eq!(result[0].1, vec![text(0x100, 0x200), first, second]);
+    }
+
+    #[test]
+    fn a_conflicting_data_attribute_does_not_rewrite_an_existing_range() {
+        let ordinary = bss(0x2000, 0x2040);
+        let proposed = format!("{} align:4 common", bss(0x2000, 0x2050));
+        let proposals = blocks(&[("stream.cpp", &[&proposed])]);
+        let existing = blocks(&[("stream.cpp", &[&text(0x100, 0x200), &ordinary])]);
+        assert!(data_proposals(&proposals, &existing, &IndexMap::new()).is_empty());
     }
 }

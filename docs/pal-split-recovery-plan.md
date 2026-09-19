@@ -932,6 +932,22 @@ Maintain a final per-unit ownership state and certificate dependency graph. Publ
 
 **Tests and acceptance:** coverage → data completion → verify for one TU can finish in a single run; StreamAudioManager's two BSS ranges are retained; a symbol rename cannot accidentally reserve an identically named unit; changing code after verification invalidates its certificate; interruption between stages resumes with identical final certificates and no lost sections.
 
+### First H checkpoint: preserve data ranges
+
+Discovery now carries each proposed non-code range separately, preserves
+disjoint existing ranges and their attributes, and adds only addresses the
+proposal actually covers. A compatible proposal can widen one existing range;
+it cannot collapse two existing ranges across a gap. A new range is placed
+beside any existing ranges in its section.
+A conflicting foreign range or incompatible attributes with an existing range
+withhold that proposal. The splits helpers treat repeated code ranges as
+fragmented while retaining ordinary plus common BSS ranges. Source-version
+section size no longer grows an unowned tail: `musyx/runtime/synth.c` requires
+a symbol or relocation witness for its last four bytes. These changes correct
+data proposal shape but discovery does not yet carry per-range
+symbol/relocation membership proof,
+combine code and data transactions, or change reservations and certificates.
+
 ## 8. Make refusals diagnostic and retries state-aware
 
 **Files:** `src/build/process.rs`, `src/build/context.rs`, `src/stages/mod.rs`, `src/stages/coverage/mod.rs`, `src/stages/discover.rs`, `src/stages/verify.rs`, `src/run/mod.rs`, `src/run/jobs.rs`.

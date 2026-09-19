@@ -375,13 +375,12 @@ Two things happen before a build is spent:
 - A batch implying a **cyclic link order** is bisected without compiling. dtk
   rejects such a batch outright, and the same graph can be built from the splits
   file. Only a cycle the batch introduces counts.
-- A proposed range is **grown over an unowned remainder** that would strand a
-  symbol. The matcher ends a range at the last symbol it could match, so an
-  unmatched symbol immediately after lands in a remainder nothing owns, nothing
-  emits it, and the link fails undefined — `musyx/runtime/synth.c` lost its whole
-  data migration to a four-byte tail of exactly this shape. The growth is bounded
-  twice: never into the next owner's range, and never past the size the same unit
-  has in the source version.
+- A data proposal retains each matched range and its attributes separately.
+  It cannot span a gap to another range, overwrite an existing range with
+  different attributes, or overlap another unit. Source-version section size
+  alone does not establish ownership of an unmatched tail. The four-byte
+  `musyx/runtime/synth.c` tail still needs symbol or relocation evidence before
+  discovery can claim it.
 
 ## verify — whole source files
 
