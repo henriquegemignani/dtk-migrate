@@ -210,6 +210,47 @@ unmapped units, or separate linker-emission evidence. Until then neither
 placement result authorizes a transaction. Schema 9 reports remain readable;
 schema 10 records and rederives the new diagnostics.
 
+### Review corrections (identification schema 11)
+
+The order resolver now uses already-owned target copies to place and exclude
+competitors, provided the owner agrees with the compiled unit. A conflicting
+owner still blocks the family. The ordinary schema-7 order report retains its
+previous omission of already-owned copies; the broader order view is used
+only for emitted-owner resolution.
+
+Object completeness now records every configured main-DOL compiled object and
+the actual object/archive paths from `ninja -t inputs build/<version>/main.elf`.
+It requires every linker object input to map to exactly one configured object
+and every configured object to be represented. Duplicate configured entries
+remain visible and prevent a unique-emitter claim. The omitted-object count is
+rederived from that inventory when the report loads. Missing Ninja input
+evidence withholds a strict resolution. This is a recorded build-graph
+observation, not proof of which source revision made an object.
+
+Relocation placement now requires the distinctive endpoint to have an
+independent function attribution or matching relocation-site signatures of
+its own, including section agreement when both sides record a section. Any
+recorded endpoint disagreement refuses the whole duplicate-body
+family. Replaying the frozen schema-10 report exposed a real earlier
+overstatement: the Projectile endpoint's `.rodata` sites name
+`@stringBase0` in the compiled object and `lbl_803C1678` in the retail
+object. Their data equivalence is not established by this report, so the
+Electric `GetGeneratorDesc` occurrence at `0x803485F4` is no longer said to
+exclude Projectile. The preceding 37-placement count describes the original
+schema-10 output, not the tightened result. The new opt-in historical test
+asserts that this family is withheld. A separate data-symbol comparison or
+independent Projectile endpoint identity is needed before reclaiming it.
+Schema-10 records retain their historical diagnostics on load, preserving
+saved-run references; they do not acquire schema-11 proof status.
+
+A fresh read-only schema-11 scan on the current F-drive Prime checkout
+recorded 1,426 linker object inputs, 809 available mapped objects, 11
+configured objects outside the source split inventory and 15 unmapped source
+units. It produced 21 relocation placements and zero strict emitted-owner
+resolutions. This checkout and its PAL edits differ from the frozen
+`b65ad2a6` experiment, so those counts are not a before/after recall score.
+Coverage policy 14 still consumes neither diagnostic.
+
 ## Implementation checkpoint after Change F (joint runs)
 
 `src/analysis/unit_runs.rs` searches function-boundary cuts with explicit unknown target

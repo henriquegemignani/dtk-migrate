@@ -170,7 +170,9 @@ pub fn run(request: &Request) -> Result<()> {
         evidence.relocation_placements = object_evidence::relocation_placements(
             &evidence,
             &units,
+            &identifications.source_functions,
             &identifications.target_functions,
+            &identifications.attributions,
         );
         identifications.object_evidence = Some(evidence);
         let compiled = &identifications.object_evidence.as_ref().unwrap().definitions;

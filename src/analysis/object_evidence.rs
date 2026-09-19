@@ -249,6 +249,16 @@ pub struct CompetingPlacement {
     pub target_address: String,
 }
 
+/// One configured compiled object and its extracted counterpart. The full
+/// configured inventory, including entries outside the source split set, is
+/// retained so completeness can be rederived after loading a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfiguredObject {
+    pub unit: Option<String>,
+    pub base_path: String,
+    pub target_path: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectEvidence {
     pub status: ScanStatus,
@@ -261,6 +271,14 @@ pub struct ObjectEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_image_sha256: Option<String>,
     pub objects: Vec<ObjectRecord>,
+    /// All configured main-DOL objects with a compiled source path. Absent in
+    /// reports written before identification schema 11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_objects: Option<Vec<ConfiguredObject>>,
+    /// Actual object/archive inputs of main.elf from `ninja -t inputs`.
+    /// Absent when Ninja could not report them and in older schemas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_object_inputs: Option<Vec<String>>,
     /// Configured compiled-source objects omitted because they are outside
     /// the source split inventory. They may still define a competing body.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -295,6 +313,8 @@ impl ObjectEvidence {
             build_graph_sha256: None,
             target_image_sha256: None,
             objects: Vec::new(),
+            configured_objects: None,
+            linked_object_inputs: None,
             unscanned_configured_units: 0,
             unmapped_units: Vec::new(),
             definitions: Vec::new(),
@@ -323,6 +343,8 @@ impl ObjectEvidence {
         }
         if self.status != ScanStatus::Scanned
             && (!self.objects.is_empty()
+                || self.configured_objects.is_some()
+                || self.linked_object_inputs.is_some()
                 || self.unscanned_configured_units != 0
                 || !self.definitions.is_empty()
                 || !self.unmapped_units.is_empty()
@@ -461,6 +483,25 @@ impl ObjectEvidence {
         }
         self.objects.sort_by(|a, b| (&a.unit, &a.base_path).cmp(&(&b.unit, &b.base_path)));
         if self.status == ScanStatus::Scanned {
+            if let Some(configured) = &mut self.configured_objects {
+                configured.sort_by(|a, b| {
+                    (&a.unit, &a.base_path, &a.target_path).cmp(&(
+                        &b.unit,
+                        &b.base_path,
+                        &b.target_path,
+                    ))
+                });
+                // Keep duplicates: two config entries naming one linker input
+                // are ambiguous emitters, not a cleaner inventory.
+                self.unscanned_configured_units = configured
+                    .iter()
+                    .filter(|item| !item.unit.as_ref().is_some_and(|unit| units.contains(unit)))
+                    .count() as u32;
+            }
+            if let Some(inputs) = &mut self.linked_object_inputs {
+                inputs.sort();
+                inputs.dedup();
+            }
             let mapped: BTreeSet<&str> =
                 self.objects.iter().map(|item| item.unit.as_str()).collect();
             self.unmapped_units =
@@ -580,6 +621,19 @@ fn references_valid(references: &[CompiledReference], size: u32) -> bool {
     })
 }
 
+fn same_reference_signature(compiled: &[CompiledReference], target: &[CompiledReference]) -> bool {
+    compiled.len() == target.len()
+        && compiled.iter().zip(target).all(|(left, right)| {
+            (left.offset, &left.kind, left.addend, &left.target)
+                == (right.offset, &right.kind, right.addend, &right.target)
+                && left
+                    .target_section
+                    .as_ref()
+                    .zip(right.target_section.as_ref())
+                    .is_none_or(|(compiled, target)| compiled == target)
+        })
+}
+
 fn reference_record(obj: &ObjInfo, reference: &FunctionRef) -> CompiledReference {
     let target = &obj.symbols[reference.target_symbol];
     CompiledReference {
@@ -634,6 +688,32 @@ fn dry_run(root: &Path, paths: &[String]) -> BuildFreshness {
     } else {
         BuildFreshness::Dirty
     }
+}
+
+fn build_path(path: &str) -> String { path.replace('\\', "/").trim_start_matches("./").to_string() }
+
+fn linker_object(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".o") || lower.ends_with(".a") || lower.ends_with(".lib")
+}
+
+fn linked_object_inputs(root: &Path, version: &str) -> Option<Vec<String>> {
+    let output = Command::new("ninja")
+        .args(["-t", "inputs", &format!("build/{version}/main.elf")])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut objects: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(build_path)
+        .filter(|path| linker_object(path))
+        .collect();
+    objects.sort();
+    objects.dedup();
+    Some(objects)
 }
 
 /// Capture only target functions whose bodies appear in a compiled definition.
@@ -705,6 +785,8 @@ pub fn inspect(
         return ObjectEvidence::unavailable(ScanStatus::UnreadableObjdiff);
     };
     let build_graph_bytes = std::fs::read(root.join("build.ninja")).ok();
+    let link_inputs =
+        build_graph_bytes.as_ref().and_then(|_| linked_object_inputs(root, target_version));
     // A checkout can retain objdiff.json from its last configure, even when
     // match loads another version's config.yml. Never label those objects as
     // compiled for the target version.
@@ -729,6 +811,21 @@ pub fn inspect(
             .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
         target_image_sha256: None,
         objects: Vec::new(),
+        configured_objects: Some(
+            config
+                .units
+                .iter()
+                .filter(|entry| entry.metadata.module_id == 0)
+                .filter_map(|entry| {
+                    Some(ConfiguredObject {
+                        unit: ObjdiffConfig::source_name_of(entry).map(str::to_string),
+                        base_path: build_path(entry.base_path.as_deref()?),
+                        target_path: entry.target_path.as_deref().map(build_path),
+                    })
+                })
+                .collect(),
+        ),
+        linked_object_inputs: link_inputs,
         unscanned_configured_units: config
             .units
             .iter()
@@ -936,6 +1033,7 @@ pub fn inspect(
             }
         } else {
             evidence.build_graph_sha256 = None;
+            evidence.linked_object_inputs = None;
         }
     }
     evidence.objects.sort_by(|a, b| (&a.unit, &a.base_path).cmp(&(&b.unit, &b.base_path)));
@@ -977,6 +1075,15 @@ pub fn order_matches(
     evidence: &ObjectEvidence,
     target_functions: &[TargetFunctionObservation],
     attributions: &[FunctionAttribution],
+) -> Vec<ObjectOrderMatch> {
+    order_matches_with_owned(evidence, target_functions, attributions, false)
+}
+
+fn order_matches_with_owned(
+    evidence: &ObjectEvidence,
+    target_functions: &[TargetFunctionObservation],
+    attributions: &[FunctionAttribution],
+    include_owned: bool,
 ) -> Vec<ObjectOrderMatch> {
     if evidence.status != ScanStatus::Scanned {
         return Vec::new();
@@ -1054,7 +1161,8 @@ pub fn order_matches(
             };
             for &target_index in target_indices {
                 let target = targets[target_index];
-                if target.current_owner.as_deref() == Some(record.unit.as_str())
+                if !include_owned
+                    && target.current_owner.as_deref() == Some(record.unit.as_str())
                     && !target.owner_autogenerated
                 {
                     continue;
@@ -1160,12 +1268,19 @@ fn matching_neighbour(
 /// Inventory completeness is a requirement for an emitted-owner resolution,
 /// not for reporting a comparison among the available compiled objects.
 fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<String>) -> bool {
+    let (Some(configured), Some(inputs)) =
+        (&evidence.configured_objects, &evidence.linked_object_inputs)
+    else {
+        return false;
+    };
     if evidence.status != ScanStatus::Scanned
         || evidence.build_graph_sha256.is_none()
         || evidence.target_image_sha256.is_none()
         || evidence.unscanned_configured_units != 0
         || !evidence.unmapped_units.is_empty()
         || evidence.objects.len() != source_units.len()
+        || configured.len() != source_units.len()
+        || inputs.is_empty()
         || evidence.objects.iter().any(|record| {
             !source_units.contains(&record.unit)
                 || record.status != ObjectStatus::Available
@@ -1177,8 +1292,38 @@ fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<
     {
         return false;
     }
-    evidence.objects.iter().map(|record| record.unit.as_str()).collect::<BTreeSet<_>>().len()
-        == source_units.len()
+    let recorded: BTreeSet<_> = evidence
+        .objects
+        .iter()
+        .map(|record| (record.unit.as_str(), build_path(&record.base_path)))
+        .collect();
+    if recorded.len() != source_units.len()
+        || configured.iter().any(|item| {
+            !item.unit.as_ref().is_some_and(|unit| source_units.contains(unit))
+                || !safe_relative(&item.base_path)
+                || item.target_path.as_deref().is_some_and(|path| !safe_relative(path))
+                || !recorded.contains(&(
+                    item.unit.as_deref().expect("unit was checked"),
+                    build_path(&item.base_path),
+                ))
+        })
+    {
+        return false;
+    }
+    // A clean objdiff inventory is not a complete emitter inventory if the
+    // linker's graph contains an object or archive it cannot account for.
+    inputs.iter().all(|input| {
+        let matches = configured
+            .iter()
+            .filter(|item| {
+                item.base_path == *input || item.target_path.as_deref() == Some(input.as_str())
+            })
+            .count();
+        matches == 1
+    }) && configured.iter().all(|item| {
+        inputs.contains(&item.base_path)
+            || item.target_path.as_ref().is_some_and(|path| inputs.contains(path))
+    })
 }
 
 /// Resolve only the case in which a *complete, clean* compiled inventory and
@@ -1240,7 +1385,7 @@ pub fn emitted_owner_resolutions(
     for hash in target_functions.iter().filter_map(|item| item.normalized_body_sha256.as_deref()) {
         *target_hash_counts.entry(hash).or_insert(0_usize) += 1;
     }
-    let order = order_matches(evidence, target_functions, attributions);
+    let order = order_matches_with_owned(evidence, target_functions, attributions, true);
     let target_references: BTreeMap<(&str, &str), &TargetFunctionReferences> = evidence
         .target_references
         .iter()
@@ -1289,12 +1434,6 @@ pub fn emitted_owner_resolutions(
             // there too has another possible emitter we cannot exclude.
             continue;
         }
-        if targets
-            .iter()
-            .any(|target| target.current_owner.is_some() && !target.owner_autogenerated)
-        {
-            continue;
-        }
         let defining_units: BTreeSet<&str> =
             definitions.iter().map(|definition| definition.unit.as_str()).collect();
         if defining_units.len() != definitions.len() {
@@ -1328,6 +1467,11 @@ pub fn emitted_owner_resolutions(
                         && item.object_sha256 == definition.object_sha256
                         && item.section == definition.section
                         && item.compiled_address == definition.address
+                        && (item.owner_autogenerated
+                            || item
+                                .current_owner
+                                .as_deref()
+                                .is_none_or(|owner| owner == definition.unit))
                 })
                 .filter_map(|item| {
                     let before = independent_anchor(item.before.as_ref(), &definition.unit)?;
@@ -1397,7 +1541,9 @@ pub fn emitted_owner_resolutions(
 pub fn relocation_placements(
     evidence: &ObjectEvidence,
     source_units: &BTreeSet<String>,
+    source_functions: &[SourceFunctionObservation],
     target_functions: &[TargetFunctionObservation],
+    attributions: &[FunctionAttribution],
 ) -> Vec<ObjectRelocationPlacement> {
     if evidence.status != ScanStatus::Scanned || evidence.target_references.is_empty() {
         return Vec::new();
@@ -1440,6 +1586,20 @@ pub fn relocation_placements(
         .iter()
         .map(|item| ((item.section.as_str(), item.address.as_str()), item))
         .collect();
+    let attributed: BTreeMap<(&str, &str), &FunctionAttribution> = attributions
+        .iter()
+        .filter(|item| item.target.module == "main")
+        .map(|item| ((item.target.section.as_str(), item.target.address.as_str()), item))
+        .collect();
+    let source_by_location: BTreeMap<(&str, &str, &str), &SourceFunctionObservation> =
+        source_functions
+            .iter()
+            .map(|item| ((item.unit.as_str(), item.section.as_str(), item.address.as_str()), item))
+            .collect();
+    let mut source_hash_counts = BTreeMap::new();
+    for hash in source_functions.iter().filter_map(|item| item.normalized_body_sha256.as_deref()) {
+        *source_hash_counts.entry(hash).or_insert(0_usize) += 1;
+    }
     let mut compiled_at = BTreeMap::new();
     let mut compiled_hash_locations: BTreeMap<&str, BTreeSet<(&str, &str, &str)>> = BTreeMap::new();
     let mut compiled_body_locations: BTreeMap<(&str, &str), BTreeSet<(&str, &str)>> =
@@ -1546,7 +1706,45 @@ pub fn relocation_placements(
                         break;
                     }
                     let hash = compiled_hash.unwrap();
+                    let compiled_endpoints =
+                        compiled_hashes.expect("the matching hash came from this location");
+                    let endpoint_sites =
+                        target_references.get(&(target_section, target_address.as_str()));
+                    let verified_sites = endpoint_sites.is_some_and(|sites| {
+                        compiled_endpoints.iter().all(|function| {
+                            function.normalized_body_sha256.as_deref() == Some(hash)
+                                && same_reference_signature(&function.references, &sites.references)
+                        })
+                    });
+                    // An omitted endpoint inventory cannot establish that a
+                    // relocated endpoint has the same destination functions.
+                    if endpoint_sites.is_some() && !verified_sites
+                        || endpoint_sites.is_none()
+                            && compiled_endpoints
+                                .iter()
+                                .any(|function| !function.references.is_empty())
+                    {
+                        agrees = false;
+                        break;
+                    }
+                    let independently_identified = attributed
+                        .get(&(target_section, target_address.as_str()))
+                        .is_some_and(|attribution| {
+                            let source = source_by_location.get(&(
+                                attribution.source.unit.as_str(),
+                                attribution.source.section.as_str(),
+                                attribution.source.address.as_str(),
+                            ));
+                            attribution.source.unit == definition.unit
+                                && attribution.independent
+                                && !attribution.ambiguous
+                                && attribution.unique_exact_body
+                                && source.and_then(|item| item.normalized_body_sha256.as_deref())
+                                    == Some(hash)
+                                && source_hash_counts.get(hash) == Some(&1)
+                        });
                     if distinctive.is_none()
+                        && (independently_identified || verified_sites)
                         && compiled_hash_locations.get(hash).is_some_and(|items| items.len() == 1)
                         && target_hash_counts.get(hash) == Some(&1)
                     {
@@ -1921,6 +2119,8 @@ mod tests {
             objdiff_sha256: Some("c".repeat(64)),
             build_graph_sha256: None,
             target_image_sha256: None,
+            configured_objects: None,
+            linked_object_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),
@@ -1968,7 +2168,7 @@ mod tests {
         let root = tempfile::tempdir_in(std::env::current_dir().unwrap().join("target")).unwrap();
         std::fs::write(
             root.path().join("build.ninja"),
-            "rule write\n  command = python -c \"open('$out','w').write('ok')\"\nbuild clean.o: write clean.in\nbuild dirty.o: write dirty.in\n",
+            "rule write\n  command = python -c \"open('$out','w').write('ok')\"\nbuild clean.o: write clean.in\nbuild dirty.o: write dirty.in\nbuild build/PAL/main.elf: write clean.o dirty.o external.a\n",
         )
         .unwrap();
         std::fs::write(root.path().join("clean.in"), b"input").unwrap();
@@ -1985,6 +2185,10 @@ mod tests {
         assert_eq!(statuses["clean.o"], BuildFreshness::Clean);
         assert_eq!(statuses["dirty.o"], BuildFreshness::Dirty);
         assert_eq!(dry_run(root.path(), &["missing.o".into()]), BuildFreshness::Unavailable);
+        assert_eq!(
+            linked_object_inputs(root.path(), "PAL"),
+            Some(vec!["clean.o".into(), "dirty.o".into(), "external.a".into()])
+        );
     }
 
     #[test]
@@ -2006,6 +2210,8 @@ mod tests {
             objdiff_sha256: Some("d".repeat(64)),
             build_graph_sha256: None,
             target_image_sha256: None,
+            configured_objects: None,
+            linked_object_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),
@@ -2107,6 +2313,8 @@ mod tests {
             objdiff_sha256: Some("c".repeat(64)),
             build_graph_sha256: None,
             target_image_sha256: None,
+            configured_objects: None,
+            linked_object_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),

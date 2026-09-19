@@ -17,7 +17,7 @@ use dtk_migrate::{
 use typed_path::Utf8NativePath;
 
 #[test]
-fn historical_pal_get_generator_desc_is_distinguished_without_a_source_fix() {
+fn historical_pal_get_generator_desc_does_not_exclude_an_unproved_competitor() {
     let Some(path) = std::env::var_os("DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT") else {
         eprintln!("skipped: set DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT");
         return;
@@ -31,35 +31,28 @@ fn historical_pal_get_generator_desc_is_distinguished_without_a_source_fix() {
     assert_eq!(evidence.unscanned_configured_units, 10);
     assert_eq!(evidence.unmapped_units.len(), 23);
     let units = report.units.iter().map(|item| item.unit.clone()).collect();
-    let placements = relocation_placements(evidence, &units, &report.target_functions);
+    let placements = relocation_placements(
+        evidence,
+        &units,
+        &report.source_functions,
+        &report.target_functions,
+        &report.attributions,
+    );
     assert_eq!(
         canonical.report().object_evidence.as_ref().unwrap().relocation_placements,
-        placements
+        evidence.relocation_placements
     );
-    let electric = placements.iter().find(|item| item.target_address == "0x803485F4").unwrap();
-    assert_eq!(electric.unit, "Kyoto/Particles/CParticleElectricDataFactory.cpp");
-    assert_eq!(
-        electric.object_sha256,
-        "0fd8081879b9034ba454b26a6cec11313468dd2eec3c19114947e0bf60257180"
-    );
-    assert_eq!(electric.distinctive_offset, 32);
-    assert_eq!(
-        electric.endpoint_body_sha256,
-        "3835b7ca0b44643b318fe7fba33724ee362bae3ac318096aa4256df7252e4f49"
-    );
-    assert_eq!(electric.excluded_competitors.len(), 2);
-    assert_eq!(
-        electric
-            .excluded_competitors
-            .iter()
-            .map(|item| (item.unit.as_str(), item.target_address.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            ("Kyoto/Particles/CParticleSwooshDataFactory.cpp", "0x803188A8"),
-            ("Weapons/CProjectileWeaponDataFactory.cpp", "0x8029E2BC"),
-        ]
-    );
-    assert!(!electric.inventory_complete);
+    let old = evidence
+        .relocation_placements
+        .iter()
+        .find(|item| item.target_address == "0x803485F4")
+        .unwrap();
+    assert_eq!(old.unit, "Kyoto/Particles/CParticleElectricDataFactory.cpp");
+    assert_eq!(old.excluded_competitors.len(), 2);
+    // The old family-wide placement overlooked two differing data-symbol
+    // destinations inside Projectile's endpoint. One unresolved competitor
+    // means the Electric occurrence cannot exclude the entire family.
+    assert!(placements.iter().all(|item| item.target_address != "0x803485F4"));
     assert!(evidence.emitted_owners.is_empty());
 }
 

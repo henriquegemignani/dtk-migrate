@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 10;
+pub const IDENTIFICATION_SCHEMA: u32 = 11;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -434,6 +434,13 @@ impl ObservationIndex {
         {
             bail!("Identification schema {} cannot carry emitted-owner resolutions", report.schema);
         }
+        if report.schema < 11
+            && report.object_evidence.as_ref().is_some_and(|evidence| {
+                evidence.configured_objects.is_some() || evidence.linked_object_inputs.is_some()
+            })
+        {
+            bail!("Identification schema {} cannot carry linker input inventories", report.schema);
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -678,12 +685,18 @@ impl ObservationIndex {
                     &report.attributions,
                 );
             }
-            if report.schema >= 10 {
+            // Schema-10 reports recorded these as diagnostics under the old
+            // proof rules. Preserve their canonical bytes so references from
+            // saved runs keep resolving; no policy consumes either record.
+            // Schema 11 regenerates them from the stronger raw inventory.
+            if report.schema >= 11 {
                 evidence.relocation_placements =
                     crate::analysis::object_evidence::relocation_placements(
                         evidence,
                         expected_units,
+                        &report.source_functions,
                         &report.target_functions,
+                        &report.attributions,
                     );
                 evidence.emitted_owners =
                     crate::analysis::object_evidence::emitted_owner_resolutions(
@@ -3084,6 +3097,8 @@ mod tests {
             objdiff_sha256: Some("d".repeat(64)),
             build_graph_sha256: None,
             target_image_sha256: None,
+            configured_objects: None,
+            linked_object_inputs: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),

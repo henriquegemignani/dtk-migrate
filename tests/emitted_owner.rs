@@ -6,14 +6,14 @@ use std::collections::BTreeSet;
 use dtk_migrate::analysis::{
     matching::{MatchMethod, MatchTier},
     object_evidence::{
-        BuildFreshness, CompiledDefinition, CompiledFunction, CompiledReference, ObjectEvidence,
-        ObjectRecord, ObjectStatus, ScanStatus, TargetFunctionReferences,
+        BuildFreshness, CompiledDefinition, CompiledFunction, CompiledReference, ConfiguredObject,
+        ObjectEvidence, ObjectRecord, ObjectStatus, ScanStatus, TargetFunctionReferences,
         emitted_owner_resolutions, order_matches, relocation_placements,
     },
     ownership::{
         AttributionOrigin, FunctionAttribution, FunctionLocation, IdentificationReport,
         ObservationIndex, SourceFunction, SourceFunctionObservation, TargetFunctionObservation,
-        UnitIdentification,
+        UnitIdentification, load_reference,
     },
 };
 use sha2::{Digest, Sha256};
@@ -149,6 +149,19 @@ fn fixture() -> (
         build_graph_sha256: Some("e".repeat(64)),
         target_image_sha256: Some("f".repeat(64)),
         objects,
+        configured_objects: Some(vec![
+            ConfiguredObject {
+                unit: Some("A.cpp".into()),
+                base_path: "build/PAL/src/A.o".into(),
+                target_path: Some("build/PAL/obj/A.o".into()),
+            },
+            ConfiguredObject {
+                unit: Some("B.cpp".into()),
+                base_path: "build/PAL/src/B.o".into(),
+                target_path: Some("build/PAL/obj/B.o".into()),
+            },
+        ]),
+        linked_object_inputs: Some(vec!["build/PAL/obj/A.o".into(), "build/PAL/obj/B.o".into()]),
         unscanned_configured_units: 0,
         unmapped_units: Vec::new(),
         definitions,
@@ -232,6 +245,57 @@ fn two_shared_definitions_have_distinct_independently_placed_retail_copies() {
 }
 
 #[test]
+fn an_owned_competitor_can_exclude_itself_from_an_unowned_copy() {
+    let (evidence, units, source, mut targets, attributions) = fixture();
+    targets.iter_mut().find(|item| item.address == "0x00002020").unwrap().current_owner =
+        Some("B.cpp".into());
+    let resolved = emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions);
+    assert_eq!(resolved.len(), 2);
+    assert_eq!(resolved[0].unit, "A.cpp");
+    assert_eq!(resolved[0].excluded_competitors, ["B.cpp"]);
+
+    targets.iter_mut().find(|item| item.address == "0x00002020").unwrap().current_owner =
+        Some("A.cpp".into());
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+}
+
+#[test]
+fn the_linker_must_account_for_every_object_and_archive_input() {
+    let (mut evidence, units, source, targets, attributions) = fixture();
+    evidence.linked_object_inputs.as_mut().unwrap().push("build/PAL/unknown.a".into());
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+
+    evidence.linked_object_inputs.as_mut().unwrap().pop();
+    evidence.configured_objects.as_mut().unwrap().push(ConfiguredObject {
+        unit: Some("Unlisted.cpp".into()),
+        base_path: "build/PAL/src/Unlisted.o".into(),
+        target_path: Some("build/PAL/obj/Unlisted.o".into()),
+    });
+    evidence.unscanned_configured_units = 0; // A serialized count cannot hide this entry.
+    evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
+    assert_eq!(evidence.unscanned_configured_units, 1);
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+}
+
+#[test]
+fn duplicated_configured_object_does_not_become_a_unique_emitter() {
+    let (mut evidence, units, source, targets, attributions) = fixture();
+    let duplicate = evidence.configured_objects.as_ref().unwrap()[0].clone();
+    evidence.configured_objects.as_mut().unwrap().push(duplicate);
+    evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
+    assert_eq!(evidence.configured_objects.as_ref().unwrap().len(), 3);
+    assert!(
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions).is_empty()
+    );
+}
+
+#[test]
 fn a_competitor_without_two_independent_anchors_is_not_ruled_out() {
     let (evidence, units, source, targets, mut attributions) = fixture();
     attributions.retain(|item| item.id != "B.cpp:B_right");
@@ -300,8 +364,8 @@ fn matching_instructions_with_unproved_relocations_do_not_prove_emission() {
 
 #[test]
 fn relocation_endpoint_bodies_place_each_copy_and_name_the_excluded_competitor() {
-    let (mut evidence, units, _, targets, _) = relocation_fixture();
-    let placements = relocation_placements(&evidence, &units, &targets);
+    let (mut evidence, units, source, targets, attributions) = relocation_fixture();
+    let placements = relocation_placements(&evidence, &units, &source, &targets, &attributions);
     assert_eq!(placements.len(), 2);
     assert_eq!(placements[0].unit, "A.cpp");
     assert_eq!(placements[0].target_address, "0x00001020");
@@ -311,30 +375,87 @@ fn relocation_endpoint_bodies_place_each_copy_and_name_the_excluded_competitor()
     assert!(placements.iter().all(|item| item.inventory_complete));
 
     evidence.unscanned_configured_units = 1;
-    let partial = relocation_placements(&evidence, &units, &targets);
+    let partial = relocation_placements(&evidence, &units, &source, &targets, &attributions);
     assert_eq!(partial.len(), 2);
     assert!(partial.iter().all(|item| !item.inventory_complete));
 
     evidence.unscanned_configured_units = 0;
     evidence.target_references[1].references[0].target_address = 0x1000;
-    assert!(relocation_placements(&evidence, &units, &targets).is_empty());
+    assert!(relocation_placements(&evidence, &units, &source, &targets, &attributions).is_empty());
+}
+
+#[test]
+fn a_unique_endpoint_without_independent_identity_does_not_place_a_copy() {
+    let (evidence, units, source, targets, mut attributions) = relocation_fixture();
+    attributions.retain(|item| !item.id.ends_with("_left"));
+    assert!(relocation_placements(&evidence, &units, &source, &targets, &attributions).is_empty());
+}
+
+#[test]
+fn differing_relocations_inside_an_endpoint_refuse_the_family() {
+    let (mut evidence, units, source, targets, attributions) = relocation_fixture();
+    for (index, record) in evidence.objects.iter_mut().enumerate() {
+        let reference = CompiledReference {
+            offset: 8,
+            kind: "PpcRel24".into(),
+            target: "same_callee".into(),
+            target_section: None,
+            target_address: 0,
+            addend: 0,
+        };
+        record.functions[0].references.push(reference.clone());
+        evidence.target_references.push(TargetFunctionReferences {
+            section: ".text".into(),
+            address: if index == 0 { "0x00001000" } else { "0x00002000" }.into(),
+            end: if index == 0 { "0x00001020" } else { "0x00002020" }.into(),
+            references: vec![reference.clone()],
+        });
+    }
+    assert_eq!(relocation_placements(&evidence, &units, &source, &targets, &attributions).len(), 2);
+    evidence.target_references[2].references[0].target = "different_callee".into();
+    assert!(relocation_placements(&evidence, &units, &source, &targets, &attributions).is_empty());
+}
+
+#[test]
+fn endpoint_references_to_different_sections_do_not_agree_by_name() {
+    let (mut evidence, units, source, targets, attributions) = relocation_fixture();
+    let reference = CompiledReference {
+        offset: 8,
+        kind: "PpcAddr32".into(),
+        target: "same_name".into(),
+        target_section: Some(".rodata".into()),
+        target_address: 0,
+        addend: 0,
+    };
+    for (index, record) in evidence.objects.iter_mut().enumerate() {
+        record.functions[0].references.push(reference.clone());
+        evidence.target_references.push(TargetFunctionReferences {
+            section: ".text".into(),
+            address: if index == 0 { "0x00001000" } else { "0x00002000" }.into(),
+            end: if index == 0 { "0x00001020" } else { "0x00002020" }.into(),
+            references: vec![reference.clone()],
+        });
+    }
+    assert_eq!(relocation_placements(&evidence, &units, &source, &targets, &attributions).len(), 2);
+    evidence.target_references[2].references[0].target_section = Some(".data".into());
+    assert!(relocation_placements(&evidence, &units, &source, &targets, &attributions).is_empty());
 }
 
 #[test]
 fn an_endpoint_body_repeated_in_another_object_is_not_distinctive() {
-    let (mut evidence, units, _, targets, _) = relocation_fixture();
+    let (mut evidence, units, source, targets, attributions) = relocation_fixture();
     evidence.objects[1].functions.push(function("extra", "0x00000050", "0x00000070", '1', false));
-    assert!(relocation_placements(&evidence, &units, &targets).is_empty());
+    assert!(relocation_placements(&evidence, &units, &source, &targets, &attributions).is_empty());
 }
 
 #[test]
 fn relocation_placement_survives_stripped_target_names() {
-    let (evidence, units, _, mut targets, _) = relocation_fixture();
-    let before = relocation_placements(&evidence, &units, &targets);
+    let (evidence, units, source, mut targets, attributions) = relocation_fixture();
+    let before = relocation_placements(&evidence, &units, &source, &targets, &attributions);
     for target in &mut targets {
         target.name = format!("fn_{}", target.address.trim_start_matches("0x"));
     }
-    assert_eq!(relocation_placements(&evidence, &units, &targets), before);
+    assert_eq!(relocation_placements(&evidence, &units, &source, &targets, &attributions), before);
 }
 
 #[test]
@@ -358,6 +479,8 @@ fn saved_resolutions_are_rebuilt_from_observations_and_rejected_in_older_schema(
         vec![UnitIdentification::absent("A.cpp", 2), UnitIdentification::absent("B.cpp", 2)];
     report.schema = 9;
     assert!(ObservationIndex::load_self_contained(report.clone(), "NTSC", "PAL").is_err());
+    report.schema = 10;
+    assert!(ObservationIndex::load_self_contained(report.clone(), "NTSC", "PAL").is_err());
     report.schema = dtk_migrate::analysis::ownership::IDENTIFICATION_SCHEMA;
     let index = ObservationIndex::load_self_contained(report.clone(), "NTSC", "PAL").unwrap();
     let resolved = &index.report().object_evidence.as_ref().unwrap().emitted_owners;
@@ -365,8 +488,8 @@ fn saved_resolutions_are_rebuilt_from_observations_and_rejected_in_older_schema(
     assert_eq!(resolved[0].unit, "A.cpp");
     assert_eq!(resolved[1].unit, "B.cpp");
 
-    let (mut relocated, units, _, targets, _) = relocation_fixture();
-    let mut fake = relocation_placements(&relocated, &units, &targets);
+    let (mut relocated, units, source, targets, attributions) = relocation_fixture();
+    let mut fake = relocation_placements(&relocated, &units, &source, &targets, &attributions);
     fake[0].unit = "forged.cpp".into();
     relocated.relocation_placements = fake;
     report.object_evidence = Some(relocated);
@@ -374,4 +497,28 @@ fn saved_resolutions_are_rebuilt_from_observations_and_rejected_in_older_schema(
     let placements = &reloaded.report().object_evidence.as_ref().unwrap().relocation_placements;
     assert_eq!(placements.len(), 2);
     assert_eq!(placements[0].unit, "A.cpp");
+}
+
+#[test]
+fn schema_ten_keeps_its_diagnostic_records_and_saved_reference() {
+    let (mut evidence, units, source, targets, attributions) = fixture();
+    evidence.emitted_owners =
+        emitted_owner_resolutions(&evidence, &units, &source, &targets, &attributions);
+    evidence.configured_objects = None;
+    evidence.linked_object_inputs = None;
+    let old_resolutions = evidence.emitted_owners.clone();
+    let mut report = IdentificationReport::empty("NTSC", "PAL");
+    report.schema = 10;
+    report.attributions = attributions;
+    report.source_functions = source;
+    report.target_functions = targets;
+    report.object_evidence = Some(evidence);
+    report.units =
+        vec![UnitIdentification::absent("A.cpp", 2), UnitIdentification::absent("B.cpp", 2)];
+    let index = ObservationIndex::load_self_contained(report, "NTSC", "PAL").unwrap();
+    assert_eq!(index.report().object_evidence.as_ref().unwrap().emitted_owners, old_resolutions);
+    let directory = tempfile::tempdir().unwrap();
+    let reference = index.persist(directory.path()).unwrap();
+    assert_eq!(reference.schema, 10);
+    assert!(load_reference(&reference, "NTSC", "PAL").is_ok());
 }
