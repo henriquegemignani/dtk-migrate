@@ -133,12 +133,25 @@ pub fn run(request: &Request) -> Result<()> {
             .filter_map(|item| item.normalized_body_sha256.clone())
             .collect();
         let mut evidence = object_evidence::inspect(root, version, &units, &target_hashes);
-        if let Err(error) = evidence.canonicalize(&units, &target_hashes, true) {
+        let validated = evidence.canonicalize(&units, &target_hashes, true).and_then(|()| {
+            evidence.target_references = object_evidence::capture_target_references(
+                &target,
+                &identifications.target_functions,
+                &evidence.definitions,
+            );
+            evidence.canonicalize_target_references(&identifications.target_functions)
+        });
+        if let Err(error) = validated {
             tracing::warn!("Compiled-object inventory is unavailable: {error}");
             evidence = object_evidence::ObjectEvidence::unavailable(
                 object_evidence::ScanStatus::InvalidObjectInventory,
             );
         }
+        evidence.relocation_matches = object_evidence::relocation_matches(
+            &evidence,
+            &identifications.target_functions,
+            &identifications.attributions,
+        );
         evidence.order_matches = object_evidence::order_matches(
             &evidence,
             &identifications.target_functions,

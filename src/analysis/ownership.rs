@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 7;
+pub const IDENTIFICATION_SCHEMA: u32 = 8;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -400,6 +400,16 @@ impl ObservationIndex {
                 report.schema
             );
         }
+        if report.schema < 8
+            && report.object_evidence.as_ref().is_some_and(|evidence| {
+                !evidence.target_references.is_empty() || !evidence.relocation_matches.is_empty()
+            })
+        {
+            bail!(
+                "Identification schema {} cannot carry target relocation evidence",
+                report.schema
+            );
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -629,6 +639,14 @@ impl ObservationIndex {
                 .filter_map(|item| item.normalized_body_sha256.clone())
                 .collect();
             evidence.canonicalize(expected_units, &target_hashes, report.schema >= 7)?;
+            if report.schema >= 8 {
+                evidence.canonicalize_target_references(&report.target_functions)?;
+                evidence.relocation_matches = crate::analysis::object_evidence::relocation_matches(
+                    evidence,
+                    &report.target_functions,
+                    &report.attributions,
+                );
+            }
             if report.schema >= 7 {
                 evidence.order_matches = crate::analysis::object_evidence::order_matches(
                     evidence,
@@ -2994,6 +3012,7 @@ mod tests {
         };
 
         let (mut report, expected) = with_helper(&[]);
+        report.schema = 7;
         let anchor_hash = "a".repeat(64);
         let helper_hash = "b".repeat(64);
         report
@@ -3044,6 +3063,7 @@ mod tests {
                 weak: false,
                 object_sha256: object_hash,
             }],
+            target_references: Vec::new(),
             order_matches: vec![ObjectOrderMatch {
                 unit: "forged.cpp".into(),
                 object_sha256: "0".repeat(64),
@@ -3055,6 +3075,7 @@ mod tests {
                 before: None,
                 after: None,
             }],
+            relocation_matches: Vec::new(),
         });
         let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
         let matches = &index.report().object_evidence.as_ref().unwrap().order_matches;

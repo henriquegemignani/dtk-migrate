@@ -119,6 +119,32 @@ Objects beyond the four hash-frozen historical controls may contain later
 source work, so this stress check measures capacity and schema stability,
 not historical identification accuracy.
 
+### Relocation correlation without an emitted-owner rule (schema 8)
+
+The target-side reference sites for exact compiled-body occurrences now travel
+with optional object evidence. A relation must agree at its byte offset,
+relocation kind and addend. Its endpoint is checked against a separate unique
+body, a non-circular independent attribution, or an unchanged non-generated
+symbol name; the last is weaker. Only relations that narrow the occurrences
+of the same normalized body are emitted as diagnostics. A common
+`CMemory::Free` call initially created thousands of apparent correlations
+across unrelated units; the distinctiveness check removes them. Derived
+matches are rebuilt on load, and no ownership policy changed (still 14).
+
+The four hash-frozen objects give eight distinguishing relation records.
+Among them are a `CGuiGroup` vtable name at `0x802AD3DC`, a
+`CGuiHeadWidget` body calling a `CGuiWidget` constructor at `0x802ADC9C`,
+and a `CPowerBomb` body calling a `CModelData` constructor at `0x8003B8B0`.
+The other name-only relations include shared destructors and a string helper;
+they are weak evidence. None
+settles which object emitted the target function. A full-object stress run
+using the current F-drive Prime checkout retained 12,619 target reference
+inventories and derived 23,665 discriminating relation records, then
+round-tripped through schema 8. Beyond the four byte-frozen objects, that
+checkout can contain later source work, so these are capacity figures rather
+than historical recall. Build freshness, caching and emitted-owner inference
+remain open.
+
 ## Implementation checkpoint after Change F (joint runs)
 
 `src/analysis/unit_runs.rs` searches function-boundary cuts with explicit unknown target
