@@ -2461,6 +2461,7 @@ mod tests {
                         target_functions: Vec::new(),
                         helper_families: Vec::new(),
                         unresolved_target_clusters: Vec::new(),
+                        object_evidence: None,
                         units: vec![identification.clone()],
                     })
                     .unwrap(),
@@ -2513,6 +2514,7 @@ mod tests {
                             target_functions: Vec::new(),
                             helper_families: Vec::new(),
                             unresolved_target_clusters: Vec::new(),
+                            object_evidence: None,
                             units: vec![identification],
                         })
                         .unwrap()

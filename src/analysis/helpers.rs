@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::analysis::{
     callgraph::FunctionNode,
     fingerprint::normalized_body,
+    object_evidence::CompiledDefinition,
     ownership::{FunctionAttribution, SourceFunctionObservation, TargetFunctionObservation},
 };
 
@@ -47,6 +48,7 @@ pub enum HelperSignal {
     WeakDefinition,
     StaticInitializerName,
     DestructorShapedName,
+    CompiledObjectBody,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +60,10 @@ pub struct HelperFamily {
     /// TU emitted any particular target copy.
     pub source_definitions: Vec<SourceDefinition>,
     pub target_occurrences: Vec<TargetOccurrence>,
+    /// Exact body present in a compiled target-version source object. This
+    /// proves availability, not that the linker emitted the retail occurrence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compiled_definitions: Vec<CompiledDefinition>,
     pub signals: Vec<HelperSignal>,
 }
 
@@ -109,7 +115,15 @@ pub fn families(
     source: &[SourceFunctionObservation],
     target: &[TargetFunctionObservation],
 ) -> Vec<HelperFamily> {
-    families_with_name_scope(source, target, true)
+    families_with_name_scope(source, target, &[], true)
+}
+
+pub fn families_with_compiled(
+    source: &[SourceFunctionObservation],
+    target: &[TargetFunctionObservation],
+    compiled: &[CompiledDefinition],
+) -> Vec<HelperFamily> {
+    families_with_name_scope(source, target, compiled, true)
 }
 
 /// Preserve schema 4's target-name-only classifier when loading its saved
@@ -119,19 +133,26 @@ pub fn families_schema_4(
     source: &[SourceFunctionObservation],
     target: &[TargetFunctionObservation],
 ) -> Vec<HelperFamily> {
-    families_with_name_scope(source, target, false)
+    families_with_name_scope(source, target, &[], false)
+}
+
+#[derive(Default)]
+struct FamilyMembers {
+    source_definitions: Vec<SourceDefinition>,
+    target_occurrences: Vec<TargetOccurrence>,
+    compiled_definitions: Vec<CompiledDefinition>,
 }
 
 fn families_with_name_scope(
     source: &[SourceFunctionObservation],
     target: &[TargetFunctionObservation],
+    compiled: &[CompiledDefinition],
     source_generated_names: bool,
 ) -> Vec<HelperFamily> {
-    let mut groups: BTreeMap<&str, (Vec<SourceDefinition>, Vec<TargetOccurrence>)> =
-        BTreeMap::new();
+    let mut groups: BTreeMap<&str, FamilyMembers> = BTreeMap::new();
     for function in source {
         let Some(hash) = function.normalized_body_sha256.as_deref() else { continue };
-        groups.entry(hash).or_default().0.push(SourceDefinition {
+        groups.entry(hash).or_default().source_definitions.push(SourceDefinition {
             name: function.name.clone(),
             module: function.module.clone(),
             section: function.section.clone(),
@@ -143,7 +164,7 @@ fn families_with_name_scope(
     }
     for function in target {
         let Some(hash) = function.normalized_body_sha256.as_deref() else { continue };
-        groups.entry(hash).or_default().1.push(TargetOccurrence {
+        groups.entry(hash).or_default().target_occurrences.push(TargetOccurrence {
             name: function.name.clone(),
             module: function.module.clone(),
             section: function.section.clone(),
@@ -153,9 +174,21 @@ fn families_with_name_scope(
             weak: function.weak,
         });
     }
+    for function in compiled {
+        groups
+            .entry(&function.normalized_body_sha256)
+            .or_default()
+            .compiled_definitions
+            .push(function.clone());
+    }
     groups
         .into_iter()
-        .filter_map(|(hash, (mut source_definitions, mut target_occurrences))| {
+        .filter_map(|(hash, members)| {
+            let FamilyMembers {
+                mut source_definitions,
+                mut target_occurrences,
+                mut compiled_definitions,
+            } = members;
             if target_occurrences.is_empty() {
                 return None;
             }
@@ -170,6 +203,14 @@ fn families_with_name_scope(
             target_occurrences.sort_by(|left, right| {
                 (&left.module, &left.section, &left.address, &left.name).cmp(&(
                     &right.module,
+                    &right.section,
+                    &right.address,
+                    &right.name,
+                ))
+            });
+            compiled_definitions.sort_by(|left, right| {
+                (&left.unit, &left.section, &left.address, &left.name).cmp(&(
+                    &right.unit,
                     &right.section,
                     &right.address,
                     &right.name,
@@ -207,11 +248,15 @@ fn families_with_name_scope(
             {
                 signals.push(HelperSignal::DestructorShapedName);
             }
+            if !compiled_definitions.is_empty() {
+                signals.push(HelperSignal::CompiledObjectBody);
+            }
             (!signals.is_empty()).then(|| HelperFamily {
                 id: format!("normalized-body:{hash}"),
                 normalized_body_sha256: hash.into(),
                 source_definitions,
                 target_occurrences,
+                compiled_definitions,
                 signals,
             })
         })
@@ -449,5 +494,29 @@ mod tests {
         );
         assert_eq!(destructor_families.len(), 1);
         assert!(destructor_families[0].signals.contains(&HelperSignal::DestructorShapedName));
+    }
+
+    #[test]
+    fn compiled_availability_keeps_emitted_target_ownership_unknown() {
+        let hash = "f".repeat(64);
+        let compiled = CompiledDefinition {
+            unit: "A.cpp".into(),
+            name: "helper".into(),
+            section: ".text".into(),
+            address: "0x00000000".into(),
+            end: "0x00000020".into(),
+            normalized_body_sha256: hash.clone(),
+            weak: true,
+            object_sha256: "a".repeat(64),
+        };
+        let families =
+            families_with_compiled(&[], &[target("fn_1000", "0x00001000", None, Some(&hash))], &[
+                compiled,
+            ]);
+        assert_eq!(families.len(), 1);
+        assert!(families[0].source_definitions.is_empty());
+        assert_eq!(families[0].compiled_definitions[0].unit, "A.cpp");
+        assert_eq!(families[0].target_occurrences[0].current_owner, None);
+        assert_eq!(families[0].signals, [HelperSignal::CompiledObjectBody]);
     }
 }

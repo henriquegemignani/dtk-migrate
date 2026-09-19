@@ -21,13 +21,14 @@ use crate::analysis::{
     matching::{
         CONTESTED_MARGIN, Match, MatchMethod, MatchResult, MatchTarget, MatchTier, classify_tier,
     },
+    object_evidence::ObjectEvidence,
     policy::{
         MAX_COMPOSED_PADDING_GAP, MAX_NEW_CALLER_CONFINED_HELPERS,
         MIN_COMPLETE_SEQUENCE_INDEPENDENT_MEMBERS,
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 5;
+pub const IDENTIFICATION_SCHEMA: u32 = 6;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -55,6 +56,10 @@ pub struct IdentificationReport {
     /// baseline. A cluster is not a proposed split or a guessed filename.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_target_clusters: Vec<UnresolvedTargetCluster>,
+    /// Optional target-version compiled-source inventory. The channel may be
+    /// absent without weakening any binary-only identification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_evidence: Option<ObjectEvidence>,
     pub units: Vec<UnitIdentification>,
 }
 
@@ -69,6 +74,7 @@ impl IdentificationReport {
             target_functions: Vec::new(),
             helper_families: Vec::new(),
             unresolved_target_clusters: Vec::new(),
+            object_evidence: None,
             units: Vec::new(),
         }
     }
@@ -380,6 +386,9 @@ impl ObservationIndex {
         {
             bail!("Identification schema {} cannot carry helper evidence", report.schema);
         }
+        if report.schema < 6 && report.object_evidence.is_some() {
+            bail!("Identification schema {} cannot carry compiled-object evidence", report.schema);
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -602,12 +611,26 @@ impl ObservationIndex {
             units.push(canonical);
         }
         report.units = units;
+        if let Some(evidence) = &mut report.object_evidence {
+            let target_hashes = report
+                .target_functions
+                .iter()
+                .filter_map(|item| item.normalized_body_sha256.clone())
+                .collect();
+            evidence.canonicalize(expected_units, &target_hashes)?;
+        }
         // Schema 4+ aggregates are regenerated from canonical function facts.
         // Older reports never carried these fields; synthesizing clusters for
         // them would change their canonical digest and invalidate saved refs.
         if report.schema >= 4 {
             report.helper_families = if report.schema == 4 {
                 helpers::families_schema_4(&report.source_functions, &report.target_functions)
+            } else if report.schema >= 6 {
+                helpers::families_with_compiled(
+                    &report.source_functions,
+                    &report.target_functions,
+                    report.object_evidence.as_ref().map_or(&[], |evidence| &evidence.definitions),
+                )
             } else {
                 helpers::families(&report.source_functions, &report.target_functions)
             };
@@ -1921,6 +1944,7 @@ pub fn identify_units(
             .collect(),
         helper_families: Vec::new(),
         unresolved_target_clusters: Vec::new(),
+        object_evidence: None,
         units,
     };
     report.helper_families = helpers::families(&report.source_functions, &report.target_functions);
@@ -2920,6 +2944,25 @@ mod tests {
     }
 
     #[test]
+    fn schema_five_keeps_its_helper_families_without_object_evidence() {
+        let (mut report, expected) = with_helper(&[]);
+        let hash = "b".repeat(64);
+        report.source_functions[0].name = "__sinit_CPowerBomb_cpp".into();
+        report.source_functions[0].normalized_body_sha256 = Some(hash.clone());
+        report.target_functions[0].normalized_body_sha256 = Some(hash);
+        report.schema = 5;
+        let historical = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        assert_eq!(historical.report().schema, 5);
+        assert!(historical.report().object_evidence.is_none());
+        assert_eq!(historical.report().helper_families.len(), 1);
+        assert!(historical.report().helper_families[0].compiled_definitions.is_empty());
+        let directory = tempfile::tempdir().unwrap();
+        let reference = historical.persist(directory.path()).unwrap();
+        assert_eq!(reference.schema, 5);
+        assert!(load_reference(&reference, "source", "target").is_ok());
+    }
+
+    #[test]
     fn a_kept_report_is_referenced_by_its_own_schema() {
         let (mut report, expected) = with_helper(&[]);
         report.schema = 2;
@@ -2932,7 +2975,10 @@ mod tests {
         // The same artifact advertised as the current schema is refused.
         reference.schema = IDENTIFICATION_SCHEMA;
         let error = load_reference(&reference, "source", "target").unwrap_err();
-        assert!(error.to_string().contains("reference states 5"), "{error}");
+        assert!(
+            error.to_string().contains(&format!("reference states {IDENTIFICATION_SCHEMA}")),
+            "{error}"
+        );
     }
 
     #[test]

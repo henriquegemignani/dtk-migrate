@@ -53,6 +53,10 @@ pub struct Args {
     /// The same, for the target configuration.
     #[arg(long)]
     pub target_root: Option<PathBuf>,
+    /// Checkout containing objdiff.json and compiled target-version source
+    /// objects. Existing objects are read; none are built by this command.
+    #[arg(long)]
+    pub object_root: Option<PathBuf>,
     /// Ignore the target's existing names while matching, then score the result
     /// against them. Use on an already-named version to measure accuracy.
     #[arg(long)]
@@ -65,6 +69,7 @@ pub fn run(args: Args) -> Result<()> {
         target_config: native(&args.target)?,
         source_root: native_opt(args.source_root.as_ref())?,
         target_root: native_opt(args.target_root.as_ref())?,
+        object_root: args.object_root.clone(),
         min_confidence: args.min_confidence,
         max_rounds: args.max_rounds,
         validate: args.validate,

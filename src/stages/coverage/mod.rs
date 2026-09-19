@@ -1096,6 +1096,7 @@ fn generate_evidence(ctx: &BuildContext) -> Result<CoverageReport> {
                 crate::stages::discover::config_path(ctx, &ctx.source),
                 crate::stages::discover::config_path(ctx, &ctx.target),
             );
+            request.object_root = Some(ctx.root.clone());
             request.outputs.coverage = Some(path.clone());
             crate::matching::run(&request).with_context(|| {
                 format!(
