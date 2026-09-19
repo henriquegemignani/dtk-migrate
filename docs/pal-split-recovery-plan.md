@@ -4,7 +4,60 @@ Status: living implementation plan. Change A landed through `0a351d2`; Change B 
 `c6e0039`; Change C landed at `beb8e2d`, with end-to-end compatibility fixes at `cfd1cfa` and
 `2dcea5a`. Change E (atomic ownership transactions) landed at `520a3f3`. Change D's first two
 rules are described in the checkpoint below. The remaining plan is based on the architecture
-after those changes.
+after those changes. Change F's bounded joint-run search is implemented under policy 14;
+its historical and held-out evaluation is recorded below.
+
+## Implementation checkpoint after Change F (joint runs)
+
+`src/analysis/unit_runs.rs` searches function-boundary cuts with explicit unknown target
+functions and unmatched source units. `src/stages/coverage/alternatives/run_inference.rs` forms
+bounded source-order windows around missing or misplaced independent members, judges their
+complete bodies, and offers only a unique, fully explained partition. It constructs one atomic
+transaction for every changed unit; conflicting workers, `--only`, integration, publication and
+resume use Change E's transaction path unchanged. A tied or exhausted search is reported in
+`joint_run_diagnostics`, never treated as a safe first choice. Tied searches retain both competing
+partitions and the independent members they share. Policy version 14 records the four
+search limits. Calibration scores the same joint proposals as preparation, including effects on
+neighbouring owners. A coordinator fixture proves a three-unit transfer through publication.
+
+The selected alternative now renders only its own required extracts, including those of every
+unit the joint transaction writes. Fallbacks restore the pre-candidate configuration before
+rendering their own extracts; the proposal and applied record bind the per-unit inventory for
+trial and publication validation.
+
+### Frozen PAL calibration
+
+All five scenarios were rerun on a clean F-drive worktree at `ca286f45`, the same revision used
+for the policy-13 checkpoint. `Exact` counts the whole unit's code body, including any secondary
+section. The joint column counts first choices made by this new rule; every one of those choices
+was exact against the oracle.
+
+| Scenario | Policy 13 exact | Policy 14 exact | Selected joint | Wrong or owner-lost bytes |
+|---|---:|---:|---:|---:|
+| consecutive-units | 219 | 221 | 32 | 0 |
+| everything | 343 | 345 | 13 | 0 |
+| isolated-unit | 183 | 184 | 4 | 0 |
+| truncated-splits | 206 | 208 | 5 | 0 |
+| misplaced-helper | 0 | 19 | 19 | 0 |
+
+The command still exits 1 on the single pre-existing `MetroidPrime/ScriptLoader.cpp` fault
+(`alternative, anchor`) under `everything` and `consecutive-units`; no new incorrect assignment
+appeared. Full per-unit evidence is in `target/joint-calibration-final-ca286/`.
+
+### Frozen historical migration
+
+The complete NTSC-to-PAL run on an F-drive checkout at `b65ad2a6` published and rebuilt to
+the retail SHA-1 `4d3780c77842ae7fddbdd5732b70bed100df5c65`. Against the same frozen
+manifest used for policy 13, the result is unchanged: **7 of 25** changed `.text` bodies
+exact, **4 of 27** changed full bodies exact, 1,824 correct code bytes gained, and zero
+lost or newly wrong bytes. One control acquired 24 bytes of unassigned ground; it has no
+known-owner damage. The scored run is in `target/joint-historical-policy14/score.md`.
+
+The joint rule was exercised: coverage accepted one atomic Pane/SliderGroup transaction,
+extending Pane's `.text` to `0x802B1338–0x802B199C` and SliderGroup's to
+`0x802B199C–0x802B219C`. Both match the later oracle. This does **not** add another
+historical exact TU: policy 13 already recovered both through its individual routes. The
+compact applied record is in `target/joint-historical-policy14/joint-acceptance.json`.
 
 ## Implementation checkpoint after Change D (edges and complete sequences)
 
@@ -257,9 +310,8 @@ should resolve emitted helper ownership rather than weaken C's gate.
 
 A fresh migration at the frozen historical Prime revision
 `b65ad2a6f9ae8e400e48f76209d3c015b22b84c0` completed all four stages as run
-`20714-094411`. Its durable evidence is under:
-
-`C:/Users/henri/programming/decomp/prime-migration-change-c-b65ad2a6/build/dtk-migrate/runs/20714-094411/`
+`20714-094411`. Its temporary C-drive run directory was removed during disk cleanup; the
+committed reduced evidence and split snapshots remain under `tests/fixtures/ownership/`.
 
 The first attempt exposed that ownership reports generated in a workspace retained absolute config
 paths while workers validated stable version IDs. `cfd1cfa` now validates the enclosing report and
@@ -348,9 +400,7 @@ refer to its digest and carry only the unit-local slice needed for a trial. Stan
 
 Identify target translation units and recover their code/data ownership from the information available at an old project revision. Later source fixes and later target splits are evaluation answers, never inference inputs. Source compilation may supply additional evidence when available; matching source code is not a prerequisite for TU identification.
 
-The historical experiment used Prime `b65ad2a6f9ae8e400e48f76209d3c015b22b84c0`, before the recent PAL work, migrating `GM8E01_00` to `GM8P01_00`. The comparison revision is `ca286f453d30c201304a82939fa8929181cc9d30`. Run `20713-150344` completed all four stages and reproduced retail. Its evidence is at:
-
-`C:/Users/henri/programming/decomp/prime-migration-benchmark-b65ad2a6/build/dtk-migrate/runs/20713-150344/`
+The historical experiment used Prime `b65ad2a6f9ae8e400e48f76209d3c015b22b84c0`, before the recent PAL work, migrating `GM8E01_00` to `GM8P01_00`. The comparison revision is `ca286f453d30c201304a82939fa8929181cc9d30`. Run `20713-150344` completed all four stages and reproduced retail. Its temporary C-drive run directory was later removed; the reduced evidence and split snapshots remain in `tests/fixtures/ownership/`.
 
 Of 35 newly PAL-linked TUs, 27 changed at least one split section and 25 changed `.text`. Published results were:
 

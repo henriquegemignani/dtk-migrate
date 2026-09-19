@@ -355,18 +355,20 @@ fn score_all(
         &masked.target,
         &expected,
     )?;
+    let (mut joint, _) = alternatives::joint_runs(&by_name, &masked.mask.visible, &observations);
     Ok(asked
         .into_iter()
         .map(|unit| {
             // The splits the scenario left standing, which is what a migration
             // would have had in hand at this point.
-            let found = alternatives::build(
+            let mut found = alternatives::build(
                 unit,
                 &masked.mask.visible,
                 &by_name,
                 source_blocks,
                 &observations,
             );
+            alternatives::add_joint(&mut found, joint.remove(&unit.name).unwrap_or_default());
             score(unit, found, oracle, &masked.mask.visible, owners)
         })
         .collect())

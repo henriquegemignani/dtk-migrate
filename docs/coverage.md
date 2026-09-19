@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 13, evidence schema 11, identification schema 3. Every threshold
+Policy version 14, evidence schema 11, identification schema 3. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -158,6 +158,21 @@ a prefix or suffix of an adjacent unit's declared range, that unit shrinks and
 the candidate takes what it gives up, in one transaction. Both range changes
 apply together for every trial and roll back together on failure.
 
+**Joint source-order runs** search several neighbouring source units together
+when at least one is missing or an independent target member lies in the wrong
+split. The search uses independently attributed target functions as hard
+members, tries cuts only at function boundaries, and checks each resulting
+body with the same ownership assessment as an individual proposal. Target
+functions without a supported owner and source units without a placed member
+remain explicit unknown states. Only a unique, fully placed partition becomes
+one transaction over every changed unit; a tied, incomplete or budget-limited
+search changes nothing and appears in the initial preparation's
+`joint_run_diagnostics`. A tie records both partitions and the independent
+function addresses they share. The search is bounded by units, target
+functions, windows and explored states, so it cannot
+silently pick the best partition seen before exhaustion. Source order is used
+only within a run whose independent members also occur in that target order.
+
 ### Ownership transactions
 
 A transaction (`src/project/ownership_transaction.rs`) is the only form in which
@@ -196,7 +211,9 @@ per-unit gains and losses, including ones a later refinement superseded.
 When functions in an eligible sequence identify data symbols the source version
 extracts as assets, equivalent extraction entries are added to the target's
 `config.yml`, and the generated files and renamed header declaration are checked
-before the candidate is kept.
+before the candidate is kept. For a joint transaction, the chosen alternative
+renders the union of its written units' required extracts; trying a narrower
+fallback starts again from the original configuration.
 
 ### Calibrating the policy
 

@@ -41,6 +41,17 @@ pub fn load_analyzed(
     // Poisoning only means some other load panicked; the directory is restored
     // by its guard either way, so there is nothing unsafe to inherit.
     let _serialized = CWD.lock().unwrap_or_else(|e| e.into_inner());
+    // dtk's native VFS resolves an absolute config on Windows against the
+    // process's current drive. If the run is launched from another drive it
+    // drops the drive prefix (C:\Users becomes /Users) before opening it.
+    // Enter the config's drive before dtk sees the path; the later project-root
+    // guard is nested inside this one and both are restored on return.
+    let _config_drive = config_path
+        .is_absolute()
+        .then(|| config_path.parent())
+        .flatten()
+        .map(|parent| WorkingDirectory::enter(parent.to_path_buf()))
+        .transpose()?;
     let config: ProjectConfig = {
         let mut file = open_file(config_path, true)?;
         serde_yaml::from_reader(file.as_mut())?

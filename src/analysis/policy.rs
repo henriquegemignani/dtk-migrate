@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 13;
+pub const POLICY_VERSION: u32 = 14;
 
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
@@ -71,6 +71,12 @@ pub const MAX_COMPOSED_PADDING_GAP: u32 = 31;
 /// but not on weak evidence alone: this many of its members must be
 /// independently attributed.
 pub const MIN_COMPLETE_SEQUENCE_INDEPENDENT_MEMBERS: u32 = 2;
+/// Hard bounds on joint source-order search. Exhaustion is reported and never
+/// taken as evidence that the best partition seen so far is unique.
+pub const MAX_JOINT_UNITS: usize = 6;
+pub const MAX_JOINT_FUNCTIONS: usize = 40;
+pub const MAX_JOINT_WINDOWS: usize = 2048;
+pub const MAX_JOINT_SEARCH_STATES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoveragePolicy {
@@ -180,6 +186,18 @@ pub struct CoveragePolicy {
     pub recover_complete_small_sequences: bool,
     #[serde(default)]
     pub minimum_complete_sequence_independent_members: u32,
+    /// A decisive partition of a bounded source-order run may move several
+    /// units together in one ownership transaction.
+    #[serde(default)]
+    pub infer_joint_unit_runs: bool,
+    #[serde(default)]
+    pub maximum_joint_units: u32,
+    #[serde(default)]
+    pub maximum_joint_functions: u32,
+    #[serde(default)]
+    pub maximum_joint_windows: u32,
+    #[serde(default)]
+    pub maximum_joint_search_states: u32,
 }
 
 /// The policy as this build of the tool applies it.
@@ -270,5 +288,10 @@ pub fn current_policy() -> CoveragePolicy {
         maximum_composed_padding_gap: MAX_COMPOSED_PADDING_GAP,
         recover_complete_small_sequences: true,
         minimum_complete_sequence_independent_members: MIN_COMPLETE_SEQUENCE_INDEPENDENT_MEMBERS,
+        infer_joint_unit_runs: true,
+        maximum_joint_units: MAX_JOINT_UNITS as u32,
+        maximum_joint_functions: MAX_JOINT_FUNCTIONS as u32,
+        maximum_joint_windows: MAX_JOINT_WINDOWS as u32,
+        maximum_joint_search_states: MAX_JOINT_SEARCH_STATES as u32,
     }
 }

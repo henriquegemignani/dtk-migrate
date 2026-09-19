@@ -1004,26 +1004,22 @@ impl ObservationIndex {
             OwnershipAssessment { observation_sha256: self.digest.clone(), ..Default::default() };
         for (section, ranges) in after {
             let old = before.get(section).map(Vec::as_slice).unwrap_or_default();
-            let mut members: Vec<(TargetExtent, &TargetFunctionObservation)> = self
-                .section_functions(module, section)
-                .iter()
-                .map(|member| {
-                    let extent = TargetExtent {
-                        module: member.module.clone(),
-                        section: member.section.clone(),
-                        start: parse_hex(&member.address),
-                        end: parse_hex(&member.end),
-                    };
-                    (extent, member)
-                })
-                .collect();
-            members.sort_by_key(|(extent, _)| extent.start);
+            let members = self.section_functions(module, section);
+            let extent = |member: &TargetFunctionObservation| TargetExtent {
+                module: member.module.clone(),
+                section: member.section.clone(),
+                start: parse_hex(&member.address),
+                end: parse_hex(&member.end),
+            };
             for &(start, end) in ranges {
                 let mut covered = Vec::new();
                 let mut complete: Option<bool> = None;
-                for (position, (member, observed)) in members.iter().enumerate() {
-                    if !(start < member.end && member.start < end) {
-                        continue;
+                let first = members.partition_point(|member| parse_hex(&member.end) <= start);
+                for position in first..members.len() {
+                    let observed = &members[position];
+                    let member = extent(observed);
+                    if member.start >= end {
+                        break;
                     }
                     let left = start.max(member.start);
                     let right = end.min(member.end);
@@ -1078,11 +1074,16 @@ impl ObservationIndex {
                     let class =
                         if class == ClaimClass::UnresolvedFunction && !cuts_member && !retained {
                             let neighbours = (
-                                position.checked_sub(1).map(|index| &members[index].0),
-                                members.get(position + 1).map(|(extent, _)| extent),
+                                position.checked_sub(1).map(|index| extent(&members[index])),
+                                members.get(position + 1).map(extent),
                             );
                             if attribution.is_some_and(|item| {
-                                self.order_bracketed(unit, item, neighbours, ranges)
+                                self.order_bracketed(
+                                    unit,
+                                    item,
+                                    (neighbours.0.as_ref(), neighbours.1.as_ref()),
+                                    ranges,
+                                )
                             }) {
                                 ClaimClass::OrderBracketedMember
                             } else if attribution.is_none()

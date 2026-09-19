@@ -133,7 +133,9 @@ fn a_candidate_and_the_neighbour_it_narrows_are_published_as_one_transaction() {
     let for_a: Vec<&serde_json::Value> =
         applied.iter().filter(|entry| entry["unit"] == "A.cpp").collect();
     assert_eq!(for_a.len(), 2, "{result:#}");
-    assert_eq!(units_of(for_a[0]), ["A.cpp", "B.cpp"]);
+    // Joint run inference can also place Q.cpp in this same transaction;
+    // either shape must move A and B together and end at the same map.
+    assert!(units_of(for_a[0]).starts_with(&["A.cpp", "B.cpp"]));
     assert_eq!(units_of(for_a[1]), ["A.cpp"]);
     assert_eq!(result["selections"]["A.cpp"], for_a[1]["id"]);
     // B.cpp was changed only as A.cpp's neighbour, and belongs to this stage
@@ -145,10 +147,18 @@ fn a_candidate_and_the_neighbour_it_narrows_are_published_as_one_transaction() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|transaction| transaction["members"].as_array().unwrap().len() == 2)
-        .unwrap_or_else(|| panic!("no two-unit transaction reported: {summary:#}"));
+        .find(|transaction| {
+            transaction["candidate"] == "A.cpp"
+                && transaction["members"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|member| member["unit"] == "B.cpp")
+        })
+        .unwrap_or_else(|| panic!("no transaction moving A.cpp and B.cpp reported: {summary:#}"));
     assert_eq!(joint["candidate"], "A.cpp");
-    assert_eq!(joint["net_bytes"], 0, "a boundary moved; nothing was newly owned");
+    let expected_net = if units_of(for_a[0]).contains(&"Q.cpp") { 0x100 } else { 0 };
+    assert_eq!(joint["net_bytes"], expected_net);
     assert_eq!(joint["superseded"], true);
     assert_eq!(summary["dispositions"]["B.cpp"], "revised-by-transaction");
     assert_eq!(summary["dispositions"]["A.cpp"], "accepted");
@@ -325,7 +335,10 @@ fn the_benchmark_credits_a_neighbour_with_the_transaction_that_wrote_it() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|entry| entry["units"].as_array().unwrap().len() == 2)
+        .find(|entry| {
+            entry["unit"] == "A.cpp"
+                && entry["units"].as_array().unwrap().iter().any(|unit| unit == "B.cpp")
+        })
         .unwrap();
     assert_eq!(neighbour.selected.as_deref(), joint["id"].as_str());
 

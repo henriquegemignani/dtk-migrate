@@ -784,10 +784,23 @@ fn sort_alternatives(alternatives: &mut [Alternative]) {
             .then_with(|| b.ownership.supported_edges.cmp(&a.ownership.supported_edges))
             .then_with(|| b.ownership.independent_members.cmp(&a.ownership.independent_members))
             .then_with(|| a.ownership.padding_bytes.cmp(&b.ownership.padding_bytes))
+            .then_with(|| b.transaction.members.len().cmp(&a.transaction.members.len()))
             .then_with(|| b.gained_bytes.cmp(&a.gained_bytes))
             .then_with(|| parse_address(&a.start).cmp(&parse_address(&b.start)))
     });
 }
+
+/// Combine individual and joint proposals under the same ranking rule.
+pub fn add_joint(alternatives: &mut Vec<Alternative>, joint: Vec<Alternative>) {
+    alternatives.extend(joint);
+    alternatives.sort_by(|a, b| a.id.cmp(&b.id));
+    alternatives.dedup_by(|a, b| a.id == b.id);
+    record_competing_edges(alternatives);
+    sort_alternatives(alternatives);
+}
+
+mod run_inference;
+pub use run_inference::{RunDiagnostic, joint_runs};
 
 /// Within one kind, the widest claim first.
 fn sort_drafts(drafts: &mut [Draft]) {
@@ -1937,6 +1950,46 @@ mod tests {
         let observations =
             ObservationIndex::load(report.identifications, "source", "target", &expected).unwrap();
         build(unit, target_blocks, source_units, source_blocks, &observations)
+    }
+
+    #[test]
+    fn a_three_unit_run_is_one_atomic_transaction() {
+        let units = vec![
+            coverage_fixture::unit("A.cpp", vec![coverage_fixture::anchor("a", 0x1000, 0x1100)]),
+            coverage_fixture::unit("B.cpp", vec![
+                coverage_fixture::owned_by(
+                    vec![coverage_fixture::anchor("b", 0x1100, 0x1200)],
+                    "B.cpp",
+                )[0]
+                .clone(),
+            ]),
+            coverage_fixture::unit(
+                "C.cpp",
+                coverage_fixture::owned_by(
+                    vec![coverage_fixture::anchor("c", 0x1200, 0x1300)],
+                    "B.cpp",
+                ),
+            ),
+        ];
+        let report = coverage_fixture::report("source", "target", units.clone());
+        let expected = units.iter().map(|unit| unit.name.clone()).collect();
+        let observations =
+            ObservationIndex::load(report.identifications, "source", "target", &expected).unwrap();
+        let by_name = units.iter().map(|unit| (unit.name.clone(), unit)).collect();
+        let mut blocks = IndexMap::new();
+        blocks.insert("B.cpp".into(), vec![split_line(".text", 0x1100, 0x1300)]);
+        let (offered, diagnostics) = joint_runs(&by_name, &blocks, &observations);
+        assert!(diagnostics.iter().all(|entry| entry.reason != "search-limit-reached"));
+        let alternatives = &offered["A.cpp"];
+        let joint = alternatives
+            .iter()
+            .find(|alternative| alternative.transaction.members.len() == 3)
+            .expect("A, B and C must be changed together");
+        assert_eq!(joint.transaction.writes().collect::<Vec<_>>(), vec!["A.cpp", "B.cpp", "C.cpp"]);
+        joint.transaction.apply(&mut blocks).unwrap();
+        assert_eq!(blocks["A.cpp"], vec![split_line(".text", 0x1000, 0x1100)]);
+        assert_eq!(blocks["B.cpp"], vec![split_line(".text", 0x1100, 0x1200)]);
+        assert_eq!(blocks["C.cpp"], vec![split_line(".text", 0x1200, 0x1300)]);
     }
 
     #[test]
