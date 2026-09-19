@@ -29,6 +29,42 @@ The family for target `fn_802AF844` contains a source definition of
 ownership. The opt-in `tests/helper_identification.rs` test reloads the complete historical
 report through the canonical validator and checks both observations.
 
+### Validation of the first G output
+
+I compared that frozen `b65ad2a6` identification report with the later `.text` splits at
+`ca286f45`. The later splits are an evaluation reference, not an input to inference or
+proof of linker emission. A function counted as later named only when its whole extent
+fits a named split; ground still outside named splits remains unknown.
+
+| Diagnostic population | Result |
+|---|---:|
+| Unresolved clusters | 23 |
+| Clusters with any later named functions | 5 |
+| Of those, assigned to an adjacent represented unit | 4 |
+| Of those, partly assigned to a new unit (`CTimeRemainderAndFraction`) | 1 |
+| Clusters with no later named functions | 18 |
+| Historically unowned target occurrences in helper families | 282 |
+| With no / one / 2–9 / 10+ source-defining units | 77 / 21 / 43 / 141 |
+| Later named occurrences among those 282 | 26 |
+| Later owner in the source-defining set | 19 of 26 |
+
+The five later named clusters are not five newly identified TUs. Four become part of a
+bounding unit: `CSplashScreen`, `CTeamAiMgr`, `CFBStreamedAnimReader`, or
+`CFBStreamedCompression`. The CTime cluster contains five functions; only its first two
+receive the later CTime split, and three remain unassigned. No cluster alone recovers an
+exact new TU boundary. The other 18 cannot be judged as right or wrong by these later
+splits because their functions remain unassigned there.
+
+Of the 26 later named family occurrences, five have a single source-defining unit and
+all five name the later split owner; `CGuiHeadWidget` at `0x802AF844` is one. Another
+14 include that owner among multiple definitions, while seven have no source definition.
+The median nonempty candidate set over all 282 historically unowned occurrences is 50
+units (maximum 86). A matching family therefore usually establishes body availability,
+not emitted ownership. Source linkage or independently grounded call, relocation,
+vtable and ordering evidence must narrow these sets before any ownership transfer is
+offered. The next G implementation should focus on that corroboration and on splitting
+mixed clusters by member evidence; promoting whole clusters to TUs now would be unsound.
+
 ## Implementation checkpoint after Change F (joint runs)
 
 `src/analysis/unit_runs.rs` searches function-boundary cuts with explicit unknown target
