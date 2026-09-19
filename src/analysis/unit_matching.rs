@@ -76,6 +76,7 @@ pub fn propose_units(
         &data_attribution,
         &HashMap::new(),
         &source_data_counts,
+        false,
         |_| true,
     );
 
@@ -104,6 +105,7 @@ pub fn propose_units(
         &function_attribution,
         &low_confidence_attribution,
         &source_function_counts,
+        true,
         |unit| text_only.contains(unit) || migrated.contains(unit),
     );
 
@@ -231,6 +233,7 @@ fn group_runs(
     attribution: &HashMap<u32, (String, MatchTier, u32)>,
     low_confidence: &HashMap<u32, String>,
     source_unit_size: &HashMap<&str, usize>,
+    is_code: bool,
     non_text_migrated: impl Fn(&str) -> bool,
 ) -> Vec<UnitProposal> {
     let mut proposals = Vec::new();
@@ -245,6 +248,9 @@ fn group_runs(
             layout.get(j).is_some_and(|it| {
                 it.section == section
                     && attribution.get(&it.index).is_some_and(|(u, _, _)| u == unit)
+                    && (is_code
+                        || (layout[j - 1].end == it.start
+                            && !has_split_at(target, section, it.start)))
             })
         };
         let mut j = i + 1;
@@ -253,7 +259,12 @@ fn group_runs(
             while same_run(j) {
                 j += 1;
             }
-            match bridge_gap(target, layout, attribution, low_confidence, section, unit, j) {
+            let bridged = if is_code {
+                bridge_gap(target, layout, attribution, low_confidence, section, unit, j)
+            } else {
+                None
+            };
+            match bridged {
                 Some(k) => {
                     bridged_gap_bytes += layout[k].start - layout[j].start;
                     j = k;
@@ -268,12 +279,12 @@ fn group_runs(
             |k: usize| -> bool { layout.get(k).is_some_and(|it| it.section == section) };
 
         let start = run[0].start;
-        // A data symbol's own byte range often stops short of the next one —
-        // trailing string padding, alignment gaps — so the true boundary is
-        // wherever the next known item starts (or the section's own end, for
-        // the last run in it), not the last member's raw end. Code runs are
-        // unaffected in practice, since functions sit back to back.
-        let end = if same_section(j) {
+        // A data symbol only proves its own sized extent. Padding up to the
+        // next symbol, or to the section end, may belong to another object;
+        // code retains its established next-member boundary rule.
+        let end = if !is_code {
+            run.last().unwrap().end
+        } else if same_section(j) {
             layout[j].start
         } else {
             target
@@ -290,13 +301,26 @@ fn group_runs(
             continue;
         }
 
-        let left_pinned = i == 0
-            || !same_section(i - 1)
-            || attribution.contains_key(&layout[i - 1].index)
-            || has_split_at(target, section, start);
-        let right_pinned = !same_section(j)
-            || attribution.contains_key(&layout[j].index)
-            || has_split_at(target, section, end);
+        let section_bounds = target.obj.sections.get(section);
+        let left_pinned = has_split_at(target, section, start)
+            || if is_code {
+                i == 0 || !same_section(i - 1) || attribution.contains_key(&layout[i - 1].index)
+            } else {
+                section_bounds.is_some_and(|s| start == s.address as u32)
+                    || (i > 0
+                        && same_section(i - 1)
+                        && layout[i - 1].end == start
+                        && attribution.contains_key(&layout[i - 1].index))
+            };
+        let right_pinned = has_split_at(target, section, end)
+            || if is_code {
+                !same_section(j) || attribution.contains_key(&layout[j].index)
+            } else {
+                section_bounds.is_some_and(|s| end == (s.address + s.size) as u32)
+                    || (same_section(j)
+                        && end == layout[j].start
+                        && attribution.contains_key(&layout[j].index))
+            };
 
         // Sections don't overlap in address space, so comparing the matched
         // source addresses directly orders members the same way sorting by
@@ -563,7 +587,99 @@ fn existing_split(
 
 #[cfg(test)]
 mod tests {
+    use decomp_toolkit::obj::{
+        ObjArchitecture, ObjInfo, ObjKind, ObjRelocations, ObjSection, ObjSplit, ObjSplits,
+        ObjSymbol,
+    };
+
     use super::*;
+
+    #[test]
+    fn separated_data_symbols_do_not_claim_the_gap_or_section_tail() {
+        let symbols = vec![
+            ObjSymbol {
+                name: "first".into(),
+                address: 0x1000,
+                section: Some(0),
+                size: 4,
+                size_known: true,
+                kind: ObjSymbolKind::Object,
+                ..Default::default()
+            },
+            ObjSymbol {
+                name: "second".into(),
+                address: 0x2000,
+                section: Some(0),
+                size: 4,
+                size_known: true,
+                kind: ObjSymbolKind::Object,
+                ..Default::default()
+            },
+            ObjSymbol {
+                name: "third".into(),
+                address: 0x2004,
+                section: Some(0),
+                size: 4,
+                size_known: true,
+                kind: ObjSymbolKind::Object,
+                ..Default::default()
+            },
+        ];
+        let mut splits = ObjSplits::default();
+        splits.push(0x2004, ObjSplit {
+            unit: "other.cpp".into(),
+            end: 0x2008,
+            align: Some(4),
+            common: true,
+            autogenerated: false,
+            skip: false,
+            rename: None,
+        });
+        let section = ObjSection {
+            name: ".bss".into(),
+            kind: ObjSectionKind::Bss,
+            address: 0x1000,
+            size: 0x2000,
+            data: Vec::new(),
+            align: 4,
+            elf_index: 0,
+            relocations: ObjRelocations::default(),
+            virtual_address: None,
+            file_offset: 0,
+            section_known: true,
+            splits,
+        };
+        let target = MatchTarget::new(
+            "target".into(),
+            ObjInfo::new(
+                ObjKind::Executable,
+                ObjArchitecture::PowerPc,
+                "target".into(),
+                symbols,
+                vec![section],
+            ),
+        );
+        let attribution = HashMap::from([
+            (0, ("unit.cpp".into(), MatchTier::Confident, 0x1000)),
+            (1, ("unit.cpp".into(), MatchTier::Confident, 0x2000)),
+            (2, ("unit.cpp".into(), MatchTier::Confident, 0x2004)),
+        ]);
+        let proposals = group_runs(
+            &target,
+            &data_layout(&target),
+            &attribution,
+            &HashMap::new(),
+            &HashMap::from([("unit.cpp", 3)]),
+            false,
+            |_| true,
+        );
+        assert_eq!(proposals.iter().map(|p| (p.start, p.end)).collect::<Vec<_>>(), [
+            (0x1000, 0x1004),
+            (0x2000, 0x2004),
+            (0x2004, 0x2008)
+        ]);
+        assert!(proposals.iter().all(|p| p.tier == UnitTier::Candidate));
+    }
 
     fn baseline(run_len: usize, expected: usize) -> (UnitTier, Vec<&'static str>) {
         classify(run_len, expected, true, true, true, false, true, true, true, 0)

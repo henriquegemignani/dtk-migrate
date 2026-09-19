@@ -962,6 +962,18 @@ the requested unit. Transaction neighbours remain unit-scoped. This removes
 the cross-namespace collision but does not yet permit compatible code and data
 edits on one unit or replace stage-wide reservations with certificates.
 
+### H data-evidence checkpoint: bounded symbol extents
+
+Data correspondences now require the *entire* matched function pair's data
+relocation sequence to agree in kind and addend. An agreeing prefix of a
+changed sequence is no longer a witness. Data split proposals cover only the
+matched target symbols' sized extents: gaps between adjacent symbols and the
+tail to the section end remain unclaimed. Unlike code, unmatched data symbols
+are not bridged. This is conservative about padding, which still needs
+independent boundary evidence. Coverage policy is 15 because its boundary-data
+match evidence uses the same stricter reference alignment. Per-range certificates, target-side BSS
+attributes and combined code/data transactions remain to be implemented.
+
 ## 8. Make refusals diagnostic and retries state-aware
 
 **Files:** `src/build/process.rs`, `src/build/context.rs`, `src/stages/mod.rs`, `src/stages/coverage/mod.rs`, `src/stages/discover.rs`, `src/stages/verify.rs`, `src/run/mod.rs`, `src/run/jobs.rs`.

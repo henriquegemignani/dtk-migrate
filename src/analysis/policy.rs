@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 14;
+pub const POLICY_VERSION: u32 = 15;
 
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
@@ -126,6 +126,10 @@ pub struct CoveragePolicy {
     pub require_explicit_sequence_neighbors: bool,
     pub reject_sequence_runner_up: bool,
     pub infer_boundary_data_matches: bool,
+    /// A function pair contributes no data-symbol evidence if any aligned
+    /// relocation differs in kind or addend.
+    #[serde(default)]
+    pub require_complete_data_reference_alignment: bool,
     pub preserve_target_extract_extents: bool,
     pub infer_layout_corroborated_boundaries: bool,
     pub minimum_layout_boundary_functions: u32,
@@ -243,6 +247,7 @@ pub fn current_policy() -> CoveragePolicy {
         require_explicit_sequence_neighbors: true,
         reject_sequence_runner_up: true,
         infer_boundary_data_matches: true,
+        require_complete_data_reference_alignment: true,
         preserve_target_extract_extents: true,
         infer_layout_corroborated_boundaries: true,
         minimum_layout_boundary_functions: MIN_LAYOUT_BOUNDARY_FUNCTIONS,

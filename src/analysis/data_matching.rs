@@ -65,10 +65,17 @@ pub fn match_data_pairs(
         if source_refs.is_empty() || source_refs.len() != target_refs.len() {
             continue;
         }
+        // A disagreement invalidates the function pair as a positional data
+        // witness. Keeping only its agreeing positions can manufacture a
+        // unique symbol pairing from a changed reference sequence.
+        if source_refs
+            .iter()
+            .zip(&target_refs)
+            .any(|(a, b)| a.kind != b.kind || a.addend != b.addend)
+        {
+            continue;
+        }
         for (a, b) in source_refs.iter().zip(&target_refs) {
-            if a.kind != b.kind || a.addend != b.addend {
-                continue;
-            }
             *evidence.entry((a.target_symbol, b.target_symbol)).or_default() += 1;
         }
     }
@@ -251,5 +258,29 @@ mod tests {
             rounds: 1,
         };
         assert!(match_data(&source, &target, &result).is_empty());
+    }
+
+    #[test]
+    fn one_disagreeing_relocation_invalidates_the_whole_function_pair() {
+        let source = target("Fn", Some("gSourceVar"));
+        let mut target_obj = object("Fn", Some("gTargetVar"));
+        target_obj.sections[0].relocations = ObjRelocations::new(vec![
+            (0x1000, ObjReloc {
+                kind: ObjRelocKind::PpcAddr16Ha,
+                target_symbol: 1,
+                addend: 0,
+                module: None,
+            }),
+            (0x1004, ObjReloc {
+                kind: ObjRelocKind::PpcAddr16Lo,
+                target_symbol: 1,
+                addend: 4,
+                module: None,
+            }),
+        ])
+        .unwrap();
+        let target = MatchTarget::new("target".into(), target_obj);
+        let matches = match_data_pairs(&source, &target, [(0, 0)]);
+        assert!(matches.is_empty(), "an agreeing position cannot vouch for a changed sequence");
     }
 }
