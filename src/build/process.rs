@@ -8,7 +8,7 @@
 
 use std::{
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc,
@@ -18,6 +18,7 @@ use std::{
 };
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 /// Why a command did not succeed.
 ///
@@ -27,24 +28,76 @@ use anyhow::Result;
 #[derive(Debug)]
 pub enum CommandError {
     /// The command ran and exited non-zero.
-    Failed { status: Option<i32> },
+    Failed { status: Option<i32>, evidence: Option<Box<CommandEvidence>> },
     /// The command exceeded its time bound and its tree was killed.
-    TimedOut { after: Duration },
+    TimedOut { after: Duration, evidence: Option<Box<CommandEvidence>> },
     /// The run was cancelled; nothing is known about the candidate.
     Cancelled,
     /// The command could not be started, or its output could not be read.
     Io(std::io::Error),
 }
 
+/// Only this command's output, even when many commands append to the same log.
+/// The full bytes remain in `log`; excerpts here are bounded for diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandEvidence {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub log: PathBuf,
+    pub log_start: u64,
+    pub log_end: u64,
+    pub stdout_excerpt: String,
+    pub stderr_excerpt: String,
+}
+
+impl CommandError {
+    pub fn evidence(&self) -> Option<&CommandEvidence> {
+        match self {
+            Self::Failed { evidence, .. } | Self::TimedOut { evidence, .. } => evidence.as_deref(),
+            Self::Cancelled | Self::Io(_) => None,
+        }
+    }
+
+    fn with_evidence(self, evidence: CommandEvidence) -> Self {
+        match self {
+            Self::Failed { status, .. } => {
+                Self::Failed { status, evidence: Some(Box::new(evidence)) }
+            }
+            Self::TimedOut { after, .. } => {
+                Self::TimedOut { after, evidence: Some(Box::new(evidence)) }
+            }
+            other => other,
+        }
+    }
+}
+
 impl std::fmt::Display for CommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Failed { status: Some(code) } => write!(f, "exit status {code}"),
-            Self::Failed { status: None } => write!(f, "terminated by a signal"),
-            Self::TimedOut { after } => write!(f, "timed out after {:.0}s", after.as_secs_f64()),
-            Self::Cancelled => write!(f, "cancelled"),
-            Self::Io(e) => write!(f, "{e}"),
+            Self::Failed { status: Some(code), .. } => write!(f, "exit status {code}")?,
+            Self::Failed { status: None, .. } => write!(f, "terminated by a signal")?,
+            Self::TimedOut { after, .. } => {
+                write!(f, "timed out after {:.0}s", after.as_secs_f64())?
+            }
+            Self::Cancelled => write!(f, "cancelled")?,
+            Self::Io(e) => write!(f, "{e}")?,
+        };
+        if let Some(evidence) = self.evidence() {
+            write!(
+                f,
+                " in {} ({}:{}..{})",
+                evidence.program.display(),
+                evidence.log.display(),
+                evidence.log_start,
+                evidence.log_end
+            )?;
+            if !evidence.stderr_excerpt.trim().is_empty() {
+                write!(f, "; stderr: {}", evidence.stderr_excerpt.trim())?;
+            } else if !evidence.stdout_excerpt.trim().is_empty() {
+                write!(f, "; stdout: {}", evidence.stdout_excerpt.trim())?;
+            }
         }
+        Ok(())
     }
 }
 
@@ -81,6 +134,7 @@ pub fn run(spec: &Spec) -> Result<String, CommandError> {
         std::fs::create_dir_all(parent)?;
     }
     let mut log = std::fs::OpenOptions::new().create(true).append(true).open(spec.log)?;
+    let log_start = log.metadata()?.len();
     writeln!(
         log,
         "+ {} {}",
@@ -119,8 +173,38 @@ pub fn run(spec: &Spec) -> Result<String, CommandError> {
         Err(error) => writeln!(log, "! {error}")?,
     }
     log.flush()?;
-    status?;
+    let log_end = log.metadata()?.len();
+    status.map_err(|error| {
+        error.with_evidence(CommandEvidence {
+            program: spec.program.to_path_buf(),
+            args: spec.args.clone(),
+            log: spec.log.to_path_buf(),
+            log_start,
+            log_end,
+            stdout_excerpt: bounded_excerpt(&output),
+            stderr_excerpt: bounded_excerpt(&errors),
+        })
+    })?;
     Ok(if spec.capture { output } else { String::new() })
+}
+
+const EXCERPT_BYTES: usize = 4096;
+const OMITTED: &str = "\n[middle output omitted; full command output is in the log]\n";
+
+fn bounded_excerpt(output: &str) -> String {
+    if output.len() <= EXCERPT_BYTES {
+        return output.to_string();
+    }
+    let side = (EXCERPT_BYTES - OMITTED.len()) / 2;
+    let mut end = side;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut start = output.len() - side;
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("{}{}{}", &output[..end], OMITTED, &output[start..])
 }
 
 fn read_all(stream: Option<impl Read>) -> String {
@@ -140,7 +224,7 @@ fn wait(tree: &mut Tree, spec: &Spec) -> Result<(), CommandError> {
             return if status.success() {
                 Ok(())
             } else {
-                Err(CommandError::Failed { status: status.code() })
+                Err(CommandError::Failed { status: status.code(), evidence: None })
             };
         }
         if spec.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
@@ -151,7 +235,7 @@ fn wait(tree: &mut Tree, spec: &Spec) -> Result<(), CommandError> {
             && started.elapsed() >= timeout
         {
             tree.kill();
-            return Err(CommandError::TimedOut { after: started.elapsed() });
+            return Err(CommandError::TimedOut { after: started.elapsed(), evidence: None });
         }
         // Long enough that polling costs nothing against a multi-minute link,
         // short enough that a cancelled run stops promptly.
@@ -358,8 +442,52 @@ mod tests {
         let (program, flag) = shell();
         let error =
             run(&spec(Path::new(program), &[flag, "exit 3"], dir.path(), &log)).unwrap_err();
-        assert!(matches!(error, CommandError::Failed { status: Some(3) }), "{error:?}");
+        assert!(matches!(error, CommandError::Failed { status: Some(3), .. }), "{error:?}");
         assert!(std::fs::read_to_string(&log).unwrap().contains("exit status 3"));
+    }
+
+    #[test]
+    fn adjacent_failures_keep_their_own_output_and_log_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("build.log");
+        let (program, flag) = shell();
+        #[cfg(windows)]
+        let first_command = "echo FIRST_ONLY 1>&2 & exit /b 3";
+        #[cfg(unix)]
+        let first_command = "echo FIRST_ONLY >&2; exit 3";
+        #[cfg(windows)]
+        let second_command = "echo SECOND_ONLY 1>&2 & exit /b 4";
+        #[cfg(unix)]
+        let second_command = "echo SECOND_ONLY >&2; exit 4";
+        let first =
+            run(&spec(Path::new(program), &[flag, first_command], dir.path(), &log)).unwrap_err();
+        let second =
+            run(&spec(Path::new(program), &[flag, second_command], dir.path(), &log)).unwrap_err();
+        let first = first.evidence().unwrap();
+        let second = second.evidence().unwrap();
+        assert!(first.stderr_excerpt.contains("FIRST_ONLY"));
+        assert!(!first.stderr_excerpt.contains("SECOND_ONLY"));
+        assert!(second.stderr_excerpt.contains("SECOND_ONLY"));
+        assert!(!second.stderr_excerpt.contains("FIRST_ONLY"));
+        assert!(first.log_end <= second.log_start);
+        assert_eq!(first.program, Path::new(program));
+        assert_eq!(first.args, [flag, first_command]);
+        let bytes = std::fs::read(&log).unwrap();
+        let first_span =
+            String::from_utf8_lossy(&bytes[first.log_start as usize..first.log_end as usize]);
+        let second_span =
+            String::from_utf8_lossy(&bytes[second.log_start as usize..second.log_end as usize]);
+        assert!(first_span.contains("FIRST_ONLY") && !first_span.contains("SECOND_ONLY"));
+        assert!(second_span.contains("SECOND_ONLY") && !second_span.contains("FIRST_ONLY"));
+    }
+
+    #[test]
+    fn a_large_command_keeps_early_and_late_diagnostics_within_the_bound() {
+        let output = format!("undefined symbol: Early\n{}\nlast error", "🦀".repeat(2000));
+        let excerpt = bounded_excerpt(&output);
+        assert!(excerpt.starts_with("undefined symbol: Early"));
+        assert!(excerpt.ends_with("last error"));
+        assert!(excerpt.len() <= EXCERPT_BYTES);
     }
 
     #[test]

@@ -34,7 +34,10 @@ use crate::{
         splits::{Splits, entry_line, entry_suffix, parse_attributes, parse_range},
         transaction::Owned,
     },
-    stages::{Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage},
+    stages::{
+        Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage,
+        refusal::{Kind as RefusalKind, Refusal},
+    },
 };
 
 pub struct Discover;
@@ -781,7 +784,8 @@ impl Trials {
                         Ok(()) => {
                             self.events.push(
                                 Event::new(&candidate.name, "evidence-refused")
-                                    .because(format!("{error:#}")),
+                                    .because(format!("{error:#}"))
+                                    .refused(Refusal::from_error(&error)),
                             );
                             let mut revised = batch.to_vec();
                             revised[index] = fallback;
@@ -806,7 +810,17 @@ impl Trials {
         let introduced: BTreeSet<String> =
             cyclic_units(&staged.blocks).difference(baseline_cycles).cloned().collect();
         if batch.iter().any(|c| introduced.contains(&c.name)) {
-            return self.reject(owned, splits, batch, "link-order-cycle");
+            return self.reject(
+                owned,
+                splits,
+                batch,
+                "link-order-cycle",
+                Some(Refusal {
+                    kind: RefusalKind::LinkOrderCycle,
+                    affected: introduced.into_iter().collect(),
+                    command: None,
+                }),
+            );
         }
 
         staged.place_new_units(&new_names)?;
@@ -814,7 +828,13 @@ impl Trials {
         let tested = match ctx.trial_build() {
             Ok(report) => report,
             Err(error) if is_trial_failure(&error) => {
-                return self.reject(owned, splits, batch, "build-conflict");
+                return self.reject(
+                    owned,
+                    splits,
+                    batch,
+                    "build-conflict",
+                    Some(Refusal::from_error(&error)),
+                );
             }
             Err(error) => return Err(error),
         };
@@ -843,7 +863,17 @@ impl Trials {
             return Ok(if retry.is_empty() { Retry::Done } else { Retry::Split(retry) });
         }
         if regresses(&self.report, &tested) {
-            return self.reject(owned, splits, batch, "regresses-existing-code");
+            return self.reject(
+                owned,
+                splits,
+                batch,
+                "regresses-existing-code",
+                Some(Refusal {
+                    kind: RefusalKind::MeasuredRegression,
+                    affected: batch.iter().map(|c| c.name.clone()).collect(),
+                    command: None,
+                }),
+            );
         }
 
         for candidate in batch {
@@ -872,13 +902,18 @@ impl Trials {
         splits: &Splits,
         batch: &[Candidate],
         status: &str,
+        refusal: Option<Refusal>,
     ) -> Result<Retry> {
         write(owned, splits)?;
         if batch.len() > 1 {
             let middle = batch.len() / 2;
             return Ok(Retry::Split(vec![batch[..middle].to_vec(), batch[middle..].to_vec()]));
         }
-        self.events.push(Event::new(&batch[0].name, status));
+        let mut event = Event::new(&batch[0].name, status);
+        if let Some(refusal) = refusal {
+            event = event.refused(refusal);
+        }
+        self.events.push(event);
         if let Some(fallback) = next_fallback(&batch[0])? {
             return Ok(Retry::Split(vec![vec![fallback]]));
         }
@@ -1152,7 +1187,7 @@ mod tests {
             events: Vec::new(),
         };
         let retry = trials
-            .reject(&mut owned, &splits, std::slice::from_ref(&joint), "build-conflict")
+            .reject(&mut owned, &splits, std::slice::from_ref(&joint), "build-conflict", None)
             .unwrap();
         let Retry::Split(groups) = retry else { panic!("failed joint claim must retry code") };
         assert_eq!(groups.len(), 1);

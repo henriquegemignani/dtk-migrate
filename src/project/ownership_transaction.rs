@@ -228,6 +228,27 @@ impl OwnershipTransaction {
         format!("{:x}", Sha256::digest(canonical))
     }
 
+    /// Identity of the work a trial would repeat. The full transaction id
+    /// binds the complete observation report for publication; that report can
+    /// change when an unrelated unit lands. Retrying the same before/after
+    /// bodies and the same read dependencies solely for that global digest
+    /// would waste a build. A changed relevant neighbour or changed evidence
+    /// still changes this key.
+    pub fn retry_key(&self) -> String {
+        let canonical = serde_json::to_vec(&(
+            self.schema,
+            &self.policy,
+            &self.evidence,
+            &self.members,
+            &self.reads,
+            &self.transfers,
+            &self.releases,
+            &self.required_extracts,
+        ))
+        .unwrap_or_default();
+        format!("{:x}", Sha256::digest(canonical))
+    }
+
     pub fn member(&self, unit: &str) -> Option<&MemberChange> {
         self.members.iter().find(|member| member.unit == unit)
     }
@@ -854,6 +875,43 @@ mod tests {
             blocks(&[("a.cpp", &[text(0x100, 0x200)]), ("c.cpp", &[text(0x300, 0x400)])]);
         let with_neighbour = build(&moved_world, &[("a.cpp", vec![text(0x100, 0x300)])]);
         assert_ne!(one.id, with_neighbour.id, "the read set is part of the before-state");
+    }
+
+    #[test]
+    fn retry_key_changes_only_when_relevant_state_or_evidence_changes() {
+        let original = blocks(&[
+            ("a.cpp", &[text(0x100, 0x200)]),
+            ("b.cpp", &[text(0x300, 0x400)]),
+            ("c.cpp", &[text(0x700, 0x800)]),
+        ]);
+        let proposal = |world: &Blocks, provenance| {
+            OwnershipTransaction::build(
+                world,
+                [("a.cpp".to_string(), vec![text(0x100, 0x300)])],
+                provenance,
+            )
+            .unwrap()
+        };
+        let one = proposal(&original, provenance());
+        let mut new_report = provenance();
+        new_report.observation_sha256 = "a report updated by c.cpp".into();
+        let report_only = proposal(&original, new_report);
+        assert_ne!(one.id, report_only.id);
+        assert_eq!(one.retry_key(), report_only.retry_key());
+
+        let unrelated = blocks(&[
+            ("a.cpp", &[text(0x100, 0x200)]),
+            ("b.cpp", &[text(0x300, 0x400)]),
+            ("c.cpp", &[text(0x800, 0x900)]),
+        ]);
+        assert_eq!(one.retry_key(), proposal(&unrelated, provenance()).retry_key());
+
+        let repaired = blocks(&[
+            ("a.cpp", &[text(0x100, 0x200)]),
+            ("b.cpp", &[text(0x300, 0x500)]),
+            ("c.cpp", &[text(0x700, 0x800)]),
+        ]);
+        assert_ne!(one.retry_key(), proposal(&repaired, provenance()).retry_key());
     }
 
     #[test]

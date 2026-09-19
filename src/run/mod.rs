@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 6;
+pub const SCHEMA: u32 = 7;
 
 /// The stages, in the only order they may run in.
 ///
@@ -536,18 +536,19 @@ pub fn run_stage(
 
         // Something landed, so ask the stage what that made possible. This is
         // the only place it happens: one workspace holding every batch's result.
-        let discovered = stage.rediscover(&ctx, &prepared.prepared, &tried)?;
+        let rediscovered = stage.rediscover(&ctx, &prepared.prepared, &tried)?;
+        let discovered = rediscovered.as_deref().unwrap_or_default();
         if !discovered.is_empty() {
             events.push(
                 Event::new("", "rediscovered")
                     .because(format!("{} units with new evidence", discovered.len())),
             );
         }
-        // Freshly generated evidence first, then anything still unsettled that
-        // rediscovery had nothing new to say about.
-        let refreshed: BTreeSet<String> = discovered.iter().map(|c| c.name.clone()).collect();
-        queue = discovered;
-        queue.extend(unresolved.values().filter(|c| !refreshed.contains(&c.name)).cloned());
+        // A stage that regenerated evidence has the complete eligible set.
+        // Re-adding an old refusal here would retry it after any unrelated
+        // acceptance. Stages without rediscovery retain their historical
+        // integration retry of unsettled worker candidates.
+        queue = rediscovered.unwrap_or_else(|| unresolved.values().cloned().collect());
     }
 
     // Round 0 always evaluates, so this holds however the loop left; it is

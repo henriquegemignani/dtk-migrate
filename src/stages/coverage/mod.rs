@@ -50,6 +50,7 @@ use crate::{
         Applied, Candidate, Event, FinalCertificates, Footprint, MutationScope, Outcome, Permitted,
         Prepared, Selections, Stage, Tried,
         coverage::alternatives::{Alternative, assess_member, body_bytes, policy_digest},
+        refusal::Refusal,
     },
 };
 
@@ -600,7 +601,7 @@ impl Stage for Coverage {
             let seen = tried.entry(candidate.name.clone()).or_default();
             let mut chosen: Option<&Alternative> = None;
             for alternative in ordered {
-                seen.insert(alternative.id.clone());
+                seen.insert(alternative.transaction.retry_key());
                 let restore = splits.clone();
                 let required = transaction_extracts(
                     &candidate.name,
@@ -627,10 +628,12 @@ impl Stage for Coverage {
                     Err(error) if is_trial_failure(&error) => {
                         splits = restore;
                         write(&mut splits_owned, &splits)?;
+                        let refusal = Refusal::from_error(&error);
                         events.push(
                             Event::new(&candidate.name, "rejected")
-                                .because(format!("{}: {error:#}", failure_category(&error)))
-                                .about(&alternative.id),
+                                .because(format!("{}: {error:#}", refusal.kind.legacy_category()))
+                                .about(&alternative.id)
+                                .refused(refusal),
                         );
                     }
                     Err(error) => return Err(error),
@@ -708,8 +711,8 @@ impl Stage for Coverage {
         ctx: &BuildContext,
         prepared: &Prepared,
         tried: &Tried,
-    ) -> Result<Vec<Candidate>> {
-        revisit(ctx, &prepared.permitted, tried)
+    ) -> Result<Option<Vec<Candidate>>> {
+        Ok(Some(revisit(ctx, &prepared.permitted, tried)?))
     }
 
     fn validate(
@@ -1065,9 +1068,9 @@ pub fn offers_candidate(alternatives: &[Alternative]) -> bool { !alternatives.is
 /// about the neighbourhood, and the neighbourhood is what just changed, so the
 /// whole eligible set is reconsidered rather than only the list that failed.
 ///
-/// What keeps it from looping: a unit whose alternatives are all ids that were
-/// already refused is dropped. Nothing about it changed, and rebuilding the
-/// project to learn that again is the one thing a revisit loop must not do.
+/// What keeps it from looping: a unit whose alternatives have only trial keys
+/// already tried is dropped. A new report digest alone is not a new trial;
+/// relevant before/after bodies, read dependencies or evidence must differ.
 fn revisit(
     ctx: &BuildContext,
     permitted: &Permitted,
@@ -1104,10 +1107,8 @@ fn revisit(
         let mut found =
             alternatives::build(unit, &target_blocks, &by_name, &source_blocks, &observations);
         alternatives::add_joint(&mut found, joint.remove(name).unwrap_or_default());
-        let refused = tried.get(name);
-        if found.is_empty()
-            || found.iter().all(|a| refused.is_some_and(|seen| seen.contains(&a.id)))
-        {
+        let found = untried(found, tried.get(name));
+        if found.is_empty() {
             continue;
         }
         let proposal = Proposal {
@@ -1126,6 +1127,19 @@ fn revisit(
     }
     next.sort_by(compare_candidates);
     Ok(next)
+}
+
+/// Only pass genuinely new transactions to the next evaluation round. A new
+/// alternative alongside an old refusal must not cause the old build to run
+/// again just because the proposal as a whole is new.
+fn untried(
+    mut alternatives: Vec<Alternative>,
+    tried: Option<&BTreeSet<String>>,
+) -> Vec<Alternative> {
+    if let Some(tried) = tried {
+        alternatives.retain(|alternative| !tried.contains(&alternative.transaction.retry_key()));
+    }
+    alternatives
 }
 
 /// Writes one alternative into a set of split blocks, as a trial would.
@@ -1232,37 +1246,10 @@ fn validate_required_extracts(ctx: &BuildContext, extracts: &[&RequiredExtract])
     Ok(())
 }
 
-/// Sorts a failure into a category, so a run's events can be counted.
+/// Compatibility check for historical refusal categories in tests.
+#[cfg(test)]
 fn failure_category(error: &anyhow::Error) -> &'static str {
-    let text = format!("{error:#}").to_lowercase();
-    let has = |needle: &str| text.contains(needle);
-    if has("timed out after") {
-        "build-timeout"
-    } else if has("retail dol bytes differ") || has("checksum") {
-        "retail-mismatch"
-    } else if has("cycle") || has("cyclic") {
-        "link-order-cycle"
-    } else if has("stale precondition") {
-        "stale-precondition"
-    } else if has("which this run does not permit") {
-        "dependency-not-permitted"
-    } else if has("transaction refused") {
-        "ownership-preflight"
-    } else if has("multiply defined") || has("multiply-defined") || has("duplicate symbol") {
-        "duplicate-symbol"
-    } else if has("undefined:") || has("undefined symbol") {
-        "undefined-symbol"
-    } else if has("invalid alignment") || has("split alignment") {
-        "split-alignment"
-    } else if has("compiled source object was enabled") || has("extracted target object is not") {
-        "source-linkage-violation"
-    } else if has("regresses an existing unit") || has("reduces source-linked code") {
-        "regression"
-    } else if has("cannot open") || has("no such file") || has("fatal error") {
-        "compilation-failure"
-    } else {
-        "unknown-failure"
-    }
+    Refusal::from_error(error).kind.legacy_category()
 }
 
 /// A directory of prepared coverage evidence, standing in for the matcher.
@@ -2402,6 +2389,26 @@ mod tests {
         assert_eq!(retained.identification.confidence, IdentificationConfidence::Corroborated);
         assert_eq!(retained.alternatives[0].start, alternative.start);
         assert_eq!(retained.alternatives[0].end, alternative.end);
+    }
+
+    #[test]
+    fn rediscovery_does_not_retry_an_old_refusal_beside_a_new_transaction() {
+        let old =
+            body(".text", 0x8000_0100, 0x8000_0200, vec![line(".text", 0x8000_0100, 0x8000_0200)]);
+        let mut unrelated = old.clone();
+        unrelated.id = "different-global-observation".into();
+        unrelated.transaction.observation_sha256 = "different-global-observation".into();
+        let mut repaired = old.clone();
+        repaired.id = "same-boundary-after-neighbour-repair".into();
+        repaired.transaction.reads.push(crate::project::ownership_transaction::UnitState {
+            unit: "neighbour.cpp".into(),
+            body: Some(vec![line(".text", 0x8000_0200, 0x8000_0300)]),
+        });
+        let tried = BTreeSet::from([old.transaction.retry_key()]);
+        let offered = untried(vec![old.clone(), unrelated, repaired.clone()], Some(&tried));
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].id, repaired.id);
+        assert!(untried(vec![old], Some(&tried)).is_empty());
     }
 
     #[test]

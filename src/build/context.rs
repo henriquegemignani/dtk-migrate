@@ -229,15 +229,18 @@ mod tests {
 
     #[test]
     fn a_build_failure_is_the_candidates_fault() {
-        let error = anyhow::Error::new(CommandError::Failed { status: Some(1) });
+        let error = anyhow::Error::new(CommandError::Failed { status: Some(1), evidence: None });
         assert!(is_trial_failure(&error));
-        let wrapped = error_with_context(CommandError::Failed { status: Some(1) });
+        let wrapped = error_with_context(CommandError::Failed { status: Some(1), evidence: None });
         assert!(is_trial_failure(&wrapped));
     }
 
     #[test]
     fn a_timeout_is_the_candidates_fault() {
-        let error = error_with_context(CommandError::TimedOut { after: Duration::from_secs(1) });
+        let error = error_with_context(CommandError::TimedOut {
+            after: Duration::from_secs(1),
+            evidence: None,
+        });
         assert!(is_trial_failure(&error));
     }
 

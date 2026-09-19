@@ -101,6 +101,13 @@ final-certificates.json the final per-unit bodies and certificate dependencies
 result.json             the whole run
 ```
 
+Rejected trial events record a typed `refusal`: its kind, affected symbol or unit
+names when recognizable, and the failed command's executable, arguments, log
+byte range, and bounded stdout/stderr excerpts. The full output remains in the
+job or integration `build.log`. Classification uses that command's output, so a
+later failure cannot inherit diagnostic text from an earlier trial in the same
+log. Unknown failures retain the command evidence without inventing a cause.
+
 ## Publication
 
 Only four files may change: `configure.py` and the target's `config.yml`,
@@ -153,8 +160,8 @@ A worker failure stops the other lanes but keeps what they finished, so a resume
 run picks up from there.
 
 Resuming a run that already published does nothing and says so. A run written
-by a tool with a different run schema (currently 6, which binds the final
-certificate graph) is refused rather than reinterpreted.
+by a tool with a different run schema (currently 7, which also records typed
+trial refusals and their command-local evidence) is refused rather than reinterpreted.
 
 ## Resource settings
 

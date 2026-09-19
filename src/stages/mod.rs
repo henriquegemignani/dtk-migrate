@@ -27,6 +27,7 @@ use crate::{
 pub mod coverage;
 pub mod derive;
 pub mod discover;
+pub mod refusal;
 pub mod verify;
 
 /// Which alternative a stage chose for a candidate, when a candidate has more
@@ -107,11 +108,20 @@ pub struct Event {
     /// different, untried alternative would have written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternative: Option<String>,
+    /// Machine-readable reason and command-local evidence for a rejected trial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<refusal::Refusal>,
 }
 
 impl Event {
     pub fn new(unit: impl Into<String>, status: impl Into<String>) -> Self {
-        Self { unit: unit.into(), status: status.into(), reason: None, alternative: None }
+        Self {
+            unit: unit.into(),
+            status: status.into(),
+            reason: None,
+            alternative: None,
+            refusal: None,
+        }
     }
 
     pub fn because(mut self, reason: impl Into<String>) -> Self {
@@ -121,6 +131,11 @@ impl Event {
 
     pub fn about(mut self, alternative: impl Into<String>) -> Self {
         self.alternative = Some(alternative.into());
+        self
+    }
+
+    pub fn refused(mut self, refusal: refusal::Refusal) -> Self {
+        self.refusal = Some(refusal);
         self
     }
 }
@@ -187,8 +202,8 @@ pub struct Outcome {
     /// Rejected here, but not ruled out: a different batch, boundary or
     /// baseline can change the answer, which is why this is not a blacklist.
     pub deferred: Vec<Candidate>,
-    /// Every alternative this pass actually asked about, accepted or not, so a
-    /// later round does not spend a build re-asking.
+    /// Every trial retry key this pass actually asked about, accepted or not,
+    /// so a later round does not spend a build re-asking the same question.
     #[serde(default)]
     pub tried: Tried,
     #[serde(default)]
@@ -250,8 +265,9 @@ impl Footprint {
     }
 }
 
-/// Alternative ids a unit has already been asked about, so that rediscovery can
-/// tell a genuinely new proposal from the one that was just refused.
+/// Trial retry keys a unit has already been asked about. Coverage keys the
+/// transaction's changed bodies and relevant read state, excluding the global
+/// observation digest, so unrelated discoveries do not repeat builds.
 pub type Tried = BTreeMap<String, BTreeSet<String>>;
 
 /// Facts proved against the final project, after all stages have run. A
@@ -322,15 +338,18 @@ pub trait Stage {
     /// reporting on units another batch is holding at the same time.
     ///
     /// Must honour [`Prepared::permitted`], and must not return a proposal made
-    /// only of alternatives listed in `tried` — that is the same question
-    /// again, and answering it costs a build.
+    /// only of retry keys listed in `tried` — that is the same question
+    /// again, and answering it costs a build. `Some` means the refreshed list
+    /// is authoritative: old unresolved proposals must not be retried beside
+    /// it. `None` keeps the legacy retry of unresolved candidates for stages
+    /// that do not regenerate evidence.
     fn rediscover(
         &self,
         _ctx: &BuildContext,
         _prepared: &Prepared,
         _tried: &Tried,
-    ) -> Result<Vec<Candidate>> {
-        Ok(Vec::new())
+    ) -> Result<Option<Vec<Candidate>>> {
+        Ok(None)
     }
 
     /// Units this candidate can change, or whose identity a symbol rename
@@ -459,7 +478,9 @@ pub fn bisect(
                     queue.push_front(batch[..middle].to_vec());
                 } else {
                     events.push(
-                        Event::new(&batch[0].name, failure_status).because(format!("{error:#}")),
+                        Event::new(&batch[0].name, failure_status)
+                            .because(format!("{error:#}"))
+                            .refused(refusal::Refusal::from_error(&error)),
                     );
                     deferred.extend(batch);
                 }
@@ -484,7 +505,7 @@ mod tests {
     }
 
     fn build_failure() -> anyhow::Error {
-        anyhow::Error::new(CommandError::Failed { status: Some(1) })
+        anyhow::Error::new(CommandError::Failed { status: Some(1), evidence: None })
     }
 
     #[test]

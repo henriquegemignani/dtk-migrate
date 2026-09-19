@@ -25,7 +25,10 @@ use crate::{
     build::context::{BuildContext, is_trial_failure},
     derive::{self, propose::Tier},
     project::{report::Report, symbols::Renames, transaction::Owned},
-    stages::{Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage},
+    stages::{
+        Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage,
+        refusal::{Kind as RefusalKind, Refusal},
+    },
 };
 
 pub struct Derive;
@@ -177,12 +180,21 @@ impl Stage for Derive {
                     // the comparison pair functions it could not pair before, so
                     // the measure may rise. It must never fall.
                     if regresses(&report, &tested) {
-                        Err("regresses-existing-code")
+                        Err((
+                            "regresses-existing-code",
+                            Some(Refusal {
+                                kind: RefusalKind::MeasuredRegression,
+                                affected: batch.iter().map(|c| c.name.clone()).collect(),
+                                command: None,
+                            }),
+                        ))
                     } else {
                         Ok(tested)
                     }
                 }
-                Err(error) if is_trial_failure(&error) => Err("name-conflict"),
+                Err(error) if is_trial_failure(&error) => {
+                    Err(("name-conflict", Some(Refusal::from_error(&error))))
+                }
                 Err(error) => return Err(error),
             };
 
@@ -199,14 +211,18 @@ impl Stage for Derive {
                     }
                     report = tested;
                 }
-                Err(status) => {
+                Err((status, refusal)) => {
                     write(&mut owned, &applied)?;
                     if batch.len() > 1 {
                         let middle = batch.len() / 2;
                         queue.push(batch[middle..].to_vec());
                         queue.push(batch[..middle].to_vec());
                     } else {
-                        events.push(Event::new(&batch[0].name, status));
+                        let mut event = Event::new(&batch[0].name, status);
+                        if let Some(refusal) = refusal {
+                            event = event.refused(refusal);
+                        }
+                        events.push(event);
                     }
                 }
             }
