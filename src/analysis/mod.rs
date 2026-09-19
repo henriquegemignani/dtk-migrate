@@ -11,6 +11,7 @@ pub mod coverage;
 pub mod coverage_fixture;
 pub mod data_matching;
 pub mod fingerprint;
+pub mod helpers;
 pub mod mask;
 pub mod matching;
 pub mod ownership;

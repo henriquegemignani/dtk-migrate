@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use crate::analysis::{
     callgraph::NodeIndex,
     fingerprint::normalized_body,
+    helpers::{self, HelperFamily, UnresolvedTargetCluster},
     matching::{
         CONTESTED_MARGIN, Match, MatchMethod, MatchResult, MatchTarget, MatchTier, classify_tier,
     },
@@ -26,7 +27,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 3;
+pub const IDENTIFICATION_SCHEMA: u32 = 4;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -47,6 +48,13 @@ pub struct IdentificationReport {
     pub source_functions: Vec<SourceFunctionObservation>,
     #[serde(default)]
     pub target_functions: Vec<TargetFunctionObservation>,
+    /// Diagnostic exact-body families. These never certify emitted ownership.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub helper_families: Vec<HelperFamily>,
+    /// Target function runs that have no corresponding source TU in this
+    /// baseline. A cluster is not a proposed split or a guessed filename.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_target_clusters: Vec<UnresolvedTargetCluster>,
     pub units: Vec<UnitIdentification>,
 }
 
@@ -59,6 +67,8 @@ impl IdentificationReport {
             attributions: Vec::new(),
             source_functions: Vec::new(),
             target_functions: Vec::new(),
+            helper_families: Vec::new(),
+            unresolved_target_clusters: Vec::new(),
             units: Vec::new(),
         }
     }
@@ -156,6 +166,12 @@ pub struct TargetFunctionObservation {
     /// when empty so that a report without the inventory keeps its digest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub callers: Vec<CallerReference>,
+    /// Exact relocation-masked body digest, only when the function size is
+    /// known. It groups possible helpers but does not establish their owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_body_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub weak: bool,
 }
 
 /// A calling function, named by where it starts.
@@ -173,7 +189,13 @@ pub struct SourceFunctionObservation {
     pub section: String,
     pub address: String,
     pub end: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_body_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub weak: bool,
 }
+
+fn is_false(value: &bool) -> bool { !*value }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -344,6 +366,20 @@ impl ObservationIndex {
         if report.source != source || report.target != target {
             bail!("Identification source/target does not match its enclosing evidence");
         }
+        if report.schema < 4
+            && (!report.helper_families.is_empty()
+                || !report.unresolved_target_clusters.is_empty()
+                || report
+                    .source_functions
+                    .iter()
+                    .any(|item| item.normalized_body_sha256.is_some() || item.weak)
+                || report
+                    .target_functions
+                    .iter()
+                    .any(|item| item.normalized_body_sha256.is_some() || item.weak))
+        {
+            bail!("Identification schema {} cannot carry helper evidence", report.schema);
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -351,6 +387,7 @@ impl ObservationIndex {
         let mut source_locations = BTreeSet::new();
         let mut source_functions = BTreeSet::new();
         for function in &mut report.source_functions {
+            validate_body_digest(function.normalized_body_sha256.as_deref(), &function.name)?;
             let start =
                 parse_address_checked(&function.address, "source function", &function.name)?;
             let end = parse_address_checked(&function.end, "source function", &function.name)?;
@@ -382,6 +419,7 @@ impl ObservationIndex {
         let mut target_functions = BTreeSet::new();
         let mut target_owners = BTreeMap::new();
         for function in &mut report.target_functions {
+            validate_body_digest(function.normalized_body_sha256.as_deref(), &function.name)?;
             let start =
                 parse_address_checked(&function.address, "target function", &function.name)?;
             let end = parse_address_checked(&function.end, "target function", &function.name)?;
@@ -419,7 +457,7 @@ impl ObservationIndex {
             }
         }
         for function in &mut report.target_functions {
-            if report.schema < IDENTIFICATION_SCHEMA && !function.callers.is_empty() {
+            if report.schema < 3 && !function.callers.is_empty() {
                 bail!("Identification schema {} cannot carry a caller inventory", report.schema);
             }
             for caller in &mut function.callers {
@@ -564,6 +602,15 @@ impl ObservationIndex {
             units.push(canonical);
         }
         report.units = units;
+        // Schema 4 aggregates are regenerated from canonical function facts.
+        // Older reports never carried these fields; synthesizing clusters for
+        // them would change their canonical digest and invalidate saved refs.
+        if report.schema >= 4 {
+            report.helper_families =
+                helpers::families(&report.source_functions, &report.target_functions);
+            report.unresolved_target_clusters =
+                helpers::unresolved_clusters(&report.target_functions, &report.attributions);
+        }
 
         let bytes = serde_json::to_vec(&report)?;
         let digest = format!("{:x}", Sha256::digest(bytes));
@@ -1176,6 +1223,16 @@ impl ObservationIndex {
             .unwrap_or(0);
         result
     }
+}
+
+fn validate_body_digest(digest: Option<&str>, name: &str) -> Result<()> {
+    if digest.is_some_and(|value| {
+        value.len() != 64
+            || !value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        bail!("Function {name} has an invalid normalized-body digest");
+    }
+    Ok(())
 }
 
 pub fn load_reference(
@@ -1810,7 +1867,7 @@ pub fn identify_units(
         })
         .collect();
 
-    IdentificationReport {
+    let mut report = IdentificationReport {
         schema: IDENTIFICATION_SCHEMA,
         source: source.name.clone(),
         target: target.name.clone(),
@@ -1826,6 +1883,8 @@ pub fn identify_units(
                     section: source.obj.sections[function.section].name.clone(),
                     address: hex(function.address),
                     end: hex(function.address + function.size),
+                    normalized_body_sha256: helpers::body_digest(&source.obj, function),
+                    weak: source.obj.symbols[function.symbol].flags.is_weak(),
                 })
             })
             .collect(),
@@ -1853,10 +1912,18 @@ pub fn identify_units(
                         }
                     })
                     .collect(),
+                normalized_body_sha256: helpers::body_digest(&target.obj, function),
+                weak: target.obj.symbols[function.symbol].flags.is_weak(),
             })
             .collect(),
+        helper_families: Vec::new(),
+        unresolved_target_clusters: Vec::new(),
         units,
-    }
+    };
+    report.helper_families = helpers::families(&report.source_functions, &report.target_functions);
+    report.unresolved_target_clusters =
+        helpers::unresolved_clusters(&report.target_functions, &report.attributions);
+    report
 }
 
 fn attribution(
@@ -2515,6 +2582,8 @@ mod tests {
                     address: format!("0x{address:08X}"),
                 })
                 .collect(),
+            normalized_body_sha256: None,
+            weak: false,
         });
         let expected = report.source_units.iter().map(|unit| unit.name.clone()).collect();
         (identifications, expected)
@@ -2690,6 +2759,8 @@ mod tests {
                 section: ".text".into(),
                 address: "0x00001140".into(),
             }],
+            normalized_body_sha256: None,
+            weak: false,
         });
         let index = ObservationIndex::load(identifications, "source", "target", &expected).unwrap();
         assert_eq!(
@@ -2767,6 +2838,65 @@ mod tests {
     }
 
     #[test]
+    fn schema_three_keeps_its_caller_inventory_after_helper_schema_bump() {
+        let (mut report, expected) = with_helper(&[0x1200]);
+        report.schema = 3;
+        let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        assert_eq!(index.section_functions("main", ".text").len(), 5);
+        assert!(index.report().helper_families.is_empty());
+    }
+
+    #[test]
+    fn older_schema_does_not_gain_new_clusters_or_change_its_serialized_shape() {
+        let (mut report, expected) = with_helper(&[]);
+        for function in &mut report.target_functions {
+            function.current_owner = match function.address.as_str() {
+                "0x00001000" | "0x00001100" | "0x00001200" => Some("A.cpp".into()),
+                "0x00001340" => Some("B.cpp".into()),
+                _ => None,
+            };
+        }
+        report.target_functions.last_mut().unwrap().end = "0x00001320".into();
+        report.target_functions.push(TargetFunctionObservation {
+            name: "fn_1320".into(),
+            module: "main".into(),
+            section: ".text".into(),
+            address: "0x00001320".into(),
+            end: "0x00001340".into(),
+            current_owner: None,
+            owner_autogenerated: false,
+            callers: Vec::new(),
+            normalized_body_sha256: None,
+            weak: false,
+        });
+        let current =
+            ObservationIndex::load(report.clone(), "source", "target", &expected).unwrap();
+        assert_eq!(current.report().unresolved_target_clusters.len(), 1);
+        report.schema = 3;
+        let historical = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        assert!(historical.report().unresolved_target_clusters.is_empty());
+        let serialized = serde_json::to_value(historical.report()).unwrap();
+        assert!(serialized.get("unresolved_target_clusters").is_none());
+    }
+
+    #[test]
+    fn helper_summaries_are_rederived_and_do_not_authorize_ownership() {
+        let (mut report, expected) = with_helper(&[0x1200]);
+        let hash = "a".repeat(64);
+        report.source_functions[0].normalized_body_sha256 = Some(hash.clone());
+        report.target_functions[0].normalized_body_sha256 = Some(hash);
+        report.target_functions[0].name = "__dt__12CInstructionFv".into();
+        let first = ObservationIndex::load(report.clone(), "source", "target", &expected).unwrap();
+        assert_eq!(first.report().helper_families.len(), 1);
+        report.helper_families = first.report().helper_families.clone();
+        report.helper_families[0].id = "invented-owner".into();
+        let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        assert_ne!(index.report().helper_families[0].id, "invented-owner");
+        let assessment = assess_claim(&index, (0x1000, 0x1300), (0x1000, 0x1340));
+        assert_eq!(assessment.new_caller_confined_helpers, 1);
+    }
+
+    #[test]
     fn a_kept_report_is_referenced_by_its_own_schema() {
         let (mut report, expected) = with_helper(&[]);
         report.schema = 2;
@@ -2779,7 +2909,7 @@ mod tests {
         // The same artifact advertised as the current schema is refused.
         reference.schema = IDENTIFICATION_SCHEMA;
         let error = load_reference(&reference, "source", "target").unwrap_err();
-        assert!(error.to_string().contains("reference states 3"), "{error}");
+        assert!(error.to_string().contains("reference states 4"), "{error}");
     }
 
     #[test]
