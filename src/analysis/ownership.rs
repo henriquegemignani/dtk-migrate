@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 8;
+pub const IDENTIFICATION_SCHEMA: u32 = 9;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -409,6 +409,21 @@ impl ObservationIndex {
                 "Identification schema {} cannot carry target relocation evidence",
                 report.schema
             );
+        }
+        if report.schema < 9
+            && report.object_evidence.as_ref().is_some_and(|evidence| {
+                evidence.build_graph_sha256.is_some()
+                    || evidence.target_image_sha256.is_some()
+                    || evidence.objects.iter().any(|record| {
+                        record.compiler.is_some()
+                            || record.c_flags.is_some()
+                            || record.c_flags_sha256.is_some()
+                            || record.build_freshness
+                                != crate::analysis::object_evidence::BuildFreshness::Unavailable
+                    })
+            })
+        {
+            bail!("Identification schema {} cannot carry build provenance", report.schema);
         }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
@@ -3042,11 +3057,17 @@ mod tests {
         report.object_evidence = Some(ObjectEvidence {
             status: ScanStatus::Scanned,
             objdiff_sha256: Some("d".repeat(64)),
+            build_graph_sha256: None,
+            target_image_sha256: None,
             objects: vec![ObjectRecord {
                 unit: "A.cpp".into(),
                 base_path: "build/PAL/src/A.o".into(),
                 status: ObjectStatus::Available,
                 sha256: Some(object_hash.clone()),
+                compiler: None,
+                c_flags: None,
+                c_flags_sha256: None,
+                build_freshness: crate::analysis::object_evidence::BuildFreshness::Unavailable,
                 functions: vec![
                     compiled("a2", "0x00000000", "0x00000100", anchor_hash),
                     compiled("helper", "0x00000100", "0x00000140", helper_hash.clone()),

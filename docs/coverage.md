@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 14, evidence schema 11, identification schema 8. Every threshold
+Policy version 14, evidence schema 11, identification schema 9. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -102,6 +102,17 @@ evidence when every occurrence has it. Name agreement is weaker than body or
 independent attribution. Correlation is regenerated on report load and does
 not decide which object supplied the retail function. Schema-7 reports retain
 their earlier meaning and have no target relocation inventory.
+
+Schema 9 records each object's configured compiler and flags from
+`objdiff.json`, the flags digest, the current `build.ninja` digest, and a
+read-only `ninja -n` freshness result. A clean result says that Ninja had no
+pending work for that compiled object at scan time. It does not certify the
+source commit that produced it or prove linker selection. The analyzed target
+section-byte digest is recorded separately. An in-process, one-entry cache for
+derived relocation relations is keyed by object inventory, target image,
+ownership facts and policy version; a changed split or attribution cannot
+reuse a stale relation. Older schema-8 reports load without invented build
+provenance.
 
 Identification, boundary certainty and application are independent. A TU may be
 corroborated while an edge remains unresolved, or may have a complete observed

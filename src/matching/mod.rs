@@ -133,6 +133,9 @@ pub fn run(request: &Request) -> Result<()> {
             .filter_map(|item| item.normalized_body_sha256.clone())
             .collect();
         let mut evidence = object_evidence::inspect(root, version, &units, &target_hashes);
+        if evidence.status == object_evidence::ScanStatus::Scanned {
+            evidence.target_image_sha256 = Some(object_evidence::target_image_digest(&target));
+        }
         let validated = evidence.canonicalize(&units, &target_hashes, true).and_then(|()| {
             evidence.target_references = object_evidence::capture_target_references(
                 &target,

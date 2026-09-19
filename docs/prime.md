@@ -8,12 +8,12 @@ investigation used only to improve the automated process.
 
 This checkout expects the game project and a decomp-toolkit checkout beside it:
 
-- Tool: `C:/Users/henri/programming/decomp/dtk-version-matching`
-- Game project: `C:/Users/henri/programming/decomp/prime`
-- decomp-toolkit: `C:/Users/henri/programming/decomp-toolkit`
+- Tool: `F:/programming/decomp/dtk-version-matching`
+- Game project: `F:/programming/decomp/prime`
+- decomp-toolkit: `F:/programming/decomp-toolkit`
 
-decomp-toolkit is **not** a sibling under `decomp/` here, which the
-`.cargo/config.toml` path override has to account for. Adjust these elsewhere.
+Run migrations, historical checkouts and object experiments on the F drive.
+The `.cargo/config.toml` path override must point to the F-drive toolkit.
 
 ## Migrating
 

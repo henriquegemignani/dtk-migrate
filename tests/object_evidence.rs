@@ -1,13 +1,13 @@
 //! Opt-in smoke test for compiled-source corroboration against a real project.
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{collections::BTreeSet, path::PathBuf, time::Instant};
 
 use dtk_migrate::{
     analysis::{
         matching::MatchTarget,
         object_evidence::{
-            ObjectStatus, ScanStatus, capture_target_references, inspect, order_matches,
-            relocation_matches,
+            BuildFreshness, ObjectStatus, ScanStatus, capture_target_references, inspect,
+            order_matches, relocation_matches, target_image_digest,
         },
         ownership::{IDENTIFICATION_SCHEMA, IdentificationReport, ObservationIndex},
     },
@@ -126,13 +126,19 @@ fn frozen_sparse_objects_correlate_references_without_assigning_an_owner() {
         .collect();
     let mut evidence = inspect(&root, "GM8P01_00", &units, &hashes);
     evidence.canonicalize(&units, &hashes, true).unwrap();
+    assert!(evidence.build_graph_sha256.is_some());
     for record in expected {
         let scanned = evidence.objects.iter().find(|item| item.unit == record.unit).unwrap();
         assert_eq!(scanned.sha256, record.sha256);
+        assert_eq!(scanned.build_freshness, BuildFreshness::Clean);
+        assert!(scanned.compiler.is_some());
+        assert!(scanned.c_flags.is_some());
+        assert!(scanned.c_flags_sha256.is_some());
     }
     let config = Utf8NativePath::new(config_path.to_str().unwrap());
     let (_, obj) = load_analyzed(config, None, "--target-root").unwrap();
     let target = MatchTarget::new(config.to_string(), obj);
+    evidence.target_image_sha256 = Some(target_image_digest(&target));
     evidence.target_references =
         capture_target_references(&target, &report.target_functions, &evidence.definitions);
     evidence.canonicalize_target_references(&report.target_functions).unwrap();
@@ -173,11 +179,12 @@ fn frozen_sparse_objects_correlate_references_without_assigning_an_owner() {
 
 #[test]
 fn a_full_object_inventory_remains_canonical_and_binary_only_fallback_exists() {
-    let (Some(root), Some(report_path)) = (
+    let (Some(root), Some(report_path), Some(config_path)) = (
         std::env::var_os("DTK_MIGRATE_FULL_OBJECT_ROOT").map(PathBuf::from),
         std::env::var_os("DTK_MIGRATE_HELPER_REPORT").map(PathBuf::from),
+        std::env::var_os("DTK_MIGRATE_TARGET_CONFIG").map(PathBuf::from),
     ) else {
-        eprintln!("skipped: set DTK_MIGRATE_FULL_OBJECT_ROOT and DTK_MIGRATE_HELPER_REPORT");
+        eprintln!("skipped: set full object root, helper report and target config");
         return;
     };
     let mut report: IdentificationReport =
@@ -195,6 +202,11 @@ fn a_full_object_inventory_remains_canonical_and_binary_only_fallback_exists() {
     evidence.canonicalize(&units, &hashes, true).unwrap();
     let available =
         evidence.objects.iter().filter(|record| record.status == ObjectStatus::Available).count();
+    let clean = evidence
+        .objects
+        .iter()
+        .filter(|record| record.build_freshness == BuildFreshness::Clean)
+        .count();
     let functions: usize = evidence.objects.iter().map(|record| record.functions.len()).sum();
     let matches = order_matches(&evidence, &report.target_functions, &report.attributions);
     let independent = matches
@@ -205,7 +217,7 @@ fn a_full_object_inventory_remains_canonical_and_binary_only_fallback_exists() {
         })
         .count();
     eprintln!(
-        "available={available} functions={functions} definitions={} order_matches={} independent={} bytes={}",
+        "available={available} ninja_clean={clean} functions={functions} definitions={} order_matches={} independent={} bytes={}",
         evidence.definitions.len(),
         matches.len(),
         independent,
@@ -214,26 +226,27 @@ fn a_full_object_inventory_remains_canonical_and_binary_only_fallback_exists() {
     assert!(available > 100);
     assert!(functions > available);
     evidence.order_matches = matches;
-    report.schema = if let Some(config_path) =
-        std::env::var_os("DTK_MIGRATE_TARGET_CONFIG").map(PathBuf::from)
-    {
-        let config = Utf8NativePath::new(config_path.to_str().unwrap());
-        let (_, obj) = load_analyzed(config, None, "--target-root").unwrap();
-        let target = MatchTarget::new(config.to_string(), obj);
-        evidence.target_references =
-            capture_target_references(&target, &report.target_functions, &evidence.definitions);
-        evidence.canonicalize_target_references(&report.target_functions).unwrap();
-        evidence.relocation_matches =
-            relocation_matches(&evidence, &report.target_functions, &report.attributions);
-        eprintln!(
-            "target reference functions={} discriminating relocation matches={}",
-            evidence.target_references.len(),
-            evidence.relocation_matches.len(),
-        );
-        IDENTIFICATION_SCHEMA
-    } else {
-        7
-    };
+    let config = Utf8NativePath::new(config_path.to_str().unwrap());
+    let (_, obj) = load_analyzed(config, None, "--target-root").unwrap();
+    let target = MatchTarget::new(config.to_string(), obj);
+    evidence.target_image_sha256 = Some(target_image_digest(&target));
+    evidence.target_references =
+        capture_target_references(&target, &report.target_functions, &evidence.definitions);
+    evidence.canonicalize_target_references(&report.target_functions).unwrap();
+    let first_correlation = Instant::now();
+    evidence.relocation_matches =
+        relocation_matches(&evidence, &report.target_functions, &report.attributions);
+    let first_elapsed = first_correlation.elapsed();
+    let cached_correlation = Instant::now();
+    let cached = relocation_matches(&evidence, &report.target_functions, &report.attributions);
+    let cached_elapsed = cached_correlation.elapsed();
+    assert_eq!(cached, evidence.relocation_matches);
+    eprintln!(
+        "target reference functions={} discriminating relocation matches={} first={first_elapsed:?} cached={cached_elapsed:?}",
+        evidence.target_references.len(),
+        evidence.relocation_matches.len(),
+    );
+    report.schema = IDENTIFICATION_SCHEMA;
     binary_only_report.schema = report.schema;
     report.object_evidence = Some(evidence);
     let source = report.source.clone();

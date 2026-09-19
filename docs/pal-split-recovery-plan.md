@@ -139,11 +139,37 @@ The other name-only relations include shared destructors and a string helper;
 they are weak evidence. None
 settles which object emitted the target function. A full-object stress run
 using the current F-drive Prime checkout retained 12,619 target reference
-inventories and derived 23,665 discriminating relation records, then
+inventories and derived 24,712 discriminating relation records, then
 round-tripped through schema 8. Beyond the four byte-frozen objects, that
 checkout can contain later source work, so these are capacity figures rather
-than historical recall. Build freshness, caching and emitted-owner inference
-remain open.
+than historical recall. Emitted-owner inference remains open.
+
+### Compiled build provenance and bounded cache (schema 9)
+
+Each object record now carries the configured compiler, complete flags and
+their SHA-256 digest from `objdiff.json`. The evidence also records the
+`build.ninja` digest and a digest over the analyzed target section bytes and
+addresses. A read-only Ninja dry run checks whether the graph has pending work
+for every available compiled object. It batches clean targets and checks dirty
+batches individually, so a single stale object cannot label its neighbours
+stale. The object and `objdiff.json` are rechecked after the scan; a concurrent
+rebuild or reconfiguration invalidates the affected observations. The schema
+calls this `clean` or `dirty` only relative to the
+current Ninja graph; it does not infer the source revision or linker emission.
+
+The four byte-frozen objects and all 809 available objects in the current
+F-drive stress checkout were Ninja-clean. A one-entry in-process cache reuses
+relocation relations only when object inventory, target image digest, source
+and target function facts, attributions and policy version agree. The full
+stress case took about 5.1 seconds for first derivation and 3.7 seconds for a
+cache hit. This cache is a speed aid, not a new evidence tier.
+
+No rule yet maps these relations to an emitted owner. The frozen cases still
+have viable shared-definition explanations, and the name-only relations are
+especially weak. Enabling an ownership transfer from them would violate the
+plan's no-guessing constraint. The next inference test must present a case
+where the linked copy is uniquely placed by independent target order or
+relocations and a competing compiled definition is ruled out.
 
 ## Implementation checkpoint after Change F (joint runs)
 
