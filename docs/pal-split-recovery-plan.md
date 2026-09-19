@@ -944,9 +944,14 @@ withhold that proposal. The splits helpers treat repeated code ranges as
 fragmented while retaining ordinary plus common BSS ranges. Source-version
 section size no longer grows an unowned tail: `musyx/runtime/synth.c` requires
 a symbol or relocation witness for its last four bytes. These changes correct
-data proposal shape but discovery does not yet carry per-range
-symbol/relocation membership proof,
-combine code and data transactions, or change reservations and certificates.
+data proposal shape. The matcher currently omits `common` attributes from its
+split proposals, so discovery withholds a separate BSS addition when that
+proposal cannot distinguish common from ordinary BSS, regardless of the source
+version's BSS layout. An existing ordinary BSS range can still be widened using
+its recorded attributes. Discovery still needs per-range symbol/relocation
+membership proof and target-side common/alignment evidence before it can
+complete new BSS. It does not yet combine code and data transactions or change
+reservations and certificates.
 
 ## 8. Make refusals diagnostic and retries state-aware
 

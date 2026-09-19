@@ -274,6 +274,25 @@ pub fn data_proposals(
                 continue;
             }
             let proposed_attributes = parse_attributes(line);
+            // The matcher currently writes no `common` attribute at all. A
+            // newly proposed BSS interval may be ordinary or common, and the
+            // source version does not establish the target's linker treatment.
+            // An overlap with an existing ordinary range identifies an
+            // extension of that known range; otherwise wait for target-side
+            // attribute evidence.
+            let existing_overlap = new_body.iter().any(|current_line| {
+                parse_range(current_line).is_some_and(|current| {
+                    current.section == range.section
+                        && range.start < current.end
+                        && current.start < range.end
+                })
+            });
+            if range.section == ".bss"
+                && !existing_overlap
+                && !proposed_attributes.contains("common")
+            {
+                continue;
+            }
             let mut overlapping = Vec::new();
             let mut conflict = false;
             for (index, current_line) in new_body.iter().enumerate() {
@@ -895,23 +914,43 @@ mod tests {
 
     #[test]
     fn a_broad_proposal_does_not_collapse_two_existing_bss_ranges() {
-        let proposals = blocks(&[("stream.cpp", &[&bss(0x1000, 0x2050)])]);
+        let common = |start, end| format!("{} align:4 common", bss(start, end));
+        let proposals = blocks(&[("stream.cpp", &[&common(0x1000, 0x2050)])]);
         let existing = blocks(&[("stream.cpp", &[
             &text(0x100, 0x200),
-            &bss(0x1000, 0x1100),
-            &bss(0x2000, 0x2050),
+            &common(0x1000, 0x1100),
+            &common(0x2000, 0x2050),
         ])]);
         assert!(data_proposals(&proposals, &existing, &IndexMap::new()).is_empty());
     }
 
     #[test]
     fn adjacent_data_allocations_stay_separate_even_with_matching_attributes() {
-        let first = bss(0x1000, 0x1100);
-        let second = bss(0x1100, 0x1150);
+        let first = data(0x1000, 0x1100);
+        let second = data(0x1100, 0x1150);
         let proposals = blocks(&[("stream.cpp", &[&second])]);
         let existing = blocks(&[("stream.cpp", &[&text(0x100, 0x200), &first])]);
         let result = data_proposals(&proposals, &existing, &IndexMap::new());
         assert_eq!(result[0].1, vec![text(0x100, 0x200), first, second]);
+    }
+
+    #[test]
+    fn an_unannotated_new_bss_range_is_withheld() {
+        let ordinary = bss(0x1000, 0x1100);
+        let common = format!("{} align:4 common", bss(0x2000, 0x2050));
+        // The current matcher writes both proposals without attributes, so
+        // the second interval cannot be distinguished from ordinary BSS here.
+        let proposals = blocks(&[("stream.cpp", &[&ordinary, &bss(0x2000, 0x2050)])]);
+        let existing = blocks(&[("stream.cpp", &[&text(0x100, 0x200), &ordinary])]);
+        let source = blocks(&[("stream.cpp", &[&ordinary, &common])]);
+        assert!(data_proposals(&proposals, &existing, &source).is_empty());
+    }
+
+    #[test]
+    fn an_unannotated_new_bss_range_is_withheld_even_without_common_source_bss() {
+        let proposals = blocks(&[("stream.cpp", &[&bss(0x1000, 0x1100)])]);
+        let existing = blocks(&[("stream.cpp", &[&text(0x100, 0x200)])]);
+        assert!(data_proposals(&proposals, &existing, &IndexMap::new()).is_empty());
     }
 
     #[test]
