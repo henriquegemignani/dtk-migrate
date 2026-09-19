@@ -6,7 +6,10 @@
 
 use std::path::PathBuf;
 
-use dtk_migrate::analysis::ownership::{IdentificationReport, ObservationIndex};
+use dtk_migrate::analysis::{
+    helpers::HelperSignal,
+    ownership::{IdentificationReport, ObservationIndex},
+};
 
 #[test]
 fn historical_orphan_and_widget_helper_survive_canonical_loading() {
@@ -19,6 +22,8 @@ fn historical_orphan_and_widget_helper_survive_canonical_loading() {
     let source = report.source.clone();
     let target = report.target.clone();
     let index = ObservationIndex::load_self_contained(report, &source, &target).unwrap();
+    assert_eq!(index.report().helper_families.len(), 1_315);
+    assert_eq!(index.report().unresolved_target_clusters.len(), 23);
     let orphan = index
         .report()
         .unresolved_target_clusters
@@ -34,4 +39,14 @@ fn historical_orphan_and_widget_helper_survive_canonical_loading() {
         });
     let widget = widget.expect("HeadWidget's small type-ID function must retain body evidence");
     assert!(widget.source_definitions.iter().any(|item| item.unit == "GuiSys/CGuiHeadWidget.cpp"));
+    let initializer = index
+        .report()
+        .helper_families
+        .iter()
+        .find(|family| family.target_occurrences.iter().any(|item| item.address == "0x80145158"))
+        .expect("the opaque PAL occurrence must retain its source initializer name");
+    assert!(initializer.signals.contains(&HelperSignal::StaticInitializerName));
+    assert!(
+        initializer.source_definitions.iter().any(|item| item.name == "__sinit_CPowerBomb_cpp")
+    );
 }

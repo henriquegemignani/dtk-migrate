@@ -27,7 +27,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 4;
+pub const IDENTIFICATION_SCHEMA: u32 = 5;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -602,12 +602,15 @@ impl ObservationIndex {
             units.push(canonical);
         }
         report.units = units;
-        // Schema 4 aggregates are regenerated from canonical function facts.
+        // Schema 4+ aggregates are regenerated from canonical function facts.
         // Older reports never carried these fields; synthesizing clusters for
         // them would change their canonical digest and invalidate saved refs.
         if report.schema >= 4 {
-            report.helper_families =
-                helpers::families(&report.source_functions, &report.target_functions);
+            report.helper_families = if report.schema == 4 {
+                helpers::families_schema_4(&report.source_functions, &report.target_functions)
+            } else {
+                helpers::families(&report.source_functions, &report.target_functions)
+            };
             report.unresolved_target_clusters =
                 helpers::unresolved_clusters(&report.target_functions, &report.attributions);
         }
@@ -2897,6 +2900,26 @@ mod tests {
     }
 
     #[test]
+    fn schema_four_keeps_its_target_only_generated_name_classifier() {
+        let (mut report, expected) = with_helper(&[]);
+        let hash = "b".repeat(64);
+        report.source_functions[0].name = "__sinit_CPowerBomb_cpp".into();
+        report.source_functions[0].normalized_body_sha256 = Some(hash.clone());
+        report.target_functions[0].name = "fn_80145158".into();
+        report.target_functions[0].normalized_body_sha256 = Some(hash);
+        report.schema = 4;
+        let previous =
+            ObservationIndex::load(report.clone(), "source", "target", &expected).unwrap();
+        assert!(previous.report().helper_families.is_empty());
+        report.schema = IDENTIFICATION_SCHEMA;
+        let current = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        assert_eq!(current.report().helper_families.len(), 1);
+        assert_eq!(current.report().helper_families[0].signals, vec![
+            helpers::HelperSignal::StaticInitializerName
+        ]);
+    }
+
+    #[test]
     fn a_kept_report_is_referenced_by_its_own_schema() {
         let (mut report, expected) = with_helper(&[]);
         report.schema = 2;
@@ -2909,7 +2932,7 @@ mod tests {
         // The same artifact advertised as the current schema is refused.
         reference.schema = IDENTIFICATION_SCHEMA;
         let error = load_reference(&reference, "source", "target").unwrap_err();
-        assert!(error.to_string().contains("reference states 4"), "{error}");
+        assert!(error.to_string().contains("reference states 5"), "{error}");
     }
 
     #[test]

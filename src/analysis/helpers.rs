@@ -109,6 +109,24 @@ pub fn families(
     source: &[SourceFunctionObservation],
     target: &[TargetFunctionObservation],
 ) -> Vec<HelperFamily> {
+    families_with_name_scope(source, target, true)
+}
+
+/// Preserve schema 4's target-name-only classifier when loading its saved
+/// references. Schema 5 also recognizes source names when target names were
+/// stripped, and therefore has a different canonical digest.
+pub fn families_schema_4(
+    source: &[SourceFunctionObservation],
+    target: &[TargetFunctionObservation],
+) -> Vec<HelperFamily> {
+    families_with_name_scope(source, target, false)
+}
+
+fn families_with_name_scope(
+    source: &[SourceFunctionObservation],
+    target: &[TargetFunctionObservation],
+    source_generated_names: bool,
+) -> Vec<HelperFamily> {
     let mut groups: BTreeMap<&str, (Vec<SourceDefinition>, Vec<TargetOccurrence>)> =
         BTreeMap::new();
     for function in source {
@@ -171,15 +189,22 @@ pub fn families(
             {
                 signals.push(HelperSignal::WeakDefinition);
             }
-            if target_occurrences
-                .iter()
-                .any(|item| item.name.starts_with("__sinit_") || item.name.starts_with("__sti__"))
+            if (source_generated_names
+                && source_definitions.iter().any(|item| {
+                    item.name.starts_with("__sinit_") || item.name.starts_with("__sti__")
+                }))
+                || target_occurrences.iter().any(|item| {
+                    item.name.starts_with("__sinit_") || item.name.starts_with("__sti__")
+                })
             {
                 signals.push(HelperSignal::StaticInitializerName);
             }
             // A destructor-shaped symbol may denote explicit source or a
             // compiler-emitted tail. The signal deliberately makes no choice.
-            if target_occurrences.iter().any(|item| item.name.starts_with("__dt__")) {
+            if (source_generated_names
+                && source_definitions.iter().any(|item| item.name.starts_with("__dt__")))
+                || target_occurrences.iter().any(|item| item.name.starts_with("__dt__"))
+            {
                 signals.push(HelperSignal::DestructorShapedName);
             }
             (!signals.is_empty()).then(|| HelperFamily {
@@ -405,5 +430,24 @@ mod tests {
             families(&[], &[target("__dt__12CInstructionFv", "0x00001000", None, Some(&hash))]);
         assert_eq!(families[0].signals, vec![HelperSignal::DestructorShapedName]);
         assert!(families[0].source_definitions.is_empty());
+    }
+
+    #[test]
+    fn a_source_generated_name_survives_an_opaque_target_symbol() {
+        let hash = "d".repeat(64);
+        let initializer_families = families(
+            &[source("CPowerBomb.cpp", "__sinit_CPowerBomb_cpp", "0x00001000", &hash)],
+            &[target("fn_80145158", "0x80145158", None, Some(&hash))],
+        );
+        assert_eq!(initializer_families.len(), 1);
+        assert!(initializer_families[0].signals.contains(&HelperSignal::StaticInitializerName));
+
+        let destructor_hash = "e".repeat(64);
+        let destructor_families = families(
+            &[source("CInstruction.cpp", "__dt__12CInstructionFv", "0x00002000", &destructor_hash)],
+            &[target("fn_80202000", "0x80202000", None, Some(&destructor_hash))],
+        );
+        assert_eq!(destructor_families.len(), 1);
+        assert!(destructor_families[0].signals.contains(&HelperSignal::DestructorShapedName));
     }
 }
