@@ -169,3 +169,7 @@ own. Names are resolved across the whole pipeline: a unit an earlier stage
 already changed is satisfied in later stages, and a unit only a later stage
 proposes is not an error in an earlier one. A name no stage proposed, and no
 requested candidate's change writes, stops the run before publication.
+Derived renames are scoped as symbols, so an old symbol spelled `A.cpp` cannot
+reserve the unit `A.cpp`. With `--only A.cpp`, derive selects renames whose
+compiled-object evidence names that unit, regardless of the old symbol's
+spelling; a same-spelling symbol in another unit does not satisfy the request.

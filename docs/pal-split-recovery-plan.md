@@ -953,6 +953,15 @@ membership proof and target-side common/alignment evidence before it can
 complete new BSS. It does not yet combine code and data transactions or change
 reservations and certificates.
 
+### H scope checkpoint: symbol names and unit names
+
+The coordinator now reserves typed symbol or unit scopes. Derive candidates
+carry their source unit in the rename evidence: a symbol named like a TU no
+longer reserves that TU, while `--only UNIT` still selects renames grounded in
+the requested unit. Transaction neighbours remain unit-scoped. This removes
+the cross-namespace collision but does not yet permit compatible code and data
+edits on one unit or replace stage-wide reservations with certificates.
+
 ## 8. Make refusals diagnostic and retries state-aware
 
 **Files:** `src/build/process.rs`, `src/build/context.rs`, `src/stages/mod.rs`, `src/stages/coverage/mod.rs`, `src/stages/discover.rs`, `src/stages/verify.rs`, `src/run/mod.rs`, `src/run/jobs.rs`.

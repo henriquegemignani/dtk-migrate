@@ -38,12 +38,18 @@ pub mod verify;
 /// re-check the same range rather than a differently-derived one.
 pub type Selections = BTreeMap<String, String>;
 
+/// A mutation's namespace. A derived symbol name can spell exactly the same
+/// string as a translation unit without reserving that unit's later work.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MutationScope {
+    Unit(String),
+    Symbol(String),
+}
+
 /// One thing a stage wants to try, and whatever evidence it carries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Candidate {
-    /// The unit this is about. Candidates are addressed by unit name across the
-    /// whole pipeline, which is how a later stage knows to leave alone what an
-    /// earlier one already published.
+    /// Stage-specific name: a symbol for derive, a unit for the other stages.
     pub name: String,
     /// Stage-specific evidence, carried from `prepare` to `evaluate` and into
     /// the run's record.
@@ -209,6 +215,12 @@ pub type Tried = BTreeMap<String, BTreeSet<String>>;
 pub trait Stage {
     fn name(&self) -> &'static str;
 
+    /// The namespace this candidate mutates. A symbol rename must not reserve
+    /// a translation unit that happens to have the same spelling.
+    fn scope(&self, candidate: &Candidate) -> MutationScope {
+        MutationScope::Unit(candidate.name.clone())
+    }
+
     /// Builds the baseline and works out what is worth trying.
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared>;
 
@@ -232,9 +244,9 @@ pub trait Stage {
         Ok(Vec::new())
     }
 
-    /// Every unit accepting this candidate could write, under any of its
-    /// alternatives. A focused run must permit all of them for the change to
-    /// be made whole.
+    /// Units this candidate can change, or whose identity a symbol rename
+    /// establishes. A focused run uses these to select symbol prerequisites
+    /// and to permit every unit a transaction writes.
     fn writes(&self, candidate: &Candidate) -> Result<BTreeSet<String>> {
         Ok(BTreeSet::from([candidate.name.clone()]))
     }

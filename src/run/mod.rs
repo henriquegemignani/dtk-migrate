@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     build::{context::BuildContext, process::Cancel},
     stages::{
-        Candidate, Event, Selections, Stage, coverage::Coverage, derive::Derive,
+        Candidate, Event, MutationScope, Selections, Stage, coverage::Coverage, derive::Derive,
         discover::Discover, verify::Verify,
     },
     workspace::{Manifest, Snapshot, fingerprint},
@@ -199,13 +199,18 @@ pub struct StageResult {
 }
 
 impl StageResult {
-    /// Every unit this stage changed: its accepted candidates, and every
-    /// neighbour a transaction wrote alongside them.
-    pub fn changed_units(&self) -> impl Iterator<Item = &str> {
+    /// Every name this stage changed, in its own namespace. Transaction
+    /// neighbours are units even when the candidate has another scope.
+    pub fn changed_scopes(&self, stage: &dyn Stage) -> BTreeSet<MutationScope> {
         self.accepted
             .iter()
-            .map(|candidate| candidate.name.as_str())
-            .chain(self.applied.iter().flat_map(|entry| entry.units.iter().map(String::as_str)))
+            .map(|candidate| stage.scope(candidate))
+            .chain(
+                self.applied
+                    .iter()
+                    .flat_map(|entry| entry.units.iter().cloned().map(MutationScope::Unit)),
+            )
+            .collect()
     }
 }
 
@@ -278,7 +283,7 @@ pub fn check_environment(run: &RunRecord) -> Result<()> {
 /// Runs one stage end to end and leaves an integrated workspace behind.
 ///
 /// Returns the integrated workspace and what the stage concluded. `reserved`
-/// names belong to an earlier stage and are withheld: a unit an earlier stage
+/// scopes belong to an earlier stage and are withheld: a unit an earlier stage
 /// certified is that stage's for the rest of the run, because a later stage
 /// extending it would invalidate the certificate and cost the whole run its
 /// publication.
@@ -287,7 +292,7 @@ pub fn run_stage(
     run: &RunRecord,
     stage_name: &str,
     source_root: &Path,
-    reserved: &BTreeSet<String>,
+    reserved: &BTreeSet<MutationScope>,
     cancel: Option<Cancel>,
 ) -> Result<(PathBuf, StageResult)> {
     let started = Instant::now();
@@ -327,10 +332,10 @@ pub fn run_stage(
         let reserved_here: Vec<String> = prepared
             .candidates
             .iter()
-            .map(|c| c.name.clone())
-            .filter(|name| reserved.contains(name))
+            .filter(|candidate| is_reserved(stage.as_ref(), candidate, reserved))
+            .map(|candidate| candidate.name.clone())
             .collect();
-        prepared.candidates.retain(|c| !reserved.contains(&c.name));
+        prepared.candidates.retain(|candidate| !is_reserved(stage.as_ref(), candidate, reserved));
 
         let mut excluded: Vec<String> = Vec::new();
         let mut resolved: Vec<String> = Vec::new();
@@ -351,7 +356,13 @@ pub fn run_stage(
         // Carried into evaluation, where a stage may find work preparation could
         // not see and still has to respect what this run rules out.
         prepared.permitted = crate::stages::Permitted {
-            reserved: reserved.iter().cloned().collect(),
+            reserved: reserved
+                .iter()
+                .filter_map(|scope| match scope {
+                    MutationScope::Unit(name) => Some(name.clone()),
+                    MutationScope::Symbol(_) => None,
+                })
+                .collect(),
             only: run.only.iter().cloned().collect(),
         };
 
@@ -548,6 +559,14 @@ pub fn run_stage(
     Ok((integrated, result))
 }
 
+fn is_reserved(
+    stage: &dyn Stage,
+    candidate: &Candidate,
+    reserved: &BTreeSet<MutationScope>,
+) -> bool {
+    reserved.contains(&stage.scope(candidate))
+}
+
 /// What `--only` means for one stage.
 struct Focus {
     /// Requested candidates this stage proposed, to be evaluated.
@@ -571,21 +590,39 @@ fn focus(
     stage: &dyn Stage,
     candidates: &[Candidate],
     only: &[String],
-    reserved: &BTreeSet<String>,
+    reserved: &BTreeSet<MutationScope>,
 ) -> Result<Focus> {
     let requested: BTreeSet<&str> = only.iter().map(String::as_str).collect();
-    let roots: Vec<Candidate> =
-        candidates.iter().filter(|c| requested.contains(c.name.as_str())).cloned().collect();
-    let mut involved: BTreeSet<String> = reserved.clone();
+    let mut roots = Vec::new();
+    for candidate in candidates {
+        let selected = match stage.scope(candidate) {
+            MutationScope::Unit(name) => requested.contains(name.as_str()),
+            MutationScope::Symbol(_) => {
+                stage.writes(candidate)?.iter().any(|unit| requested.contains(unit.as_str()))
+            }
+        };
+        if selected {
+            roots.push(candidate.clone());
+        }
+    }
+    let mut involved: BTreeSet<String> = reserved
+        .iter()
+        .filter_map(|scope| match scope {
+            MutationScope::Unit(name) => Some(name.clone()),
+            MutationScope::Symbol(_) => None,
+        })
+        .collect();
     for root in &roots {
-        involved.insert(root.name.clone());
+        if let MutationScope::Unit(name) = stage.scope(root) {
+            involved.insert(name);
+        }
         involved.extend(stage.writes(root)?);
     }
     let resolved =
         requested.iter().filter(|name| involved.contains(**name)).map(|n| n.to_string()).collect();
     let skipped: BTreeSet<String> = candidates
         .iter()
-        .filter(|c| !requested.contains(c.name.as_str()))
+        .filter(|candidate| !roots.iter().any(|root| root.name == candidate.name))
         .map(|c| c.name.clone())
         .collect();
     Ok(Focus { roots, skipped: skipped.into_iter().collect(), resolved })
@@ -686,7 +723,7 @@ mod tests {
 
     fn only(names: &[&str]) -> Vec<String> { names.iter().map(|n| n.to_string()).collect() }
 
-    fn none() -> BTreeSet<String> { BTreeSet::new() }
+    fn none() -> BTreeSet<MutationScope> { BTreeSet::new() }
 
     #[test]
     fn a_required_neighbour_may_be_permitted_without_being_a_candidate() {
@@ -709,7 +746,10 @@ mod tests {
     fn a_later_stage_accepts_names_an_earlier_stage_already_changed() {
         // Coverage changed A.cpp and B.cpp and reserved them; discovery has no
         // candidate for either and must not treat the request as a mistake.
-        let reserved = BTreeSet::from(["A.cpp".to_string(), "B.cpp".to_string()]);
+        let reserved = BTreeSet::from([
+            MutationScope::Unit("A.cpp".into()),
+            MutationScope::Unit("B.cpp".into()),
+        ]);
         let focused = focus(&stage(), &[], &only(&["A.cpp", "B.cpp"]), &reserved).unwrap();
         assert!(focused.roots.is_empty());
         assert_eq!(focused.resolved.len(), 2);
@@ -724,7 +764,10 @@ mod tests {
             &Writes(BTreeMap::from([("D.cpp", &["D.cpp"][..])])),
             &[Candidate::new("D.cpp")],
             &only(&["A.cpp", "D.cpp"]),
-            &BTreeSet::from(["A.cpp".to_string(), "B.cpp".to_string()]),
+            &BTreeSet::from([
+                MutationScope::Unit("A.cpp".into()),
+                MutationScope::Unit("B.cpp".into()),
+            ]),
         )
         .unwrap();
         check_only_resolved(
@@ -735,5 +778,54 @@ mod tests {
         let error =
             check_only_resolved(&only(&["A.cpp", "nowhere.cpp"]), &coverage.resolved).unwrap_err();
         assert!(error.to_string().contains("nowhere.cpp"), "{error}");
+    }
+
+    #[test]
+    fn a_renamed_symbol_cannot_reserve_an_identically_named_unit() {
+        let symbol = Candidate {
+            name: "A.cpp".into(),
+            evidence: serde_json::to_value(crate::stages::derive::Rename {
+                new: "renamed".into(),
+                unit: "B.cpp".into(),
+                method: "fixture".into(),
+                tier: crate::derive::propose::Tier::Confident,
+                signal: None,
+                off_spine: false,
+            })
+            .unwrap(),
+        };
+        let result = StageResult {
+            stage: "derive".into(),
+            offered: vec![symbol.clone()],
+            accepted: vec![symbol.clone()],
+            deferred: Vec::new(),
+            selections: Selections::new(),
+            events: Vec::new(),
+            validation: String::new(),
+            dol_sha1: String::new(),
+            baseline: Default::default(),
+            final_measures: Default::default(),
+            reserved_by_earlier_stage: Vec::new(),
+            eligible_excluded_by_only: Vec::new(),
+            applied: Vec::new(),
+            seconds: 0.0,
+        };
+        let reserved = result.changed_scopes(&Derive);
+        assert_eq!(reserved, BTreeSet::from([MutationScope::Symbol("A.cpp".into())]));
+        assert!(is_reserved(&Derive, &symbol, &reserved));
+        assert!(!is_reserved(&stage(), &Candidate::new("A.cpp"), &reserved));
+        let focused = focus(&stage(), &candidates(), &only(&["A.cpp"]), &reserved).unwrap();
+        assert_eq!(focused.roots.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["A.cpp"]);
+        assert_eq!(focused.resolved, BTreeSet::from(["A.cpp".into()]));
+
+        // `--only` names units: a same-spelling symbol is not itself a root.
+        let derive = focus(&Derive, &[symbol], &only(&["A.cpp"]), &none()).unwrap();
+        assert!(derive.roots.is_empty());
+        assert!(derive.resolved.is_empty());
+
+        let symbol_for_b = result.accepted[0].clone();
+        let derive_for_b = focus(&Derive, &[symbol_for_b], &only(&["B.cpp"]), &none()).unwrap();
+        assert_eq!(derive_for_b.roots.len(), 1);
+        assert_eq!(derive_for_b.resolved, BTreeSet::from(["B.cpp".into()]));
     }
 }

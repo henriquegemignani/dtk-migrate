@@ -25,7 +25,7 @@ use crate::{
     build::context::{BuildContext, is_trial_failure},
     derive::{self, propose::Tier},
     project::{report::Report, symbols::Renames, transaction::Owned},
-    stages::{Candidate, Event, Outcome, Prepared, Selections, Stage},
+    stages::{Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage},
 };
 
 pub struct Derive;
@@ -36,6 +36,8 @@ const VALIDATION: &str = "objdiff body comparison between compiled source and ex
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rename {
     pub new: String,
+    /// Source TU whose compiled-object evidence identified this symbol.
+    pub unit: String,
     pub method: String,
     pub tier: Tier,
     /// Which rule settled it, and whether the unit's own ordering agreed.
@@ -50,6 +52,14 @@ pub struct Rename {
 
 impl Stage for Derive {
     fn name(&self) -> &'static str { "derive" }
+
+    fn scope(&self, candidate: &Candidate) -> MutationScope {
+        MutationScope::Symbol(candidate.name.clone())
+    }
+
+    fn writes(&self, candidate: &Candidate) -> Result<BTreeSet<String>> {
+        Ok(BTreeSet::from([rename_of(candidate)?.unit]))
+    }
 
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared> {
         let baseline = ctx.build(None)?;
@@ -71,6 +81,7 @@ impl Stage for Derive {
                 name: old.clone(),
                 evidence: serde_json::to_value(Rename {
                     new: proposal.new.clone(),
+                    unit: proposal.unit.clone(),
                     method: proposal.method.clone(),
                     tier: proposal.tier,
                     signal: proposal.signal.clone(),
@@ -253,6 +264,7 @@ mod tests {
             name: "fn_8030DA80".into(),
             evidence: serde_json::to_value(Rename {
                 new: "GetTextureElement".into(),
+                unit: "Texture.cpp".into(),
                 method: "call-site".into(),
                 tier: Tier::Confident,
                 signal: None,

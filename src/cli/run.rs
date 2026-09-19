@@ -14,9 +14,9 @@ use serde::Serialize;
 use crate::{
     run::{
         Environment, FrozenTools, ORDER, RepositoryState, RunDir, RunRecord, SCHEMA, StageResult,
-        publish, run_stage, write_json,
+        publish, run_stage, stage_for, write_json,
     },
-    stages::Prepared,
+    stages::{MutationScope, Prepared},
     workspace::{LOCK_NAME, ProjectLock, Snapshot},
 };
 
@@ -117,17 +117,15 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     let mut current = root.clone();
-    let mut reserved: BTreeSet<String> = BTreeSet::new();
+    let mut reserved: BTreeSet<MutationScope> = BTreeSet::new();
     let mut results: BTreeMap<String, (StageResult, Prepared)> = BTreeMap::new();
     let mut resolved: BTreeSet<String> = BTreeSet::new();
     for stage in &record.stages {
         let (integrated, result) = run_stage(&dir, &record, stage, &current, &reserved, None)?;
-        // A unit this stage certified is its own for the rest of the run: a
-        // later stage extending the same unit would invalidate the certificate
-        // and cost every stage its publication.
-        // That includes a neighbour a transaction narrowed: it was certified
-        // as part of that transaction, not left for anyone to extend.
-        reserved.extend(result.changed_units().map(str::to_string));
+        // Reserve in the mutation's namespace. A derived symbol name must not
+        // exclude a later unit with the same spelling. Transaction neighbours
+        // remain unit-scoped because their ownership changed too.
+        reserved.extend(result.changed_scopes(stage_for(stage)?.as_ref()));
         let prepared: crate::run::StoredPreparation =
             crate::run::read_json(&dir.stage(stage).join("prepared.json"))?;
         resolved.extend(prepared.only_resolved.iter().cloned());
