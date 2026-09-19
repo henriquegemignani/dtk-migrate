@@ -28,7 +28,10 @@ fn compiled_widget_body_is_available_without_assigning_its_retail_owner() {
         .unwrap()
         .clone();
     let unit = "GuiSys/CGuiHeadWidget.cpp".to_string();
-    let evidence = inspect(&root, &BTreeSet::from([unit.clone()]), &BTreeSet::from([hash]));
+    let original_directory = std::env::current_dir().unwrap();
+    let evidence =
+        inspect(&root, "GM8P01_00", &BTreeSet::from([unit.clone()]), &BTreeSet::from([hash]));
+    assert_eq!(std::env::current_dir().unwrap(), original_directory);
     assert_eq!(evidence.status, ScanStatus::Scanned);
     assert_eq!(evidence.objects.len(), 1);
     assert_eq!(evidence.objects[0].status, ObjectStatus::Available);

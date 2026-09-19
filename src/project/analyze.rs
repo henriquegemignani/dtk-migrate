@@ -5,7 +5,7 @@
 //! the relocation tracker populate the references the matcher reads as call
 //! edges.
 
-use std::{env, fs};
+use std::{env, fs, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
 use decomp_toolkit::{
@@ -30,6 +30,20 @@ use crate::analysis::coverage::ExtractSpec;
 /// Child processes are unaffected either way: every command this tool starts is
 /// given its directory explicitly.
 static CWD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run a dtk filesystem operation from a project's drive and directory.
+/// dtk's native VFS interprets an absolute Windows path against the current
+/// drive, so callers pass a path relative to this directory inside `work`.
+pub(crate) fn with_working_directory<T>(
+    directory: &Path,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _serialized = CWD.lock().unwrap_or_else(|e| e.into_inner());
+    let native = check_path_buf(directory.to_path_buf())
+        .map_err(|e| anyhow!("Working directory is not valid UTF-8: {e}"))?;
+    let _guard = WorkingDirectory::enter(native)?;
+    work()
+}
 
 /// Runs the standard DOL analysis pipeline, up to and including relocation
 /// tracking, which is what populates the call edges the matcher relies on.

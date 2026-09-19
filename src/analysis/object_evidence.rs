@@ -1,7 +1,8 @@
 //! Optional compiled-source evidence for helper families.
 //!
-//! A compiled definition proves that this *version's source object* contains a
-//! body. It does not prove that the linker selected that object or that its
+//! A compiled definition proves that an existing object mapped to the target
+//! version contains a body. It does not prove that the object was rebuilt from
+//! the checkout's current source, that the linker selected it, or that its
 //! function supplied a particular target occurrence. Object paths come from
 //! objdiff's `base_path`; `target_path` is the extracted retail object and is
 //! deliberately not used as compiled-source evidence.
@@ -20,7 +21,7 @@ use typed_path::Utf8NativePath;
 
 use crate::{
     analysis::{callgraph::CallGraph, helpers::body_digest},
-    project::report::ObjdiffConfig,
+    project::{analyze::with_working_directory, report::ObjdiffConfig},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,7 @@ pub enum ScanStatus {
     MissingObjdiff,
     UnreadableObjdiff,
     InvalidObjdiff,
+    MismatchedVersion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +189,7 @@ fn valid_digest(value: &str) -> bool {
 /// complete scan does not duplicate the whole compiled-object symbol table.
 pub fn inspect(
     root: &Path,
+    target_version: &str,
     units: &BTreeSet<String>,
     target_hashes: &BTreeSet<String>,
 ) -> ObjectEvidence {
@@ -204,6 +207,25 @@ pub fn inspect(
     let Ok(config) = serde_json::from_slice::<ObjdiffConfig>(&config_bytes) else {
         return ObjectEvidence::unavailable(ScanStatus::InvalidObjdiff);
     };
+    let Ok(canonical_root) = root.canonicalize() else {
+        return ObjectEvidence::unavailable(ScanStatus::UnreadableObjdiff);
+    };
+    // A checkout can retain objdiff.json from its last configure, even when
+    // match loads another version's config.yml. Never label those objects as
+    // compiled for the target version.
+    if config.units.iter().any(|entry| {
+        entry.metadata.module_id == 0
+            && ObjdiffConfig::source_name_of(entry).is_some_and(|unit| units.contains(unit))
+            && entry.base_path.as_deref().is_some_and(|base| {
+                !versioned_object_path(base, target_version)
+                    || entry
+                        .target_path
+                        .as_deref()
+                        .is_some_and(|target| !versioned_object_path(target, target_version))
+            })
+    }) {
+        return ObjectEvidence::unavailable(ScanStatus::MismatchedVersion);
+    }
     let mut evidence = ObjectEvidence {
         status: ScanStatus::Scanned,
         objdiff_sha256: Some(format!("{:x}", Sha256::digest(config_bytes))),
@@ -237,7 +259,21 @@ pub fn inspect(
             sha256: None,
         };
         let path = root.join(base_path);
-        let bytes = match std::fs::read(&path) {
+        // Lexical checks alone do not stop a build directory symlink from
+        // pointing at another checkout or drive.
+        let resolved = match path.canonicalize() {
+            Ok(resolved) if resolved.starts_with(&canonical_root) => resolved,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                record.status = ObjectStatus::Missing;
+                evidence.objects.push(record);
+                continue;
+            }
+            _ => {
+                evidence.objects.push(record);
+                continue;
+            }
+        };
+        let bytes = match std::fs::read(&resolved) {
             Ok(bytes) => bytes,
             Err(error) => {
                 if error.kind() == ErrorKind::NotFound {
@@ -249,22 +285,29 @@ pub fn inspect(
         };
         let digest = format!("{:x}", Sha256::digest(&bytes));
         record.sha256 = Some(digest.clone());
-        let Some(path_text) = path.to_str() else {
+        let Ok(relative) = resolved.strip_prefix(&canonical_root) else {
             evidence.objects.push(record);
             continue;
         };
-        let Ok(obj) = process_elf(Utf8NativePath::new(path_text)) else {
+        let Some(path_text) = relative.to_str() else {
+            evidence.objects.push(record);
+            continue;
+        };
+        let Ok(obj) =
+            with_working_directory(&canonical_root, || process_elf(Utf8NativePath::new(path_text)))
+        else {
             evidence.objects.push(record);
             continue;
         };
         record.status = ObjectStatus::Available;
+        let mut definitions = Vec::new();
         for (_, function) in CallGraph::build(&obj).iter() {
             let Some(body_hash) = body_digest(&obj, function) else { continue };
             if !target_hashes.contains(&body_hash) {
                 continue;
             }
             let Some(end) = function.address.checked_add(function.size) else { continue };
-            evidence.definitions.push(CompiledDefinition {
+            definitions.push(CompiledDefinition {
                 unit: unit.to_string(),
                 name: obj.symbols[function.symbol].name.clone(),
                 section: obj.sections[function.section].name.clone(),
@@ -274,6 +317,14 @@ pub fn inspect(
                 weak: obj.symbols[function.symbol].flags.is_weak(),
                 object_sha256: digest.clone(),
             });
+        }
+        // process_elf opens the file separately from the hash read. If a
+        // concurrent build changed it during the scan, neither snapshot is
+        // reliable evidence for this object hash.
+        if std::fs::read(&resolved).ok().as_deref() != Some(bytes.as_slice()) {
+            record.status = ObjectStatus::Unreadable;
+        } else {
+            evidence.definitions.extend(definitions);
         }
         evidence.objects.push(record);
     }
@@ -297,6 +348,15 @@ pub fn inspect(
     evidence
 }
 
+fn versioned_object_path(path: &str, target_version: &str) -> bool {
+    if !safe_relative(path) {
+        return false;
+    }
+    let normalized = path.replace('\\', "/");
+    let mut parts = normalized.split('/');
+    matches!((parts.next(), parts.next(), parts.next()), (Some("build"), Some(version), Some(rest)) if version == target_version && !rest.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,7 +364,7 @@ mod tests {
     #[test]
     fn missing_objdiff_is_an_unavailable_channel() {
         let root = tempfile::tempdir().unwrap();
-        let evidence = inspect(root.path(), &BTreeSet::new(), &BTreeSet::new());
+        let evidence = inspect(root.path(), "PAL", &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(evidence.status, ScanStatus::MissingObjdiff);
         assert!(evidence.definitions.is_empty());
     }
@@ -314,6 +374,33 @@ mod tests {
         assert!(safe_relative("build/PAL/src/A.o"));
         assert!(!safe_relative("../elsewhere/A.o"));
         assert!(!safe_relative("C:/elsewhere/A.o"));
+    }
+
+    #[test]
+    fn objdiff_for_another_version_is_not_target_object_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        for (base, target) in [
+            ("build/NTSC/src/A.o", "build/PAL/obj/A.o"),
+            ("build/PAL/src/A.o", "build/NTSC/obj/A.o"),
+        ] {
+            std::fs::write(
+                root.path().join("objdiff.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "units": [{
+                        "name": "main/A",
+                        "base_path": base,
+                        "target_path": target,
+                        "metadata": {"source_path": "src/A.cpp"}
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let evidence =
+                inspect(root.path(), "PAL", &BTreeSet::from(["A.cpp".into()]), &BTreeSet::new());
+            assert_eq!(evidence.status, ScanStatus::MismatchedVersion);
+            assert!(evidence.objects.is_empty());
+        }
     }
 
     #[test]

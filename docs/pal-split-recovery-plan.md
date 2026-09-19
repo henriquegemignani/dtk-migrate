@@ -73,8 +73,11 @@ preparation supplies its workspace automatically. It scans complete compiled ELF
 current extracted target split, and attaches exact normalized-body definitions
 to target families. Object and objdiff hashes identify the files observed by
 the scan. Missing, unreadable and unmapped objects are recorded; the binary-only
-path remains usable without them. These definitions establish availability,
-not linker selection, so policy 14 and ownership transactions are unchanged.
+path remains usable without them. These definitions establish availability
+in observed objects, neither build freshness nor linker selection, so policy
+14 and ownership transactions are unchanged.
+The scan rejects an `objdiff.json` configured for another version and refuses
+object paths that resolve outside the selected checkout.
 
 On the frozen F-drive `b65ad2a6` checkout, I compiled four target-version
 source objects (`CGuiHeadWidget`, `CGuiGroup`, `CGuiTableGroup`, `CPowerBomb`).

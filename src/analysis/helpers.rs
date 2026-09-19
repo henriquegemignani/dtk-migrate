@@ -60,8 +60,8 @@ pub struct HelperFamily {
     /// TU emitted any particular target copy.
     pub source_definitions: Vec<SourceDefinition>,
     pub target_occurrences: Vec<TargetOccurrence>,
-    /// Exact body present in a compiled target-version source object. This
-    /// proves availability, not that the linker emitted the retail occurrence.
+    /// Exact body present in an existing object mapped to the target version.
+    /// This does not prove a fresh build or linker emission of the retail copy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compiled_definitions: Vec<CompiledDefinition>,
     pub signals: Vec<HelperSignal>,
