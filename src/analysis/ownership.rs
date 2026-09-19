@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 9;
+pub const IDENTIFICATION_SCHEMA: u32 = 10;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -425,6 +425,15 @@ impl ObservationIndex {
         {
             bail!("Identification schema {} cannot carry build provenance", report.schema);
         }
+        if report.schema < 10
+            && report.object_evidence.as_ref().is_some_and(|evidence| {
+                !evidence.emitted_owners.is_empty()
+                    || !evidence.relocation_placements.is_empty()
+                    || evidence.unscanned_configured_units != 0
+            })
+        {
+            bail!("Identification schema {} cannot carry emitted-owner resolutions", report.schema);
+        }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
         let mut by_id = BTreeMap::new();
@@ -668,6 +677,22 @@ impl ObservationIndex {
                     &report.target_functions,
                     &report.attributions,
                 );
+            }
+            if report.schema >= 10 {
+                evidence.relocation_placements =
+                    crate::analysis::object_evidence::relocation_placements(
+                        evidence,
+                        expected_units,
+                        &report.target_functions,
+                    );
+                evidence.emitted_owners =
+                    crate::analysis::object_evidence::emitted_owner_resolutions(
+                        evidence,
+                        expected_units,
+                        &report.source_functions,
+                        &report.target_functions,
+                        &report.attributions,
+                    );
             }
         }
         // Schema 4+ aggregates are regenerated from canonical function facts.
@@ -3073,6 +3098,7 @@ mod tests {
                     compiled("helper", "0x00000100", "0x00000140", helper_hash.clone()),
                 ],
             }],
+            unscanned_configured_units: 0,
             unmapped_units: Vec::new(),
             definitions: vec![CompiledDefinition {
                 unit: "A.cpp".into(),
@@ -3097,6 +3123,8 @@ mod tests {
                 after: None,
             }],
             relocation_matches: Vec::new(),
+            emitted_owners: Vec::new(),
+            relocation_placements: Vec::new(),
         });
         let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
         let matches = &index.report().object_evidence.as_ref().unwrap().order_matches;

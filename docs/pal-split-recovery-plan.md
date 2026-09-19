@@ -164,12 +164,51 @@ and target function facts, attributions and policy version agree. The full
 stress case took about 5.1 seconds for first derivation and 3.7 seconds for a
 cache hit. This cache is a speed aid, not a new evidence tier.
 
-No rule yet maps these relations to an emitted owner. The frozen cases still
-have viable shared-definition explanations, and the name-only relations are
-especially weak. Enabling an ownership transfer from them would violate the
-plan's no-guessing constraint. The next inference test must present a case
-where the linked copy is uniquely placed by independent target order or
-relocations and a competing compiled definition is ruled out.
+At this checkpoint no rule mapped these relations to an emitted owner. The
+frozen cases still had viable shared-definition explanations, and the
+name-only relations were especially weak. An ownership transfer from them
+would have violated the plan's no-guessing constraint.
+
+### Order and relocation placement tests (schema 10)
+
+`emitted_owner_resolutions` tests a narrow two-sided-order case: every
+configured source object is scanned and Ninja-clean, every duplicate compiled
+body has two contiguous independently unique neighbours, and all definitions
+map bijectively to different retail occurrences. A competitor with no order
+match is unresolved rather than excluded. This rule currently withholds
+relocated bodies. A typed two-object fixture proves the positive case and
+counterexamples for one-sided order, incomplete inventory and unproved
+relocations; saved resolutions are recomputed on load.
+
+`relocation_placements` covers a different case. It pairs *every* relocation
+site by offset, kind, addend and the normalized body of the referenced
+function. At least one endpoint must be unique in both the scanned objects
+and target. Every known compiled definition must then map to exactly one
+different target occurrence. The record names the competing definitions and
+where they fit, plus whether the scanned inventory was complete. This is
+diagnostic even when incomplete and does not change policy 14.
+
+I built all 813 `all_source` objects on an isolated F-drive checkout of
+`b65ad2a6` and ran the new matcher against its NTSC/PAL binaries and configs.
+The checkout was removed after the run; its schema-10 report is retained at
+`target/g-historical-complete-identifications.json` on F for opt-in replay.
+For the DOL, 801 mapped objects were available and Ninja-clean; 10 configured
+objects were outside the source split inventory and 23 source units had no
+compiled-object mapping. The report has 37 relocation placements in 18 body
+families, but **zero strict emitted-owner resolutions**. Only one placed
+occurrence lacked an explicit split owner: `0x803485F4`, the
+`CParticleElectricDataFactory::GetGeneratorDesc` body. Its relocation at
+offset 32 points to the uniquely matched `CreateGeneratorDescription` body
+of that class. The Swoosh and Projectile definitions have the same instruction
+body but point to distinct endpoint bodies and are positively placed at
+`0x803188A8` and `0x8029E2BC` respectively. The later PAL split leaves
+`0x803485F4` unassigned; this is evidence for which compiled definition
+matches the target copy, not proof that extending that split would link.
+
+The next G decision needs either complete coverage of the 10 omitted and 23
+unmapped units, or separate linker-emission evidence. Until then neither
+placement result authorizes a transaction. Schema 9 reports remain readable;
+schema 10 records and rederives the new diagnostics.
 
 ## Implementation checkpoint after Change F (joint runs)
 

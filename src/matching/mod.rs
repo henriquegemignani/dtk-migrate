@@ -160,6 +160,18 @@ pub fn run(request: &Request) -> Result<()> {
             &identifications.target_functions,
             &identifications.attributions,
         );
+        evidence.emitted_owners = object_evidence::emitted_owner_resolutions(
+            &evidence,
+            &units,
+            &identifications.source_functions,
+            &identifications.target_functions,
+            &identifications.attributions,
+        );
+        evidence.relocation_placements = object_evidence::relocation_placements(
+            &evidence,
+            &units,
+            &identifications.target_functions,
+        );
         identifications.object_evidence = Some(evidence);
         let compiled = &identifications.object_evidence.as_ref().unwrap().definitions;
         identifications.helper_families = crate::analysis::helpers::families_with_inventory(

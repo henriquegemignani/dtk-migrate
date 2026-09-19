@@ -30,7 +30,7 @@ use crate::{
         callgraph::{CallGraph, FunctionRef},
         helpers::body_digest,
         matching::MatchTarget,
-        ownership::{FunctionAttribution, TargetFunctionObservation},
+        ownership::{FunctionAttribution, SourceFunctionObservation, TargetFunctionObservation},
     },
     project::{analyze::with_working_directory, report::ObjdiffConfig},
 };
@@ -206,6 +206,49 @@ pub struct ObjectOrderMatch {
     pub after: Option<OrderNeighbour>,
 }
 
+/// A shared body whose compiled definitions are placed one-to-one at target
+/// occurrences by independent functions on *both* sides. Every alternative
+/// definition is accounted for at another occurrence; a matching body, one
+/// neighbour, or a matching relocation alone never produces this record.
+/// This is evidence for an emitted owner, not permission to change a split.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmittedOwnerResolution {
+    pub unit: String,
+    pub section: String,
+    pub target_address: String,
+    pub compiled_address: String,
+    pub object_sha256: String,
+    pub before_attribution_id: String,
+    pub after_attribution_id: String,
+    /// Each competing definition is independently placed at a *different*
+    /// occurrence of the same body. Their identities make the exclusion
+    /// auditable instead of treating missing matches as negative evidence.
+    pub excluded_competitors: Vec<String>,
+}
+
+/// Relocation endpoints distinguish otherwise identical compiled bodies.
+/// The assignment is exhaustive only over the definitions actually scanned;
+/// `inventory_complete` says whether omitted/missing objects leave another
+/// possible emitter. A partial assignment is diagnostic, never a transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectRelocationPlacement {
+    pub unit: String,
+    pub section: String,
+    pub compiled_address: String,
+    pub target_address: String,
+    pub object_sha256: String,
+    pub distinctive_offset: u32,
+    pub endpoint_body_sha256: String,
+    pub excluded_competitors: Vec<CompetingPlacement>,
+    pub inventory_complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompetingPlacement {
+    pub unit: String,
+    pub target_address: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectEvidence {
     pub status: ScanStatus,
@@ -218,6 +261,10 @@ pub struct ObjectEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_image_sha256: Option<String>,
     pub objects: Vec<ObjectRecord>,
+    /// Configured compiled-source objects omitted because they are outside
+    /// the source split inventory. They may still define a competing body.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unscanned_configured_units: u32,
     /// Source units without a compiled-object mapping in objdiff.json.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unmapped_units: Vec<String>,
@@ -231,6 +278,13 @@ pub struct ObjectEvidence {
     /// Regenerated from the two reference inventories on load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relocation_matches: Vec<ObjectRelocationMatch>,
+    /// Rebuilt from complete clean objects and independent target anchors.
+    /// Introduced in identification schema 10; no ownership policy uses it yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitted_owners: Vec<EmittedOwnerResolution>,
+    /// Rebuilt from raw compiled and retail relocation endpoint bodies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relocation_placements: Vec<ObjectRelocationPlacement>,
 }
 
 impl ObjectEvidence {
@@ -241,11 +295,14 @@ impl ObjectEvidence {
             build_graph_sha256: None,
             target_image_sha256: None,
             objects: Vec::new(),
+            unscanned_configured_units: 0,
             unmapped_units: Vec::new(),
             definitions: Vec::new(),
             target_references: Vec::new(),
             order_matches: Vec::new(),
             relocation_matches: Vec::new(),
+            emitted_owners: Vec::new(),
+            relocation_placements: Vec::new(),
         }
     }
 
@@ -266,11 +323,14 @@ impl ObjectEvidence {
         }
         if self.status != ScanStatus::Scanned
             && (!self.objects.is_empty()
+                || self.unscanned_configured_units != 0
                 || !self.definitions.is_empty()
                 || !self.unmapped_units.is_empty()
                 || !self.order_matches.is_empty()
                 || !self.target_references.is_empty()
-                || !self.relocation_matches.is_empty())
+                || !self.relocation_matches.is_empty()
+                || !self.emitted_owners.is_empty()
+                || !self.relocation_placements.is_empty())
         {
             bail!("Unavailable compiled-object channel contains observations");
         }
@@ -487,6 +547,8 @@ fn valid_digest(value: &str) -> bool {
 
 fn is_unavailable(value: &BuildFreshness) -> bool { *value == BuildFreshness::Unavailable }
 
+fn is_zero(value: &u32) -> bool { *value == 0 }
+
 fn sort_references(references: &mut [CompiledReference]) {
     references.sort_by(|left, right| {
         (
@@ -667,11 +729,21 @@ pub fn inspect(
             .map(|bytes| format!("{:x}", Sha256::digest(bytes))),
         target_image_sha256: None,
         objects: Vec::new(),
+        unscanned_configured_units: config
+            .units
+            .iter()
+            .filter(|entry| entry.metadata.module_id == 0 && entry.base_path.is_some())
+            .filter(|entry| {
+                !ObjdiffConfig::source_name_of(entry).is_some_and(|unit| units.contains(unit))
+            })
+            .count() as u32,
         unmapped_units: Vec::new(),
         definitions: Vec::new(),
         target_references: Vec::new(),
         order_matches: Vec::new(),
         relocation_matches: Vec::new(),
+        emitted_owners: Vec::new(),
+        relocation_placements: Vec::new(),
     };
     let mut seen = BTreeSet::new();
     for entry in config.units {
@@ -1085,6 +1157,450 @@ fn matching_neighbour(
     })
 }
 
+/// Inventory completeness is a requirement for an emitted-owner resolution,
+/// not for reporting a comparison among the available compiled objects.
+fn complete_object_inventory(evidence: &ObjectEvidence, source_units: &BTreeSet<String>) -> bool {
+    if evidence.status != ScanStatus::Scanned
+        || evidence.build_graph_sha256.is_none()
+        || evidence.target_image_sha256.is_none()
+        || evidence.unscanned_configured_units != 0
+        || !evidence.unmapped_units.is_empty()
+        || evidence.objects.len() != source_units.len()
+        || evidence.objects.iter().any(|record| {
+            !source_units.contains(&record.unit)
+                || record.status != ObjectStatus::Available
+                || record.build_freshness != BuildFreshness::Clean
+                || record.sha256.is_none()
+                || record.compiler.is_none()
+                || record.c_flags_sha256.is_none()
+        })
+    {
+        return false;
+    }
+    evidence.objects.iter().map(|record| record.unit.as_str()).collect::<BTreeSet<_>>().len()
+        == source_units.len()
+}
+
+/// Resolve only the case in which a *complete, clean* compiled inventory and
+/// independent target order give a bijection between competing definitions and
+/// retail occurrences. Absence of an order match is not an exclusion: each
+/// competitor must itself be placed, with two independent flanking functions,
+/// at a different occurrence. References inside the body are withheld until
+/// their complete relocation inventory can be proved equivalent.
+pub fn emitted_owner_resolutions(
+    evidence: &ObjectEvidence,
+    source_units: &BTreeSet<String>,
+    source_functions: &[SourceFunctionObservation],
+    target_functions: &[TargetFunctionObservation],
+    attributions: &[FunctionAttribution],
+) -> Vec<EmittedOwnerResolution> {
+    if !complete_object_inventory(evidence, source_units) {
+        return Vec::new();
+    }
+    let records: BTreeMap<&str, &ObjectRecord> =
+        evidence.objects.iter().map(|record| (record.unit.as_str(), record)).collect();
+
+    let mut targets_by_body: BTreeMap<(&str, &str), Vec<&TargetFunctionObservation>> =
+        BTreeMap::new();
+    for target in target_functions.iter().filter(|item| item.module == "main") {
+        if let Some(hash) = target.normalized_body_sha256.as_deref() {
+            targets_by_body.entry((&target.section, hash)).or_default().push(target);
+        }
+    }
+    let mut definitions_by_body: BTreeMap<(&str, &str), Vec<&CompiledDefinition>> = BTreeMap::new();
+    for definition in &evidence.definitions {
+        definitions_by_body
+            .entry((&definition.section, &definition.normalized_body_sha256))
+            .or_default()
+            .push(definition);
+    }
+    let mut compiled_hash_counts = BTreeMap::new();
+    for function in evidence.objects.iter().flat_map(|record| &record.functions) {
+        if let Some(hash) = function.normalized_body_sha256.as_deref() {
+            *compiled_hash_counts.entry((function.section.as_str(), hash)).or_insert(0_usize) += 1;
+        }
+    }
+    let attribution_by_id: BTreeMap<&str, &FunctionAttribution> =
+        attributions.iter().map(|item| (item.id.as_str(), item)).collect();
+    let mut source_hash_counts = BTreeMap::new();
+    let mut target_hash_counts = BTreeMap::new();
+    let source_by_location: BTreeMap<(&str, &str, &str), &SourceFunctionObservation> =
+        source_functions
+            .iter()
+            .map(|item| ((item.unit.as_str(), item.section.as_str(), item.address.as_str()), item))
+            .collect();
+    let target_by_location: BTreeMap<(&str, &str), &TargetFunctionObservation> = target_functions
+        .iter()
+        .filter(|item| item.module == "main")
+        .map(|item| ((item.section.as_str(), item.address.as_str()), item))
+        .collect();
+    for hash in source_functions.iter().filter_map(|item| item.normalized_body_sha256.as_deref()) {
+        *source_hash_counts.entry(hash).or_insert(0_usize) += 1;
+    }
+    for hash in target_functions.iter().filter_map(|item| item.normalized_body_sha256.as_deref()) {
+        *target_hash_counts.entry(hash).or_insert(0_usize) += 1;
+    }
+    let order = order_matches(evidence, target_functions, attributions);
+    let target_references: BTreeMap<(&str, &str), &TargetFunctionReferences> = evidence
+        .target_references
+        .iter()
+        .map(|item| ((item.section.as_str(), item.address.as_str()), item))
+        .collect();
+    let independent_anchor = |neighbour: Option<&OrderNeighbour>, unit: &str| {
+        neighbour
+            .filter(|item| item.independently_attributed)
+            .and_then(|item| item.attribution_id.as_deref())
+            .and_then(|id| attribution_by_id.get(id).copied().map(|attribution| (id, attribution)))
+            .filter(|(_, attribution)| {
+                let source = source_by_location.get(&(
+                    attribution.source.unit.as_str(),
+                    attribution.source.section.as_str(),
+                    attribution.source.address.as_str(),
+                ));
+                let target = target_by_location.get(&(
+                    attribution.target.section.as_str(),
+                    attribution.target.address.as_str(),
+                ));
+                let hash = source.and_then(|item| item.normalized_body_sha256.as_deref());
+                attribution.source.unit == unit
+                    && attribution.independent
+                    && !attribution.ambiguous
+                    && attribution.unique_exact_body
+                    && hash.is_some()
+                    && hash == target.and_then(|item| item.normalized_body_sha256.as_deref())
+                    && hash.is_some_and(|hash| {
+                        source_hash_counts.get(hash) == Some(&1)
+                            && target_hash_counts.get(hash) == Some(&1)
+                    })
+            })
+            .map(|(id, _)| id.to_string())
+    };
+
+    let mut resolutions = Vec::new();
+    for (key, definitions) in definitions_by_body {
+        let Some(targets) = targets_by_body.get(&key) else { continue };
+        // The current rule is specifically for competing compiled definitions.
+        // A surplus occurrence or definition can represent an unobserved copy.
+        if definitions.len() < 2 || definitions.len() != targets.len() {
+            continue;
+        }
+        if compiled_hash_counts.get(&key) != Some(&definitions.len()) {
+            // `definitions` excludes nameless functions. A body that appears
+            // there too has another possible emitter we cannot exclude.
+            continue;
+        }
+        if targets
+            .iter()
+            .any(|target| target.current_owner.is_some() && !target.owner_autogenerated)
+        {
+            continue;
+        }
+        let defining_units: BTreeSet<&str> =
+            definitions.iter().map(|definition| definition.unit.as_str()).collect();
+        if defining_units.len() != definitions.len() {
+            continue;
+        }
+        let mut placements = Vec::new();
+        for definition in &definitions {
+            let Some(record) = records.get(definition.unit.as_str()) else { break };
+            if record.sha256.as_deref() != Some(definition.object_sha256.as_str()) {
+                break;
+            }
+            let Some(function) = record.functions.iter().find(|function| {
+                function.section == definition.section
+                    && function.address == definition.address
+                    && function.end == definition.end
+                    && function.name == definition.name
+                    && function.normalized_body_sha256.as_deref()
+                        == Some(definition.normalized_body_sha256.as_str())
+            }) else {
+                break;
+            };
+            // An exact normalized body masks relocation operands. Without a
+            // complete endpoint proof, identical instructions are not enough.
+            if !function.references.is_empty() {
+                break;
+            }
+            let candidates: Vec<_> = order
+                .iter()
+                .filter(|item| {
+                    item.unit == definition.unit
+                        && item.object_sha256 == definition.object_sha256
+                        && item.section == definition.section
+                        && item.compiled_address == definition.address
+                })
+                .filter_map(|item| {
+                    let before = independent_anchor(item.before.as_ref(), &definition.unit)?;
+                    let after = independent_anchor(item.after.as_ref(), &definition.unit)?;
+                    if before == after
+                        || !target_references
+                            .get(&(item.section.as_str(), item.target_address.as_str()))
+                            .is_some_and(|references| references.references.is_empty())
+                    {
+                        return None;
+                    }
+                    Some((item, before, after))
+                })
+                .collect();
+            if candidates.len() != 1 {
+                break;
+            }
+            placements.push((
+                definition,
+                candidates[0].0,
+                candidates[0].1.clone(),
+                candidates[0].2.clone(),
+            ));
+        }
+        // Every definition must be independently placed and no two definitions
+        // may claim the same target occurrence. A nonmatching competitor is
+        // unresolved, not ruled out by its absence from the order list.
+        if placements.len() != definitions.len()
+            || placements
+                .iter()
+                .map(|(_, item, _, _)| item.target_address.as_str())
+                .collect::<BTreeSet<_>>()
+                .len()
+                != targets.len()
+        {
+            continue;
+        }
+        for (definition, placement, before, after) in &placements {
+            let excluded_competitors = placements
+                .iter()
+                .filter(|(other, _, _, _)| *other != *definition)
+                .map(|(other, _, _, _)| other.unit.clone())
+                .collect();
+            resolutions.push(EmittedOwnerResolution {
+                unit: definition.unit.clone(),
+                section: definition.section.clone(),
+                target_address: placement.target_address.clone(),
+                compiled_address: definition.address.clone(),
+                object_sha256: definition.object_sha256.clone(),
+                before_attribution_id: before.clone(),
+                after_attribution_id: after.clone(),
+                excluded_competitors,
+            });
+        }
+    }
+    resolutions.sort_by(|a, b| {
+        (&a.section, &a.target_address, &a.unit).cmp(&(&b.section, &b.target_address, &b.unit))
+    });
+    resolutions
+}
+
+/// Match every relocation in each compiled copy against one target occurrence
+/// by the *body* of its endpoint. A unique endpoint body distinguishes equal
+/// instruction bodies without relying on helper or target symbol names. The
+/// whole family must form a one-to-one assignment; incomplete inventories are
+/// reported explicitly and never become ownership decisions.
+pub fn relocation_placements(
+    evidence: &ObjectEvidence,
+    source_units: &BTreeSet<String>,
+    target_functions: &[TargetFunctionObservation],
+) -> Vec<ObjectRelocationPlacement> {
+    if evidence.status != ScanStatus::Scanned || evidence.target_references.is_empty() {
+        return Vec::new();
+    }
+    const MAX_FAMILY: usize = 16;
+    let complete = complete_object_inventory(evidence, source_units);
+    let records: BTreeMap<&str, &ObjectRecord> = evidence
+        .objects
+        .iter()
+        .filter(|record| record.status == ObjectStatus::Available)
+        .map(|record| (record.unit.as_str(), record))
+        .collect();
+    if records.len()
+        != evidence.objects.iter().filter(|record| record.status == ObjectStatus::Available).count()
+    {
+        // Relative section addresses may repeat across two objects mapped to
+        // one unit. This index cannot distinguish their endpoint relocations.
+        return Vec::new();
+    }
+    let mut definitions_by_body: BTreeMap<(&str, &str), Vec<&CompiledDefinition>> = BTreeMap::new();
+    for definition in &evidence.definitions {
+        definitions_by_body
+            .entry((&definition.section, &definition.normalized_body_sha256))
+            .or_default()
+            .push(definition);
+    }
+    let mut targets_by_body: BTreeMap<(&str, &str), Vec<&TargetFunctionObservation>> =
+        BTreeMap::new();
+    let mut target_by_address = BTreeMap::new();
+    let mut target_hash_counts = BTreeMap::new();
+    for target in target_functions.iter().filter(|item| item.module == "main") {
+        target_by_address.insert((target.section.as_str(), target.address.as_str()), target);
+        if let Some(hash) = target.normalized_body_sha256.as_deref() {
+            targets_by_body.entry((&target.section, hash)).or_default().push(target);
+            *target_hash_counts.entry(hash).or_insert(0_usize) += 1;
+        }
+    }
+    let target_references: BTreeMap<(&str, &str), &TargetFunctionReferences> = evidence
+        .target_references
+        .iter()
+        .map(|item| ((item.section.as_str(), item.address.as_str()), item))
+        .collect();
+    let mut compiled_at = BTreeMap::new();
+    let mut compiled_hash_locations: BTreeMap<&str, BTreeSet<(&str, &str, &str)>> = BTreeMap::new();
+    let mut compiled_body_locations: BTreeMap<(&str, &str), BTreeSet<(&str, &str)>> =
+        BTreeMap::new();
+    for record in records.values() {
+        for function in &record.functions {
+            compiled_at
+                .entry((record.unit.as_str(), function.section.as_str(), function.address.as_str()))
+                .or_insert_with(Vec::new)
+                .push(function);
+            if let Some(hash) = function.normalized_body_sha256.as_deref() {
+                compiled_hash_locations.entry(hash).or_default().insert((
+                    record.unit.as_str(),
+                    function.section.as_str(),
+                    function.address.as_str(),
+                ));
+                compiled_body_locations
+                    .entry((&function.section, hash))
+                    .or_default()
+                    .insert((record.unit.as_str(), function.address.as_str()));
+            }
+        }
+    }
+    let mut placements = Vec::new();
+    for (body, definitions) in definitions_by_body {
+        let Some(targets) = targets_by_body.get(&body) else { continue };
+        if !(2..=MAX_FAMILY).contains(&definitions.len()) || definitions.len() != targets.len() {
+            continue;
+        }
+        if compiled_body_locations.get(&body).is_none_or(|items| items.len() != definitions.len()) {
+            // A nameless function at another location is still a competing
+            // compiled copy and must not disappear from the
+            // one-to-one accounting.
+            continue;
+        }
+        let mut paired = Vec::new();
+        for definition in &definitions {
+            let Some(record) = records.get(definition.unit.as_str()) else { break };
+            if record.build_freshness != BuildFreshness::Clean
+                || record.sha256.as_deref() != Some(definition.object_sha256.as_str())
+            {
+                break;
+            }
+            let Some(compiled) = record.functions.iter().find(|function| {
+                function.section == definition.section
+                    && function.address == definition.address
+                    && function.name == definition.name
+            }) else {
+                break;
+            };
+            if compiled.references.is_empty() {
+                break;
+            }
+            let mut candidates = Vec::new();
+            for target in targets {
+                let Some(target_sites) =
+                    target_references.get(&(target.section.as_str(), target.address.as_str()))
+                else {
+                    continue;
+                };
+                if compiled.references.len() != target_sites.references.len() {
+                    continue;
+                }
+                let mut distinctive = None;
+                let mut agrees = true;
+                for (compiled_ref, target_ref) in
+                    compiled.references.iter().zip(&target_sites.references)
+                {
+                    if (compiled_ref.offset, &compiled_ref.kind, compiled_ref.addend)
+                        != (target_ref.offset, &target_ref.kind, target_ref.addend)
+                    {
+                        agrees = false;
+                        break;
+                    }
+                    let Some((compiled_section, target_section, compiled_address, target_address)) =
+                        compiled_ref
+                            .target_section
+                            .as_deref()
+                            .zip(target_ref.target_section.as_deref())
+                            .zip(u32::try_from(compiled_ref.target_address).ok())
+                            .zip(u32::try_from(target_ref.target_address).ok())
+                            .map(|(((cs, ts), ca), ta)| (cs, ts, hex(ca), hex(ta)))
+                    else {
+                        agrees = false;
+                        break;
+                    };
+                    let compiled_hashes = compiled_at.get(&(
+                        definition.unit.as_str(),
+                        compiled_section,
+                        compiled_address.as_str(),
+                    ));
+                    let compiled_hash = compiled_hashes.and_then(|functions| {
+                        let hashes: BTreeSet<_> = functions
+                            .iter()
+                            .filter_map(|function| function.normalized_body_sha256.as_deref())
+                            .collect();
+                        (hashes.len() == 1).then(|| *hashes.iter().next().unwrap())
+                    });
+                    let target_hash = target_by_address
+                        .get(&(target_section, target_address.as_str()))
+                        .and_then(|function| function.normalized_body_sha256.as_deref());
+                    if compiled_hash.is_none() || compiled_hash != target_hash {
+                        agrees = false;
+                        break;
+                    }
+                    let hash = compiled_hash.unwrap();
+                    if distinctive.is_none()
+                        && compiled_hash_locations.get(hash).is_some_and(|items| items.len() == 1)
+                        && target_hash_counts.get(hash) == Some(&1)
+                    {
+                        distinctive = Some((compiled_ref.offset, hash.to_string()));
+                    }
+                }
+                if agrees {
+                    if let Some((offset, hash)) = distinctive {
+                        candidates.push((*target, offset, hash));
+                    }
+                }
+            }
+            if candidates.len() != 1 {
+                break;
+            }
+            paired.push((definition, candidates.remove(0)));
+        }
+        if paired.len() != definitions.len()
+            || paired
+                .iter()
+                .map(|(_, (target, _, _))| target.address.as_str())
+                .collect::<BTreeSet<_>>()
+                .len()
+                != targets.len()
+        {
+            continue;
+        }
+        for (definition, (target, offset, endpoint_hash)) in &paired {
+            placements.push(ObjectRelocationPlacement {
+                unit: definition.unit.clone(),
+                section: definition.section.clone(),
+                compiled_address: definition.address.clone(),
+                target_address: target.address.clone(),
+                object_sha256: definition.object_sha256.clone(),
+                distinctive_offset: *offset,
+                endpoint_body_sha256: endpoint_hash.clone(),
+                excluded_competitors: paired
+                    .iter()
+                    .filter(|(other, _)| *other != *definition)
+                    .map(|(other, (target, _, _))| CompetingPlacement {
+                        unit: other.unit.clone(),
+                        target_address: target.address.clone(),
+                    })
+                    .collect(),
+                inventory_complete: complete,
+            });
+        }
+    }
+    placements.sort_by(|a, b| {
+        (&a.section, &a.target_address, &a.unit).cmp(&(&b.section, &b.target_address, &b.unit))
+    });
+    placements
+}
+
 /// Correlate relocations only at equal byte offsets, kinds and addends within
 /// exact-body pairs. Endpoint evidence is reported by strength, never turned
 /// into emitted-owner proof here.
@@ -1416,6 +1932,7 @@ mod tests {
                 build_freshness: BuildFreshness::Unavailable,
                 functions: Vec::new(),
             }],
+            unscanned_configured_units: 0,
             unmapped_units: Vec::new(),
             definitions: vec![CompiledDefinition {
                 unit: "A.cpp".into(),
@@ -1430,6 +1947,8 @@ mod tests {
             target_references: Vec::new(),
             order_matches: Vec::new(),
             relocation_matches: Vec::new(),
+            emitted_owners: Vec::new(),
+            relocation_placements: Vec::new(),
         };
         let units = BTreeSet::from(["A.cpp".into(), "B.cpp".into()]);
         let targets = BTreeSet::from([body_hash]);
@@ -1501,6 +2020,7 @@ mod tests {
                     function("helper", "0x00000020", "0x0000002C", &helper_hash),
                 ],
             }],
+            unscanned_configured_units: 0,
             unmapped_units: Vec::new(),
             definitions: vec![CompiledDefinition {
                 unit: "A.cpp".into(),
@@ -1515,6 +2035,8 @@ mod tests {
             target_references: Vec::new(),
             order_matches: Vec::new(),
             relocation_matches: Vec::new(),
+            emitted_owners: Vec::new(),
+            relocation_placements: Vec::new(),
         };
         evidence
             .canonicalize(
@@ -1604,6 +2126,7 @@ mod tests {
                     references: vec![reference("kValue__A")],
                 }],
             }],
+            unscanned_configured_units: 0,
             unmapped_units: Vec::new(),
             definitions: vec![CompiledDefinition {
                 unit: "A.cpp".into(),
@@ -1631,6 +2154,8 @@ mod tests {
             ],
             order_matches: Vec::new(),
             relocation_matches: Vec::new(),
+            emitted_owners: Vec::new(),
+            relocation_placements: Vec::new(),
         };
         let target = |address: &str, end: &str| TargetFunctionObservation {
             name: "helper".into(),

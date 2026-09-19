@@ -6,14 +6,62 @@ use dtk_migrate::{
     analysis::{
         matching::MatchTarget,
         object_evidence::{
-            BuildFreshness, ObjectStatus, ScanStatus, capture_target_references, inspect,
-            order_matches, relocation_matches, target_image_digest,
+            BuildFreshness, ObjectStatus, ScanStatus, capture_target_references,
+            emitted_owner_resolutions, inspect, order_matches, relocation_matches,
+            relocation_placements, target_image_digest,
         },
         ownership::{IDENTIFICATION_SCHEMA, IdentificationReport, ObservationIndex},
     },
     project::analyze::load_analyzed,
 };
 use typed_path::Utf8NativePath;
+
+#[test]
+fn historical_pal_get_generator_desc_is_distinguished_without_a_source_fix() {
+    let Some(path) = std::env::var_os("DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT") else {
+        eprintln!("skipped: set DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT");
+        return;
+    };
+    let report: IdentificationReport =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let canonical =
+        ObservationIndex::load_self_contained(report.clone(), &report.source, &report.target)
+            .unwrap();
+    let evidence = report.object_evidence.as_ref().unwrap();
+    assert_eq!(evidence.unscanned_configured_units, 10);
+    assert_eq!(evidence.unmapped_units.len(), 23);
+    let units = report.units.iter().map(|item| item.unit.clone()).collect();
+    let placements = relocation_placements(evidence, &units, &report.target_functions);
+    assert_eq!(
+        canonical.report().object_evidence.as_ref().unwrap().relocation_placements,
+        placements
+    );
+    let electric = placements.iter().find(|item| item.target_address == "0x803485F4").unwrap();
+    assert_eq!(electric.unit, "Kyoto/Particles/CParticleElectricDataFactory.cpp");
+    assert_eq!(
+        electric.object_sha256,
+        "0fd8081879b9034ba454b26a6cec11313468dd2eec3c19114947e0bf60257180"
+    );
+    assert_eq!(electric.distinctive_offset, 32);
+    assert_eq!(
+        electric.endpoint_body_sha256,
+        "3835b7ca0b44643b318fe7fba33724ee362bae3ac318096aa4256df7252e4f49"
+    );
+    assert_eq!(electric.excluded_competitors.len(), 2);
+    assert_eq!(
+        electric
+            .excluded_competitors
+            .iter()
+            .map(|item| (item.unit.as_str(), item.target_address.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Kyoto/Particles/CParticleSwooshDataFactory.cpp", "0x803188A8"),
+            ("Weapons/CProjectileWeaponDataFactory.cpp", "0x8029E2BC"),
+        ]
+    );
+    assert!(!electric.inventory_complete);
+    assert!(evidence.emitted_owners.is_empty());
+}
 
 #[test]
 fn compiled_widget_body_is_available_without_assigning_its_retail_owner() {
@@ -96,6 +144,17 @@ fn frozen_sparse_objects_expose_immediate_order_without_assigning_an_owner() {
         !item.before.as_ref().is_some_and(|before| before.independently_attributed)
             && !item.after.as_ref().is_some_and(|after| after.independently_attributed)
     }));
+    let source_units = report.units.iter().map(|unit| unit.unit.clone()).collect();
+    assert!(
+        emitted_owner_resolutions(
+            &evidence,
+            &source_units,
+            &report.source_functions,
+            &report.target_functions,
+            &report.attributions,
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -233,6 +292,22 @@ fn a_full_object_inventory_remains_canonical_and_binary_only_fallback_exists() {
     evidence.target_references =
         capture_target_references(&target, &report.target_functions, &evidence.definitions);
     evidence.canonicalize_target_references(&report.target_functions).unwrap();
+    let placed = emitted_owner_resolutions(
+        &evidence,
+        &units,
+        &report.source_functions,
+        &report.target_functions,
+        &report.attributions,
+    );
+    eprintln!(
+        "object owner placements={} unscanned_configured={} unmapped_source_units={}",
+        placed.len(),
+        evidence.unscanned_configured_units,
+        evidence.unmapped_units.len(),
+    );
+    if evidence.unscanned_configured_units != 0 || !evidence.unmapped_units.is_empty() {
+        assert!(placed.is_empty());
+    }
     let first_correlation = Instant::now();
     evidence.relocation_matches =
         relocation_matches(&evidence, &report.target_functions, &report.attributions);

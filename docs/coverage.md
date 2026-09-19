@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 14, evidence schema 11, identification schema 9. Every threshold
+Policy version 14, evidence schema 11, identification schema 10. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -113,6 +113,26 @@ derived relocation relations is keyed by object inventory, target image,
 ownership facts and policy version; a changed split or attribution cannot
 reuse a stale relation. Older schema-8 reports load without invented build
 provenance.
+
+Schema 10 separates two object-placement results. A strict emitted-owner
+resolution requires every configured source object to be scanned and
+Ninja-clean, with no source split unit unmapped. Each compiled copy of the
+shared body must sit between two independently unique functions, contiguous
+in both object and retail order. All definitions must map one-to-one onto all
+target occurrences: each competitor is positively placed elsewhere, never
+excluded merely because its order match is absent. This narrow rule currently
+handles bodies without relocations.
+
+Relocation placements compare *all* reference sites in each identical body:
+offset, kind, addend and the normalized body of each referenced function. At
+least one endpoint must be unique in both the observed objects and target.
+They also require a one-to-one assignment of every known compiled definition
+to a different target occurrence. A placement records exactly which competing
+definitions it excludes and whether the object inventory is complete.
+Incomplete inventory still yields a useful diagnostic, not emitted-owner
+proof. Both derived results are rebuilt on report load; older reports retain
+their prior meaning. Policy 14 makes no ownership transfer from either result.
+Ninja freshness does not establish the source revision.
 
 Identification, boundary certainty and application are independent. A TU may be
 corroborated while an edge remains unresolved, or may have a complete observed
