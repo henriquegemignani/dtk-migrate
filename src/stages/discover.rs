@@ -27,6 +27,7 @@ use crate::{
         ownership::{ObservationIndex, ObservationReference, OwnershipAssessment, load_reference},
     },
     build::context::{BuildContext, is_trial_failure},
+    matching::data_evidence::{DataEvidenceReference, DataEvidenceReport},
     project::{
         link_order::cyclic_units,
         report::Report,
@@ -54,6 +55,8 @@ pub struct Proposal {
     pub observation: Option<ObservationReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ownership: Option<OwnershipAssessment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_evidence: Option<DataEvidenceReference>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +236,8 @@ fn data_only_in_source(source: &IndexMap<String, Vec<String>>, name: &str) -> bo
     })
 }
 
+fn is_bss_section(section: &str) -> bool { matches!(section, ".bss" | ".sbss" | ".sbss2") }
+
 /// Proposals that extend an established unit with its non-code sections.
 ///
 /// The matcher proposes a range for every section by symbol-name
@@ -287,7 +292,7 @@ pub fn data_proposals(
                         && current.start < range.end
                 })
             });
-            if range.section == ".bss"
+            if is_bss_section(&range.section)
                 && !existing_overlap
                 && !proposed_attributes.contains("common")
             {
@@ -341,6 +346,40 @@ pub fn data_proposals(
     result
 }
 
+/// A text proposal is usable as data only when the typed matcher record names
+/// the identical range and every member of that record cleared its gates.
+fn evidenced_data_lines(
+    proposals: &IndexMap<String, Vec<String>>,
+    report: &DataEvidenceReport,
+) -> IndexMap<String, Vec<String>> {
+    let witnessed: BTreeSet<(&str, &str, u32, u32)> = report
+        .ranges
+        .iter()
+        .filter(|range| range.eligible())
+        .map(|range| (range.unit.as_str(), range.section.as_str(), range.start, range.end))
+        .collect();
+    proposals
+        .iter()
+        .filter_map(|(unit, lines)| {
+            let supported: Vec<String> = lines
+                .iter()
+                .filter(|line| {
+                    parse_range(line).is_some_and(|range| {
+                        witnessed.contains(&(
+                            unit.as_str(),
+                            range.section.as_str(),
+                            range.start,
+                            range.end,
+                        ))
+                    })
+                })
+                .cloned()
+                .collect();
+            (!supported.is_empty()).then_some((unit.clone(), supported))
+        })
+        .collect()
+}
+
 /// Whether any unit's matched code went down.
 fn regresses(before: &Report, after: &Report) -> bool {
     let new = after.by_source_name();
@@ -366,6 +405,7 @@ impl Stage for Discover {
         let mut events: Vec<Event> = Vec::new();
 
         let proposals_path = ctx.output.join("proposals.txt");
+        let data_evidence_path = ctx.output.join("data-evidence.json");
         let renames_path = ctx.output.join("renames.txt");
         let coverage_path = ctx.output.join("ownership-evidence.json");
         let mut request = crate::matching::Request::new(
@@ -374,6 +414,7 @@ impl Stage for Discover {
         );
         request.outputs = crate::matching::Outputs {
             splits: Some(proposals_path.clone()),
+            data_evidence: Some(data_evidence_path.clone()),
             renames: Some(renames_path.clone()),
             report: Some(ctx.output.join("matches.json")),
             coverage: Some(coverage_path.clone()),
@@ -400,7 +441,10 @@ impl Stage for Discover {
         let baseline = ctx.build(None)?;
         let blocks = Splits::read(&splits_path)?.blocks;
         let proposals = Splits::read(&proposals_path)?.blocks;
-        let confident_proposals = Splits::read_confident_proposals(&proposals_path)?.blocks;
+        let data_evidence =
+            DataEvidenceReference::of(&data_evidence_path, &ctx.source, &ctx.target)?;
+        let data_report = data_evidence.load(&ctx.source, &ctx.target)?;
+        let witnessed_data = evidenced_data_lines(&proposals, &data_report);
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let evidence: CoverageReport = serde_json::from_slice(&std::fs::read(&coverage_path)?)?;
@@ -428,6 +472,7 @@ impl Stage for Discover {
                         before_lines: before,
                         observation: Some(observation.clone()),
                         ownership: Some(ownership),
+                        data_evidence: None,
                     })
                 })
             })
@@ -437,30 +482,30 @@ impl Stage for Discover {
             candidates.truncate(limit);
         }
 
-        // The ordinary parser includes commented, tentative ranges so code can
-        // ask the ownership gate to judge them. Data has no equivalent gate;
-        // only the matcher's uncommented ranges may enter its pass.
+        // The ordinary parser includes commented, whole-unit candidate ranges.
+        // A data range enters only when the typed member record independently
+        // proves its own bytes, even if other data in that TU is still unknown.
         // One unit must never yield two candidates. Each kind carries a complete
         // replacement body, so whichever landed second would revert the other's
         // sections. Code keeps the slot because it has to prove a matched-code
         // gain, which the data pass deliberately skips; the unit's data is
         // proposed again by the next run.
         let staged: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
-        let mut data: Vec<Candidate> =
-            data_proposals(&confident_proposals, &blocks, &source_blocks)
-                .into_iter()
-                .filter(|(name, _)| !staged.contains(name.as_str()))
-                .map(|(name, lines)| {
-                    let before_lines = blocks.get(&name).cloned().unwrap_or_default();
-                    candidate(name, Proposal {
-                        lines,
-                        kind: Kind::Data,
-                        before_lines,
-                        observation: None,
-                        ownership: None,
-                    })
+        let mut data: Vec<Candidate> = data_proposals(&witnessed_data, &blocks, &source_blocks)
+            .into_iter()
+            .filter(|(name, _)| !staged.contains(name.as_str()))
+            .map(|(name, lines)| {
+                let before_lines = blocks.get(&name).cloned().unwrap_or_default();
+                candidate(name, Proposal {
+                    lines,
+                    kind: Kind::Data,
+                    before_lines,
+                    observation: None,
+                    ownership: None,
+                    data_evidence: Some(data_evidence.clone()),
                 })
-                .collect::<Result<_>>()?;
+            })
+            .collect::<Result<_>>()?;
         if let Some(limit) = limit {
             data.truncate(limit);
         }
@@ -537,7 +582,7 @@ impl Stage for Discover {
             if blocks.get(&candidate.name) != Some(&proposal.lines) {
                 bail!("Discovery split for {} changed after selection", candidate.name);
             }
-            validate_code_proposal(ctx, &candidate.name, &proposal, true)?;
+            validate_proposal(ctx, &candidate.name, &proposal, true)?;
         }
         ctx.build(None)
     }
@@ -608,7 +653,7 @@ impl Trials {
         let mut new_names: Vec<String> = Vec::new();
         for candidate in batch {
             let proposal = proposal_of(candidate)?;
-            validate_code_proposal(ctx, &candidate.name, &proposal, false)?;
+            validate_proposal(ctx, &candidate.name, &proposal, false)?;
             if !staged.blocks.contains_key(&candidate.name) {
                 new_names.push(candidate.name.clone());
             }
@@ -692,14 +737,14 @@ impl Trials {
     }
 }
 
-fn validate_code_proposal(
+fn validate_proposal(
     ctx: &BuildContext,
     unit: &str,
     proposal: &Proposal,
     applied: bool,
 ) -> Result<()> {
     if proposal.kind == Kind::Data {
-        return Ok(());
+        return validate_data_proposal(ctx, unit, proposal, applied);
     }
     let reference = proposal
         .observation
@@ -726,9 +771,64 @@ fn validate_code_proposal(
     Ok(())
 }
 
+fn validate_data_proposal(
+    ctx: &BuildContext,
+    unit: &str,
+    proposal: &Proposal,
+    applied: bool,
+) -> Result<()> {
+    let reference = proposal
+        .data_evidence
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Data proposal for {unit} has no member evidence"))?;
+    let report = reference.load(&ctx.source, &ctx.target)?;
+    let mut blocks =
+        Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;
+    let expected = if applied { &proposal.lines } else { &proposal.before_lines };
+    if blocks.get(unit).map(Vec::as_slice).unwrap_or_default() != expected {
+        bail!("Discovery data baseline changed for {unit}");
+    }
+    if proposal.before_lines.is_empty() {
+        blocks.shift_remove(unit);
+    } else {
+        blocks.insert(unit.to_string(), proposal.before_lines.clone());
+    }
+    let source =
+        Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
+    if reproduced_data_body(&report, unit, &blocks, &source).as_ref() != Some(&proposal.lines) {
+        bail!("Discovery data evidence does not reproduce the complete body for {unit}");
+    }
+    Ok(())
+}
+
+fn reproduced_data_body(
+    report: &DataEvidenceReport,
+    unit: &str,
+    before: &IndexMap<String, Vec<String>>,
+    source: &IndexMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let witnessed: IndexMap<String, Vec<String>> = report
+        .ranges
+        .iter()
+        .filter(|range| range.unit == unit && range.eligible())
+        .map(|range| (unit.to_string(), format_range(&range.section, range.start, range.end)))
+        .fold(IndexMap::new(), |mut blocks, (name, line)| {
+            blocks.entry(name).or_default().push(line);
+            blocks
+        });
+    data_proposals(&witnessed, before, source)
+        .into_iter()
+        .find(|(name, _)| name == unit)
+        .map(|(_, lines)| lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        analysis::unit_matching::UnitTier,
+        matching::data_evidence::{DataMemberEvidence, DataRangeEvidence, DataSizeBasis},
+    };
 
     fn blocks(entries: &[(&str, &[&str])]) -> IndexMap<String, Vec<String>> {
         entries
@@ -742,6 +842,57 @@ mod tests {
     fn text(start: u32, end: u32) -> String { format_range(".text", start, end) }
     fn data(start: u32, end: u32) -> String { format_range(".data", start, end) }
     fn bss(start: u32, end: u32) -> String { format_range(".bss", start, end) }
+    fn sbss(start: u32, end: u32) -> String { format_range(".sbss", start, end) }
+
+    #[test]
+    fn data_candidate_is_reproduced_only_from_its_member_evidence() {
+        let report = DataEvidenceReport {
+            schema: crate::matching::data_evidence::SCHEMA,
+            source: "NTSC".into(),
+            target: "PAL".into(),
+            source_image_sha256: "0".repeat(64),
+            target_image_sha256: "1".repeat(64),
+            ranges: vec![DataRangeEvidence {
+                unit: "a.cpp".into(),
+                section: ".data".into(),
+                start: 0x900,
+                end: 0xA00,
+                tier: UnitTier::Candidate,
+                reasons: vec!["source unit has other unresolved data".into()],
+                required_alignment: 4,
+                members: vec![DataMemberEvidence {
+                    source_index: 0,
+                    target_index: 0,
+                    source_name: "source_data".into(),
+                    target_name: "target_data".into(),
+                    target_start: 0x900,
+                    target_end: 0xA00,
+                    source_extent_known: true,
+                    target_extent_known: true,
+                    target_size_basis: DataSizeBasis::FixedWidth,
+                    source_wholly_owned: true,
+                    source_weak: false,
+                    target_weak: false,
+                    reference_positions: 2,
+                    target_owner: None,
+                    target_common: None,
+                }],
+            }],
+        };
+        let text_proposals = blocks(&[("a.cpp", &[&data(0x900, 0xA00), &data(0xA00, 0xB00)])]);
+        let witnessed = evidenced_data_lines(&text_proposals, &report);
+        assert_eq!(witnessed["a.cpp"], [data(0x900, 0xA00)]);
+
+        let before = blocks(&[("a.cpp", &[&text(0x100, 0x200)])]);
+        let source = blocks(&[("a.cpp", &[&text(0x100, 0x200), &data(0x800, 0x900)])]);
+        assert_eq!(
+            reproduced_data_body(&report, "a.cpp", &before, &source),
+            Some(vec![text(0x100, 0x200), data(0x900, 0xA00)])
+        );
+        let foreign =
+            blocks(&[("a.cpp", &[&text(0x100, 0x200)]), ("b.cpp", &[&data(0x980, 0xA80)])]);
+        assert!(reproduced_data_body(&report, "a.cpp", &foreign, &source).is_none());
+    }
 
     #[test]
     fn a_new_code_unit_is_proposed_whole() {
@@ -805,6 +956,7 @@ mod tests {
                     independent_members,
                     ..Default::default()
                 }),
+                data_evidence: None,
             })
             .unwrap()
         };
@@ -838,6 +990,13 @@ mod tests {
         let source = blocks(&[("table.cpp", &[&data(0x900, 0xA00)])]);
         let result = data_proposals(&proposals, &IndexMap::new(), &source);
         assert_eq!(result[0].0, "table.cpp");
+    }
+
+    #[test]
+    fn unowned_small_bss_requires_target_linker_mode_too() {
+        let proposals = blocks(&[("a.cpp", &[&sbss(0x1000, 0x1008)])]);
+        let existing = blocks(&[("a.cpp", &[&text(0x100, 0x200)])]);
+        assert!(data_proposals(&proposals, &existing, &IndexMap::new()).is_empty());
     }
 
     #[test]

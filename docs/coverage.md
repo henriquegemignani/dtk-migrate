@@ -376,12 +376,19 @@ Two things happen before a build is spent:
   rejects such a batch outright, and the same graph can be built from the splits
   file. Only a cycle the batch introduces counts.
 - A data proposal retains each matched range and its attributes separately.
+  Its versioned member record must show paired relocations, an independently
+  bounded target extent, explicit source ownership and target alignment;
+  `size_known` alone does not suffice because dtk can guess a size from the next
+  symbol. Fixed-width scalars and terminated strings can supply a bound. The
+  text proposal's whole-unit tier is not enough on its own. A range with that proof may be
+  offered even while other data from the same TU remains unresolved. The saved
+  record is checked again during trials and publication.
   It cannot span a gap to another range, overwrite an existing range with
   different attributes, or overlap another unit. Source-version section size
   alone does not establish ownership of an unmatched tail. The four-byte
   `musyx/runtime/synth.c` tail still needs symbol or relocation evidence before
   discovery can claim it. The matcher does not emit `common` attributes yet;
-  discovery withholds every new unannotated BSS range until its target-side
+  discovery withholds every new unannotated BSS-family range until its target-side
   linker attributes are known. It may still widen an existing ordinary BSS
   range whose attributes are already recorded.
 

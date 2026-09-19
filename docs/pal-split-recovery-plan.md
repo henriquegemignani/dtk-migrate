@@ -974,15 +974,32 @@ independent boundary evidence. Coverage policy is 15 because its boundary-data
 match evidence uses the same stricter reference alignment. Per-range certificates, target-side BSS
 attributes and combined code/data transactions remain to be implemented.
 
-### H review correction: tentative data is not automatic evidence
+### H range-membership checkpoint: typed data evidence
 
-The ordinary proposal parser uncomments `# candidate` lines so code discovery
-can assess them against its separate ownership observations. Data discovery had
-used that parser too, silently treating tentative data ranges as confident.
-Its preparation now reads only the matcher's uncommented ranges. The parser
-test keeps a confident data interval and excludes both a tentative tail and a
-unit made entirely of tentative BSS. This is an eligibility correction, not a
-data ownership certificate; typed per-range evidence is still required.
+The ordinary proposal parser uncomments `# candidate` lines for review. Data
+discovery briefly limited itself to the uncommented lines after review found
+that it treated tentative data as confident. It now uses a versioned, hashed
+data-evidence artifact from the same matcher pass. Each range records its
+paired source and target symbols, relocation-reference count, size basis,
+source split ownership, target split owner and common status if known, and the
+required target alignment. Dtk can guess a size up to the next symbol while
+marking it `size_known`; an inferred size is withheld. Fixed-width scalar
+types and terminated string contents can establish their own ends. A complete
+row of contiguous, non-weak, owned, aligned symbol extents can establish
+*that range* even when the whole source TU has other unresolved data and the
+text proposal is commented out. Text by itself never establishes eligibility.
+Trials and publication reload the artifact
+and require it to reproduce the entire proposed body against the current split
+map, so a changed neighbour invalidates the proof.
+
+The read-only current F-drive NTSC→PAL matcher emitted 1,472 data ranges, of
+which one passed the old whole-unit tier but had only an inferred target size.
+The new range-level witness gate found 187 candidates before discovery's
+foreign-overlap, BSS-mode and build checks; all 187 were whole-unit-tier
+candidates. These are offers, not accepted ownership. The report does not yet
+establish target-side common mode for a new unowned BSS-family block, so
+discovery still withholds those. Combined code/data
+transactions and cross-stage certificates remain open.
 
 ## 8. Make refusals diagnostic and retries state-aware
 

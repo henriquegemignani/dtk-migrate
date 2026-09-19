@@ -32,6 +32,9 @@ pub struct Args {
     /// syntax. Candidates are commented out with the reason they fell short.
     #[arg(long)]
     pub splits: Option<PathBuf>,
+    /// Write versioned data-range membership witnesses for discovery review.
+    #[arg(long)]
+    pub data_evidence: Option<PathBuf>,
     /// Write evidence for conservative partial translation-unit coverage here.
     #[arg(long)]
     pub coverage: Option<PathBuf>,
@@ -79,6 +82,7 @@ pub fn run(args: Args) -> Result<()> {
             renames: args.renames,
             candidates: args.candidates,
             splits: args.splits,
+            data_evidence: args.data_evidence,
             coverage: args.coverage,
             identifications: args.identifications,
         },

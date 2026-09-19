@@ -4,6 +4,7 @@ use decomp_toolkit::{
     obj::{ObjSectionKind, ObjSymbolKind, SectionIndex},
     util::split::default_section_align,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::analysis::{
     data_matching::DataMatch,
@@ -15,7 +16,8 @@ use crate::analysis::{
 /// Mirrors [`MatchTier`]: only [`Confident`](UnitTier::Confident) is safe to
 /// write into a splits file unreviewed — a wrong boundary silently pulls the
 /// wrong code into a unit with nothing to prompt a re-check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum UnitTier {
     /// Full member count, matched confident, in source order, edges bounded,
     /// no overlap with an existing split, and (for a code run) no non-code
@@ -550,7 +552,17 @@ fn classify(
 /// from splits that were 4-byte aligned but not the 8 several `.rodata`/
 /// `.data` sections actually require.
 fn aligned_boundary(target: &MatchTarget, section: SectionIndex, start: u32, end: u32) -> bool {
-    let Some(s) = target.obj.sections.get(section) else { return false };
+    let Some(align) = required_alignment(target, section, start, end) else { return false };
+    start % align == 0 && end % align == 0
+}
+
+pub(crate) fn required_alignment(
+    target: &MatchTarget,
+    section: SectionIndex,
+    start: u32,
+    end: u32,
+) -> Option<u32> {
+    let s = target.obj.sections.get(section)?;
     let default_align = default_section_align(s) as u32;
     let align = target
         .obj
@@ -561,7 +573,7 @@ fn aligned_boundary(target: &MatchTarget, section: SectionIndex, start: u32, end
         .max()
         .unwrap_or(default_align)
         .max(default_align);
-    start % align == 0 && end % align == 0
+    Some(align)
 }
 
 fn has_split_at(target: &MatchTarget, section: SectionIndex, address: u32) -> bool {

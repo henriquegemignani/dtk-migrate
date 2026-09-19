@@ -27,12 +27,14 @@ use crate::{
         unit_matching::propose_units,
     },
     matching::{
+        data_evidence::DataEvidenceReport,
         proposals::write_unit_proposals,
         report::{Report, ReportMatch, renameable_data},
     },
     project::analyze::{extract_specs, load_analyzed},
 };
 
+pub mod data_evidence;
 pub mod proposals;
 pub mod report;
 
@@ -44,6 +46,7 @@ pub struct Outputs {
     pub renames: Option<PathBuf>,
     pub candidates: Option<PathBuf>,
     pub splits: Option<PathBuf>,
+    pub data_evidence: Option<PathBuf>,
     pub coverage: Option<PathBuf>,
     pub identifications: Option<PathBuf>,
 }
@@ -229,9 +232,32 @@ pub fn run(request: &Request) -> Result<()> {
     if let Some(path) = native(outputs.candidates.as_ref()) {
         write_candidates(&path, &report)?;
     }
-    if let Some(path) = native(outputs.splits.as_ref()) {
+    if outputs.splits.is_some() || outputs.data_evidence.is_some() {
         let proposals = propose_units(&source, &target, &result, &data_matches);
-        write_unit_proposals(&path, &target, &proposals)?;
+        if let Some(path) = native(outputs.splits.as_ref()) {
+            write_unit_proposals(&path, &target, &proposals)?;
+        }
+        if let Some(path) = native(outputs.data_evidence.as_ref()) {
+            let version = |config: &Utf8NativePath| -> Result<String> {
+                Path::new(config.as_str())
+                    .parent()
+                    .and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .ok_or_else(|| anyhow::anyhow!("Cannot find version for {config}"))
+            };
+            let evidence = DataEvidenceReport::build(
+                &source,
+                &target,
+                &data_matches,
+                &proposals,
+                &version(&request.source_config)?,
+                &version(&request.target_config)?,
+            );
+            let mut file = buf_writer(&path)?;
+            serde_json::to_writer_pretty(&mut file, &evidence)?;
+            file.flush()?;
+            info!("Wrote data range evidence to {}", path);
+        }
     }
     if let Some(path) = native(outputs.coverage.as_ref()) {
         let source_extracts = extract_specs(&source_config);
