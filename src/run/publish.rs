@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     project::{report::Report, splits::Splits},
-    run::{RunDir, RunRecord, StageResult, context, read_json, stage_for, write_json},
+    run::{RunDir, RunRecord, StageResult, context, read_json, stage_for},
     stages::{FinalCertificates, Prepared, coverage::AppliedRecord, discover},
     workspace::{Manifest, Snapshot},
 };
@@ -48,6 +48,9 @@ pub struct Journal {
     /// Digest of the final composed ownership and certificate graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_certificates_sha256: Option<String>,
+    /// The run summary is complete before publication is committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_sha256: Option<String>,
 }
 
 /// The complete final body of every certified unit and the evidence chain
@@ -192,6 +195,7 @@ pub fn publish(
     dir: &RunDir,
     run: &RunRecord,
     results: &BTreeMap<String, (StageResult, Prepared)>,
+    write_result: impl FnOnce(&Report) -> Result<()>,
 ) -> Result<Report> {
     crate::run::check_environment(run)?;
 
@@ -222,6 +226,7 @@ pub fn publish(
         changes: BTreeMap::new(),
         conflicts: Vec::new(),
         final_certificates_sha256: None,
+        result_sha256: None,
     };
     for name in &changed {
         journal.changes.insert(name.clone(), Change {
@@ -232,10 +237,10 @@ pub fn publish(
         });
     }
     let journal_path = dir.path.join("publication.json");
-    write_json(&journal_path, &journal)?;
+    write_json_atomic(&journal_path, &journal)?;
 
     let ctx = context(root, run, dir.path.join("owner-validation"), None);
-    let outcome = (|| -> Result<(Report, String)> {
+    let outcome = (|| -> Result<(Report, String, String)> {
         for (name, change) in &journal.changes {
             let path = root.join(name);
             if read_optional(&path)?.map(|b| hash_file_bytes(&b)) != change.before_sha256 {
@@ -293,26 +298,33 @@ pub fn publish(
         ctx.restore_generated_graph()?;
         let graph = certificate_graph(root, &run.target, results, &certificates)?;
         let path = dir.path.join("final-certificates.json");
-        write_json(&path, &graph)?;
-        Ok((report, hash_file_bytes(&std::fs::read(path)?)))
+        write_json_atomic(&path, &graph)?;
+        write_result(&report)?;
+        Ok((
+            report,
+            hash_file_bytes(&std::fs::read(path)?),
+            hash_file_bytes(&std::fs::read(dir.path.join("result.json"))?),
+        ))
     })();
 
     match outcome {
-        Ok((report, certificate_sha256)) => {
+        Ok((report, certificate_sha256, result_sha256)) => {
             journal.final_certificates_sha256 = Some(certificate_sha256);
+            journal.result_sha256 = Some(result_sha256);
             journal.status = Status::Published;
-            write_json(&journal_path, &journal)?;
+            write_json_atomic(&journal_path, &journal)?;
             Ok(report)
         }
         Err(error) => {
             let _ = std::fs::remove_file(dir.path.join("final-certificates.json"));
+            let _ = std::fs::remove_file(dir.path.join("result.json"));
             journal.conflicts = roll_back(root, &journal)?;
             journal.status = if journal.conflicts.is_empty() {
                 Status::RolledBack
             } else {
                 Status::UserEditConflict
             };
-            write_json(&journal_path, &journal)?;
+            write_json_atomic(&journal_path, &journal)?;
             if journal.conflicts.is_empty() && Snapshot::of(root)?.manifest == owner.manifest {
                 // Leave the project buildable, but never let a failure here
                 // mask the failure that caused the rollback.
@@ -376,6 +388,14 @@ pub fn recover(root: &Path, dir: &RunDir) -> Result<Option<Status>> {
             if hash_file_bytes(&std::fs::read(&path)?) != *expected {
                 bail!("Final certificate graph changed since publication");
             }
+            if let Some(expected) = &journal.result_sha256 {
+                let path = dir.path.join("result.json");
+                let bytes = std::fs::read(&path)
+                    .context("Run result changed since publication: result.json is missing")?;
+                if hash_file_bytes(&bytes) != *expected {
+                    bail!("Run result changed since publication");
+                }
+            }
         }
         return Ok(Some(journal.status));
     }
@@ -383,7 +403,8 @@ pub fn recover(root: &Path, dir: &RunDir) -> Result<Option<Status>> {
     journal.status =
         if journal.conflicts.is_empty() { Status::RolledBack } else { Status::UserEditConflict };
     let _ = std::fs::remove_file(dir.path.join("final-certificates.json"));
-    write_json(&journal_path, &journal)?;
+    let _ = std::fs::remove_file(dir.path.join("result.json"));
+    write_json_atomic(&journal_path, &journal)?;
     Ok(Some(journal.status))
 }
 
@@ -398,6 +419,12 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
 fn hash_file_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Publish an artifact as one replacement, so an interrupted write leaves a
+/// complete old or new JSON document for recovery to read.
+pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    replace(path, &serde_json::to_vec_pretty(value)?)
 }
 
 /// Writes through a temporary file in the same directory, so a reader never
@@ -454,6 +481,7 @@ mod tests {
             })]),
             conflicts: Vec::new(),
             final_certificates_sha256: None,
+            result_sha256: None,
         }
     }
 
@@ -504,11 +532,13 @@ mod tests {
         let run = RunDir { path: dir.path().join("run") };
         let journal = journal(dir.path(), "published\n");
         std::fs::write(dir.path().join("configure.py"), "published\n").unwrap();
-        write_json(&run.path.join("publication.json"), &journal).unwrap();
+        write_json_atomic(&run.path.join("publication.json"), &journal).unwrap();
         std::fs::write(run.path.join("final-certificates.json"), b"incomplete").unwrap();
+        std::fs::write(run.path.join("result.json"), b"incomplete").unwrap();
         assert_eq!(recover(dir.path(), &run).unwrap(), Some(Status::RolledBack));
         assert_eq!(std::fs::read_to_string(dir.path().join("configure.py")).unwrap(), "original\n");
         assert!(!run.path.join("final-certificates.json").exists());
+        assert!(!run.path.join("result.json").exists());
     }
 
     #[test]
@@ -521,7 +551,7 @@ mod tests {
         std::fs::write(run.path.join("final-certificates.json"), b"certificate").unwrap();
         journal.final_certificates_sha256 = Some(hash_file_bytes(b"certificate"));
         std::fs::write(dir.path().join("configure.py"), "published\n").unwrap();
-        write_json(&run.path.join("publication.json"), &journal).unwrap();
+        write_json_atomic(&run.path.join("publication.json"), &journal).unwrap();
         assert_eq!(recover(dir.path(), &run).unwrap(), Some(Status::Published));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("configure.py")).unwrap(),
@@ -539,12 +569,12 @@ mod tests {
         std::fs::create_dir_all(&run.path).unwrap();
         std::fs::write(&graph, b"first").unwrap();
         journal.final_certificates_sha256 = Some(hash_file_bytes(b"first"));
-        write_json(&run.path.join("publication.json"), &journal).unwrap();
+        write_json_atomic(&run.path.join("publication.json"), &journal).unwrap();
         assert_eq!(recover(dir.path(), &run).unwrap(), Some(Status::Published));
         std::fs::write(&graph, b"changed").unwrap();
         assert!(recover(dir.path(), &run).unwrap_err().to_string().contains("certificate graph"));
         journal.final_certificates_sha256 = None;
-        write_json(&run.path.join("publication.json"), &journal).unwrap();
+        write_json_atomic(&run.path.join("publication.json"), &journal).unwrap();
         assert!(
             recover(dir.path(), &run).unwrap_err().to_string().contains("no final certificate")
         );

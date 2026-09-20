@@ -338,6 +338,15 @@ fn resuming_a_published_run_does_no_work() {
     let id = run.file_name().unwrap().to_string_lossy().into_owned();
     let before = fixture.build_logs();
     let configure_before = fixture.read("configure.py");
+    let result = std::fs::read(run.join("result.json")).unwrap();
+    let journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(run.join("publication.json")).unwrap()).unwrap();
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        journal["result_sha256"],
+        format!("{:x}", Sha256::digest(&result)),
+        "publication must commit the complete result with its certificates"
+    );
 
     let resumed = fixture.migrate(&["--resume", &id]);
     assert!(resumed.status.success(), "{}", report(&resumed));
@@ -348,6 +357,20 @@ fn resuming_a_published_run_does_no_work() {
     );
     assert_eq!(fixture.build_logs(), before, "a published run should rebuild nothing");
     assert_eq!(fixture.read("configure.py"), configure_before);
+    assert_eq!(std::fs::read(run.join("result.json")).unwrap(), result);
+
+    std::fs::remove_file(run.join("result.json")).unwrap();
+    let missing = fixture.migrate(&["--resume", &id]);
+    assert!(!missing.status.success(), "{}", report(&missing));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("Run result changed since publication"),
+        "{}",
+        report(&missing)
+    );
+    std::fs::write(run.join("result.json"), result).unwrap();
+    let resumed_again = fixture.migrate(&["--resume", &id]);
+    assert!(resumed_again.status.success(), "{}", report(&resumed_again));
+    assert_eq!(fixture.build_logs(), before);
 }
 
 #[test]

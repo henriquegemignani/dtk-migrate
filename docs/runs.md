@@ -143,9 +143,10 @@ Successful publication writes `final-certificates.json` with each certified
 unit's complete final body when one exists, its accepted coverage transaction chain, the
 selected discovery evidence digest, and whether this run verified its source
 link. Transaction read dependencies name the neighbouring unit and section.
-The journal stores the file's SHA-256; resuming an already published run
-refuses a changed certificate record. An interrupted publication removes an
-unfinished record while rolling back.
+The journal stores the certificate graph's and whole-run `result.json`'s SHA-256.
+Both are written before the journal commits `published`; resuming an already
+published run refuses a missing or changed record. An interrupted publication
+removes either unfinished record while rolling back.
 
 A rollback never overwrites an edit made meanwhile. Someone else's work outranks
 undoing ours: the file is left as they made it and named in the journal.
@@ -163,7 +164,10 @@ stage, tools and timeout — is reused; anything else is rerun rather than trust
 A worker failure stops the other lanes but keeps what they finished, so a resumed
 run picks up from there.
 
-Resuming a run that already published does nothing and says so. A run written
+An incomplete run must resume under the same `dtk-migrate` executable that
+started it; the error names the frozen copy if the current executable differs.
+Resuming a run that already published validates its saved result and certificates,
+then does no build work. A run written
 by a tool with a different run schema (currently 9) is refused rather than
 reinterpreted. Schema 9 requires coverage's extract inventories and the stage's
 selection and applied-transaction history; missing safety data cannot silently

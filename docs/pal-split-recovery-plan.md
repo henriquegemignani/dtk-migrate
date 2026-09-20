@@ -1,15 +1,14 @@
 # Plan: recover PAL translation units from historical NTSC evidence
 
-Status: living implementation plan. Change A landed through `0a351d2`; Change B landed at
-`c6e0039`; Change C landed at `beb8e2d`, with end-to-end compatibility fixes at `cfd1cfa` and
-`2dcea5a`. Change E (atomic ownership transactions) landed at `520a3f3`. Change D's first two
-rules are described in the checkpoint below. The remaining plan is based on the architecture
-after those changes. Change F's bounded joint-run search is implemented under policy 14;
-its historical and held-out evaluation is recorded below. Change G has binary
-helper families, optional object evidence, unresolved clusters, schema-12 tail
-hypotheses and schema-14 external compiled-object scanning; emitted ownership
-remains constrained by incomplete linker
-inventories. Changes H and I are still open.
+Status: living implementation plan. A–F's safety and composition mechanisms,
+H's scoped code/data certificates and I's bounded retry and final-validation
+mechanisms are implemented. G's helper families, optional object evidence and
+unresolved clusters are diagnostic; emitted-owner and relocation-placement
+records do not yet drive ownership transactions. The two frozen, complete
+NTSC→PAL runs and held-out diagnostics are reported in
+[`historical-validation.md`](historical-validation.md). The remaining work is
+positive emitted-owner proof, additional recall rules and independently
+verified ownership controls, not a claim that every later PAL split is found.
 
 ### Compiled objects outside the baseline split inventory (schema 14)
 

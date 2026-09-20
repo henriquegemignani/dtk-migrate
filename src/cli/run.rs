@@ -99,9 +99,22 @@ pub fn run(args: Args) -> Result<()> {
         None => start(&root, &args)?,
     };
     crate::run::check_environment(&record)?;
+    // The frozen hook is also the coordinator that interprets evidence and
+    // decides what to publish. A same-schema rebuild must not silently finish
+    // an incomplete run under the old binary's recorded identity.
+    if !published(&dir)? {
+        require_frozen_coordinator(
+            &record.environment.migrate_sha256,
+            &record.tools.hook,
+            &std::env::current_exe()?,
+        )?;
+    }
 
     match publish::recover(&root, &dir)? {
         Some(publish::Status::Published) => {
+            if !dir.path.join("result.json").is_file() {
+                bail!("Published run {} has no result.json", record.id);
+            }
             tracing::info!(
                 "Run {} was already published; evidence: {}",
                 record.id,
@@ -139,25 +152,29 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     crate::run::check_only_resolved(&record.only, &resolved)?;
-    let report = publish::publish(&root, &current, &dir, &record, &results)?;
-    let summary = Summary {
-        schema: SCHEMA,
-        id: record.id.clone(),
-        source: record.source.clone(),
-        target: record.target.clone(),
-        stages: results.into_iter().map(|(name, (result, _))| (name, result)).collect(),
-        published_dol_sha1: crate::run::context(
-            &root,
-            &record,
-            dir.path.join("owner-validation"),
-            None,
-        )
-        .dol_sha1()?,
-        matched_code: report.measures.matched_code,
-        total_code: report.measures.total_code,
-        complete_code: report.measures.complete_code,
-    };
-    write_json(&dir.path.join("result.json"), &summary)?;
+    publish::publish(&root, &current, &dir, &record, &results, |report| {
+        let summary = Summary {
+            schema: SCHEMA,
+            id: record.id.clone(),
+            source: record.source.clone(),
+            target: record.target.clone(),
+            stages: results
+                .iter()
+                .map(|(name, (result, _))| (name.clone(), result.clone()))
+                .collect(),
+            published_dol_sha1: crate::run::context(
+                &root,
+                &record,
+                dir.path.join("owner-validation"),
+                None,
+            )
+            .dol_sha1()?,
+            matched_code: report.measures.matched_code,
+            total_code: report.measures.total_code,
+            complete_code: report.measures.complete_code,
+        };
+        publish::write_json_atomic(&dir.path.join("result.json"), &summary)
+    })?;
     tracing::info!("Published. Evidence: {}", dir.path.display());
     Ok(())
 }
@@ -278,6 +295,26 @@ fn resume(root: &Path, id: &str) -> Result<(RunDir, RunRecord)> {
         );
     }
     Ok((dir, record))
+}
+
+fn published(dir: &RunDir) -> Result<bool> {
+    let path = dir.path.join("publication.json");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let journal: publish::Journal = crate::run::read_json(&path)?;
+    Ok(journal.status == publish::Status::Published)
+}
+
+fn require_frozen_coordinator(expected: &str, frozen: &Path, executable: &Path) -> Result<()> {
+    if crate::workspace::hash_file(executable)? != expected {
+        bail!(
+            "The current dtk-migrate executable differs from the one that started this run; \
+             resume with the frozen executable at {} or start a fresh run",
+            frozen.display()
+        );
+    }
+    Ok(())
 }
 
 /// Expands `all` and puts the requested stages into the only order they may run
@@ -455,5 +492,20 @@ mod tests {
 
         std::fs::write(directory.path().join("untracked"), "user input").unwrap();
         assert!(!repository_state(directory.path()).unwrap().unwrap().clean);
+    }
+
+    #[test]
+    fn an_incomplete_run_requires_the_original_coordinator_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original");
+        let rebuilt = directory.path().join("rebuilt");
+        std::fs::write(&original, b"same schema, original policy").unwrap();
+        std::fs::write(&rebuilt, b"same schema, changed policy").unwrap();
+        let digest = crate::workspace::hash_file(&original).unwrap();
+        require_frozen_coordinator(&digest, &original, &original).unwrap();
+        let error =
+            require_frozen_coordinator(&digest, &original, &rebuilt).unwrap_err().to_string();
+        assert!(error.contains("differs"), "{error}");
+        assert!(error.contains(&original.display().to_string()), "{error}");
     }
 }

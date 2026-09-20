@@ -1,0 +1,91 @@
+# PAL split recovery: frozen validation
+
+This records the completed policy-16 evaluation, not a claim that every later
+PAL split can be recovered from the old binaries. The migration used only each
+frozen baseline and its NTSC source version. Later PAL splits at `ca286f45`
+were used by the benchmark afterward as an oracle. The runs, manifests and
+scores are retained on F: under `target/` and the isolated Prime checkout's
+`build/dtk-migrate/runs/`.
+
+| NTSC→PAL baseline | Run | Changed code exact | Changed full exact | Correct code gained | Known code wrong/lost | Published retail |
+|---|---|---:|---:|---:|---:|---|
+| `b65ad2a6` | `20716-030131` | 7/25 | 4/27 | 1,824 B | 0/0 B | SHA-1 `4d3780c7…` |
+| `46bd33805` | `20716-035350` | 2/15 | 0/15 | 1,320 B | 0/0 B | Same retail SHA-1 |
+
+The old, pre-safety historical run recovered 2/25 changed code bodies and
+1/27 complete bodies, but left 4 changed code bodies wrong and introduced
+1,884 bytes of known wrong ownership. After Change C's safety gate the
+comparable figures fell to 1/25 and 0/27 with no newly wrong bytes. Policy 16
+recovers Group, TableGroup, CompoundWidget, Pane, SliderGroup, Platform and
+Sound exactly in code; the first four are exact in complete ownership too.
+The 20-unit second-cutoff cohort is a subset of the first run's 35, and every
+overlapping unit has the same code, full-body and application outcome.
+
+Both full runs executed derive, coverage, discover and verify, published, then
+resumed without rebuilding. At the older cutoff the stage times were 265,
+763, 1,445 and 558 seconds respectively, and their logs contain 7, 92, 134
+and 105 Ninja build invocations (338 total). At the later cutoff they were
+265, 739, 1,451 and 533 seconds, with 7, 85, 134 and 101 invocations (327).
+These are sums of stage wall times and logged builds, not elapsed time or
+compiler-process counts. The original historical run's complete build logs
+were removed, so an equivalent runtime comparison to it is unavailable.
+
+The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
+known bytes in complete ownership. It also records **26,608 bytes accepted
+where the later oracle assigns no owner**. Those bytes are unknown, not proven
+correct. Every oracle unit has `trust=unverified`: no independent verify run
+proved the oracle revision, and the benchmark's proven-control and
+source-linked populations are both empty. The no-regression result therefore
+means no damage against *known later split ownership*, not build-verified
+ownership correctness. The full score's changed-code remainder is 7,540
+missed bytes; changed-full remainder is 8,699.
+
+## Named gaps at the older cutoff
+
+The table names every recall unit with missing code. The figures are missed
+oracle bytes, not proposed growth. The score JSON retains addresses, evidence,
+offers, refusals and all affected-neighbour ledgers.
+
+| Unit | Code missed | Main unresolved evidence or application gate |
+|---|---:|---|
+| `CGuiFactories` | 1,184 | Missing source endpoint, unattributed target successor and members |
+| `CGuiHeadWidget` | 12 | Type-ID helper has a duplicate emitted-owner question |
+| `CGuiLight` | 452 | Unmatched internal target function and right endpoint |
+| `CFBStreamedCompression` | 540 | Unmatched internal functions and both target endpoints |
+| `CTimeRemainderAndFraction` | 244 | No baseline TU; five-function orphan cluster is only partly assigned by the later oracle |
+| `CStreamAudioManager` | 236 | Left `fn_8034F370` is unattributed; another 240 data bytes remain |
+| `CBlockInstruction` | 256 | Right target boundary and weak/template member owner |
+| `CColorOverrideInstruction` | 96 | Exact proposal refused for no matched source-code gain |
+| `CFontInstruction` | 132 | Unsupported left target boundary |
+| `CImageInstruction` | 372 | Missing source endpoint and unattributed target successor; build refusal |
+| `CLineSpacingInstruction` | 12 | Small helper's emitted owner is unproved |
+| `CPopStateInstruction` | 96 | Exact proposal refused for no matched source-code gain |
+| `CRemoveColorOverrideInstruction` | 188 | Missing source endpoint and unattributed target predecessor |
+| `CTransitionDatabaseGame` | 628 | Unmatched internal function and left endpoint |
+| `CTeamAiMgr` | 1,296 | Missing source endpoints, unmatched internal functions and unattributed target edges |
+| `CScriptCameraPitchVolume` | 1,000 | Members currently owned by `TypesMatch`; unmatched internal target functions |
+| `CScriptRoomAcoustics` | 12 | Duplicate destructor/vtable ownership with `TypesMatch`; source-link failure |
+| `CScriptTimer` | 784 | Missing left source endpoint, incomplete member attribution and build refusal |
+
+Code-exact SliderGroup, Platform and Sound still miss respectively 16, 351
+and 228 non-code bytes. Widget misses 152 non-code bytes and its source-link
+attempt reports duplicate identifiers and vtable definitions. DSPStreamManager
+misses 48 non-code bytes. Ten other named recall units have no missed code
+but received no new code ownership; the zero byte gap is not evidence that
+their source objects can link. This distinction is visible in the score's
+application and verification columns.
+
+Hidden-name GM8E01_00→GM8E01_02 calibration produced no selected wrong
+boundary or wrong known byte in five scenarios. It did report two wrong
+*unselected* fallback/anchor hypotheses, `CDrone` and `CMetroid`, so retained
+alternatives still need scrutiny. The older baseline's binary-only hidden-name
+report corroborated 19 of the 35 oracle TUs, left 15 tentative and the future
+CTime TU absent. Optional compiled-object evidence changed no confidence
+outcome for these 35. These held-out diagnostics were not used to tune the
+policy after scoring.
+
+The next recall work is evidence-backed code ownership without a matched-code
+gain, positive emitted-owner proof with complete competitor inventory,
+typed data/vtable/BSS ownership transfers, then insertion/deletion-aware
+member matching. None should turn a diagnostic family or orphan cluster into
+an owner by name, unique body or sole caller alone.
