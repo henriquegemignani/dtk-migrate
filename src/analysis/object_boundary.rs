@@ -1,12 +1,11 @@
-//! A narrow, diagnostic boundary supported by ordered binary and compiled functions.
+//! Ordered binary and compiled-function placement evidence.
 //!
 //! A compiled definition alone does not identify the object that emitted a
-//! retail function. This record instead keeps the entire two-unit arrangement:
-//! two currently held functions of the left unit, its missing weak tail, two
-//! functions of the right unit, and a held independent right anchor. Every
-//! function occurs in the same unbroken order in the source and target
-//! binaries. The compiled objects corroborate all six functions; a
-//! source–compiled–target bridge supplies the changed fifth body.
+//! retail function. Each record therefore keeps an entire bounded arrangement
+//! rather than promoting one matching body: a two-unit seam, or a terminal
+//! suffix of one clean object bracketed by a held predecessor and an
+//! independent foreign successor. The transaction path checks source split
+//! ownership and the complete resulting bodies before using either record.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -17,6 +16,7 @@ use super::{
         BuildFreshness, CompiledFunction, ObjectEvidence, ObjectRecord, ObjectStatus,
     },
     ownership::{FunctionAttribution, SourceFunctionObservation, TargetFunctionObservation},
+    policy::{MAX_COMPILED_TERMINAL_MEMBERS, MIN_COMPILED_TERMINAL_MEMBERS},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +30,21 @@ pub struct CompiledBoundary {
     pub target_addresses: [String; 6],
     pub left_object_sha256: String,
     pub right_object_sha256: String,
+}
+
+/// A complete terminal run of a clean compiled object, in the same order at
+/// the end of its source unit and just beyond the unit's current retail split.
+/// The held predecessor and the independent following foreign function bound
+/// the claim. Individual bridges remain identity evidence only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompiledTerminalSuffix {
+    pub unit: String,
+    pub section: String,
+    pub source_addresses: Vec<String>,
+    pub target_addresses: Vec<String>,
+    pub predecessor_attribution_id: String,
+    pub following_attribution_id: String,
+    pub object_sha256: String,
 }
 
 fn address(text: &str) -> Option<u32> { u32::from_str_radix(text.strip_prefix("0x")?, 16).ok() }
@@ -81,6 +96,232 @@ fn compiled_member<'a>(
         .collect();
     let [member] = matches.as_slice() else { return None };
     Some(member)
+}
+
+/// Derive a bounded suffix without using an oracle split or unit-specific
+/// names. A clean object and a bridge for one function do not suffice: every
+/// terminal function must bridge, one must be non-weak, and both sides of the
+/// retail gap must have independently checkable placement facts.
+pub fn compiled_terminal_suffixes(
+    evidence: &ObjectEvidence,
+    source_functions: &[SourceFunctionObservation],
+    target_functions: &[TargetFunctionObservation],
+    attributions: &[FunctionAttribution],
+) -> Vec<CompiledTerminalSuffix> {
+    if evidence.target_references.is_empty() || evidence.source_bridges.is_empty() {
+        return Vec::new();
+    }
+    let mut objects = BTreeMap::new();
+    let mut duplicate = BTreeSet::new();
+    for record in &evidence.objects {
+        if objects.insert(record.unit.as_str(), record).is_some() {
+            duplicate.insert(record.unit.as_str());
+        }
+    }
+    for unit in duplicate {
+        objects.remove(unit);
+    }
+    let mut sources: BTreeMap<(&str, &str), Vec<_>> = BTreeMap::new();
+    for source in source_functions.iter().filter(|item| item.module == "main" && item.extent_known)
+    {
+        sources.entry((&source.unit, &source.section)).or_default().push(source);
+    }
+    for members in sources.values_mut() {
+        members.sort_by_key(|item| address(&item.address));
+    }
+    let mut targets: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+    for target in target_functions.iter().filter(|item| item.module == "main" && item.extent_known)
+    {
+        targets.entry(&target.section).or_default().push(target);
+    }
+    for members in targets.values_mut() {
+        members.sort_by_key(|item| address(&item.address));
+    }
+    let attributed: BTreeMap<_, _> = attributions
+        .iter()
+        .filter(|item| item.target.module == "main")
+        .map(|item| ((item.target.section.as_str(), item.target.address.as_str()), item))
+        .collect();
+    let bridges: BTreeMap<_, _> = evidence
+        .source_bridges
+        .iter()
+        .map(|item| {
+            ((item.unit.as_str(), item.section.as_str(), item.target_address.as_str()), item)
+        })
+        .collect();
+    let mut result = Vec::new();
+    for ((unit, section), source) in sources {
+        let (Some(record), Some(target)) = (objects.get(unit), targets.get(section)) else {
+            continue;
+        };
+        if record.status != ObjectStatus::Available
+            || record.build_freshness != BuildFreshness::Clean
+            || record.sha256.is_none()
+            || source.len() < MIN_COMPILED_TERMINAL_MEMBERS + 1
+            || source_functions.iter().any(|item| {
+                item.module == "main"
+                    && item.unit == unit
+                    && item.section == section
+                    && !item.extent_known
+            })
+        {
+            continue;
+        }
+        let mut compiled: Vec<_> =
+            record.functions.iter().filter(|item| item.section == section).collect();
+        compiled.sort_by_key(|item| address(&item.address));
+        if compiled.len() < MIN_COMPILED_TERMINAL_MEMBERS + 1 {
+            continue;
+        }
+        for first in evidence
+            .source_bridges
+            .iter()
+            .filter(|bridge| bridge.unit == unit && bridge.section == section)
+            .filter_map(|bridge| {
+                target.iter().position(|item| item.address == bridge.target_address)
+            })
+            .filter(|&position| {
+                position > 0 && position + MIN_COMPILED_TERMINAL_MEMBERS < target.len()
+            })
+        {
+            let predecessor = target[first - 1];
+            if predecessor.current_owner.as_deref() != Some(unit) {
+                continue;
+            }
+            let Some(before) = attributed.get(&(section, predecessor.address.as_str())).copied()
+            else {
+                continue;
+            };
+            if before.source.unit != unit
+                || before.ambiguous
+                || !before.binary_supported
+                || before.source_weak
+                || before.target_weak
+            {
+                continue;
+            }
+            // The next independently identified foreign function is a right
+            // bound, not an assertion about its retail split owner.
+            let Some(last) = ((first + MIN_COMPILED_TERMINAL_MEMBERS)
+                ..=(first + MAX_COMPILED_TERMINAL_MEMBERS).min(target.len() - 1))
+                .find(|&last| {
+                    let item = target[last];
+                    attributed.get(&(section, item.address.as_str())).is_some_and(|next| {
+                        next.independent
+                            && next.binary_supported
+                            && !next.ambiguous
+                            && !next.source_weak
+                            && !next.target_weak
+                            && next.source.unit != unit
+                    })
+                })
+            else {
+                continue;
+            };
+            let count = last - first;
+            if source.len() < count + 1 || compiled.len() < count + 1 {
+                continue;
+            }
+            let source_run = &source[source.len() - count..];
+            let compiled_run = &compiled[compiled.len() - count..];
+            let target_run = &target[first..last];
+            let source_before = source[source.len() - count - 1];
+            let compiled_before = compiled[compiled.len() - count - 1];
+            if before.source.address != source_before.address
+                || target_functions.iter().any(|item| {
+                    item.module == "main"
+                        && item.section == section
+                        && !item.extent_known
+                        && address(&item.address).is_some_and(|start| {
+                            address(&predecessor.address).is_some_and(|left| left <= start)
+                                && address(&target[last].address)
+                                    .is_some_and(|right| start <= right)
+                        })
+                })
+                || compiled_member(record, source_before, predecessor, evidence)
+                    .is_none_or(|member| member.address != compiled_before.address)
+                || !adjacent(&predecessor.end, &target_run[0].address)
+                || !adjacent(&target[last - 1].end, &target[last].address)
+                || !adjacent(&source_before.end, &source_run[0].address)
+                || !adjacent(&compiled_before.end, &compiled_run[0].address)
+                || source_run.windows(2).any(|pair| !adjacent(&pair[0].end, &pair[1].address))
+                || compiled_run.windows(2).any(|pair| !adjacent(&pair[0].end, &pair[1].address))
+                || target_run.windows(2).any(|pair| !adjacent(&pair[0].end, &pair[1].address))
+                || target_run.iter().any(|item| item.current_owner.is_some())
+            {
+                continue;
+            }
+            let mut nonweak = 0;
+            let mut matched = true;
+            for ((s, c), t) in source_run.iter().zip(compiled_run).zip(target_run) {
+                let Some(bridge) = bridges.get(&(unit, section, t.address.as_str())).copied()
+                else {
+                    matched = false;
+                    break;
+                };
+                if bridge.source_address != s.address
+                    || bridge.source_name != s.name
+                    || bridge.compiled_address != c.address
+                    || bridge.object_sha256 != record.sha256.as_deref().unwrap_or_default()
+                    || bridge.current_owner.is_some()
+                    || c.name != s.name
+                    || bridge.source_weak != s.weak
+                    || bridge.compiled_weak != c.weak
+                    || bridge.target_weak != t.weak
+                    || c.normalized_body_sha256.as_deref()
+                        != Some(bridge.normalized_body_sha256.as_str())
+                    || t.normalized_body_sha256.as_deref()
+                        != Some(bridge.normalized_body_sha256.as_str())
+                    || extent(&c.address, &c.end) != extent(&t.address, &t.end)
+                    || !sites_match(c, t, evidence)
+                {
+                    matched = false;
+                    break;
+                }
+                nonweak += u32::from(!c.weak && !bridge.source_weak && !bridge.target_weak);
+            }
+            if !matched || nonweak == 0 {
+                continue;
+            }
+            // The source's following unit must agree with the independently
+            // identified foreign bound, even when its first function moved.
+            let Some(next_source) = source_functions
+                .iter()
+                .filter(|item| item.module == "main" && item.section == section)
+                .filter(|item| {
+                    address(&item.address).is_some_and(|addr| {
+                        addr > address(&source.last().unwrap().address).unwrap_or(u32::MAX)
+                    })
+                })
+                .min_by_key(|item| address(&item.address))
+            else {
+                continue;
+            };
+            if !next_source.extent_known
+                || !adjacent(&source.last().unwrap().end, &next_source.address)
+                || next_source.unit
+                    != attributed[&(section, target[last].address.as_str())].source.unit
+            {
+                continue;
+            }
+            result.push(CompiledTerminalSuffix {
+                unit: unit.to_string(),
+                section: section.to_string(),
+                source_addresses: source_run.iter().map(|item| item.address.clone()).collect(),
+                target_addresses: target_run.iter().map(|item| item.address.clone()).collect(),
+                predecessor_attribution_id: before.id.clone(),
+                following_attribution_id: attributed[&(section, target[last].address.as_str())]
+                    .id
+                    .clone(),
+                object_sha256: record.sha256.clone().expect("checked above"),
+            });
+            break;
+        }
+    }
+    result.sort_by(|a, b| {
+        (&a.section, &a.target_addresses, &a.unit).cmp(&(&b.section, &b.target_addresses, &b.unit))
+    });
+    result
 }
 
 /// Derive cross-unit boundary hypotheses from the complete, canonical report.
@@ -428,6 +669,116 @@ mod tests {
             inventory_complete: false,
         });
         (evidence, sources, targets, attributions)
+    }
+
+    fn suffix_fixture() -> (
+        ObjectEvidence,
+        Vec<SourceFunctionObservation>,
+        Vec<TargetFunctionObservation>,
+        Vec<FunctionAttribution>,
+    ) {
+        let (mut evidence, mut sources, mut targets, mut attributions) = fixture();
+        sources[3].unit = "A.cpp".into();
+        for target in &mut targets[1..4] {
+            target.current_owner = None;
+        }
+        let mut following = attributions.iter().find(|item| item.id == "pair_5").unwrap().clone();
+        following.id = "following".into();
+        following.target.address = targets[4].address.clone();
+        following.target.end = targets[4].end.clone();
+        following.source.address = sources[4].address.clone();
+        following.source.end = sources[4].end.clone();
+        following.source.name = sources[4].name.clone();
+        following.current_target_owner = None;
+        attributions.retain(|item| item.id == "pair_0");
+        attributions.push(following);
+        let moved = evidence.objects[1].functions.remove(0);
+        evidence.objects[0].functions.push(moved);
+        for index in 1..4 {
+            evidence.source_bridges.push(CompiledSourceBridge {
+                unit: "A.cpp".into(),
+                source_name: sources[index].name.clone(),
+                source_address: sources[index].address.clone(),
+                compiled_address: hex(index as u32 * 0x10),
+                target_address: targets[index].address.clone(),
+                section: ".text".into(),
+                current_owner: None,
+                owner_autogenerated: false,
+                object_sha256: "a".repeat(64),
+                normalized_body_sha256: body(index),
+                source_weak: sources[index].weak,
+                compiled_weak: index == 2,
+                target_weak: false,
+                inventory_complete: false,
+            });
+        }
+        (evidence, sources, targets, attributions)
+    }
+
+    #[test]
+    fn terminal_suffix_requires_the_whole_clean_run_and_both_bounds() {
+        let (evidence, sources, targets, attributions) = suffix_fixture();
+        let found = compiled_terminal_suffixes(&evidence, &sources, &targets, &attributions);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].target_addresses, vec![hex(0x1010), hex(0x1020), hex(0x1030)]);
+        assert_eq!(found[0].predecessor_attribution_id, "pair_0");
+        assert_eq!(found[0].following_attribution_id, "following");
+
+        let mut partial = evidence.clone();
+        partial.source_bridges.retain(|item| item.target_address != hex(0x1020));
+        assert!(compiled_terminal_suffixes(&partial, &sources, &targets, &attributions).is_empty());
+        let mut dirty = evidence.clone();
+        dirty.objects[0].build_freshness = BuildFreshness::Dirty;
+        assert!(compiled_terminal_suffixes(&dirty, &sources, &targets, &attributions).is_empty());
+        let mut extra = evidence.clone();
+        extra.objects[0].functions.push(CompiledFunction {
+            name: "unmatched_tail".into(),
+            section: ".text".into(),
+            address: hex(0x40),
+            end: hex(0x50),
+            normalized_body_sha256: Some(body(6)),
+            weak: false,
+            references: Vec::new(),
+        });
+        assert!(compiled_terminal_suffixes(&extra, &sources, &targets, &attributions).is_empty());
+        let mut held_elsewhere = targets.clone();
+        held_elsewhere[2].current_owner = Some("B.cpp".into());
+        assert!(
+            compiled_terminal_suffixes(&evidence, &sources, &held_elsewhere, &attributions)
+                .is_empty()
+        );
+        let mut unknown_extent = targets.clone();
+        unknown_extent.push(TargetFunctionObservation {
+            address: hex(0x1028),
+            end: hex(0x1028),
+            extent_known: false,
+            ..targets[2].clone()
+        });
+        assert!(
+            compiled_terminal_suffixes(&evidence, &sources, &unknown_extent, &attributions)
+                .is_empty()
+        );
+        let mut forged = evidence.clone();
+        forged
+            .source_bridges
+            .iter_mut()
+            .find(|item| item.target_address == hex(0x1020))
+            .unwrap()
+            .normalized_body_sha256 = body(7);
+        assert!(compiled_terminal_suffixes(&forged, &sources, &targets, &attributions).is_empty());
+        let mut all_weak = evidence.clone();
+        for function in all_weak.objects[0].functions.iter_mut().skip(1) {
+            function.weak = true;
+        }
+        for bridge in all_weak.source_bridges.iter_mut().filter(|item| item.unit == "A.cpp") {
+            bridge.compiled_weak = true;
+        }
+        assert!(
+            compiled_terminal_suffixes(&all_weak, &sources, &targets, &attributions).is_empty()
+        );
+        let mut weak_bound = attributions.clone();
+        weak_bound[1].independent = false;
+        assert!(compiled_terminal_suffixes(&evidence, &sources, &targets, &weak_bound).is_empty());
     }
 
     #[test]

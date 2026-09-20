@@ -30,7 +30,7 @@ use crate::{
         callgraph::{CallGraph, FunctionRef},
         helpers::body_digest,
         matching::MatchTarget,
-        object_boundary::CompiledBoundary,
+        object_boundary::{CompiledBoundary, CompiledTerminalSuffix},
         ownership::{FunctionAttribution, SourceFunctionObservation, TargetFunctionObservation},
     },
     project::{
@@ -343,6 +343,10 @@ pub struct ObjectEvidence {
     /// it does not by itself identify which object the linker emitted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compiled_boundaries: Vec<CompiledBoundary>,
+    /// Complete terminal runs backed by a clean compiled object and bounded
+    /// by held and independently identified retail functions. Schema 20.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compiled_terminal_suffixes: Vec<CompiledTerminalSuffix>,
 }
 
 impl ObjectEvidence {
@@ -366,6 +370,7 @@ impl ObjectEvidence {
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
             compiled_boundaries: Vec::new(),
+            compiled_terminal_suffixes: Vec::new(),
         }
     }
 
@@ -398,7 +403,8 @@ impl ObjectEvidence {
                 || !self.emitted_owners.is_empty()
                 || !self.relocation_placements.is_empty()
                 || !self.source_bridges.is_empty()
-                || !self.compiled_boundaries.is_empty())
+                || !self.compiled_boundaries.is_empty()
+                || !self.compiled_terminal_suffixes.is_empty())
         {
             bail!("Unavailable compiled-object channel contains observations");
         }
@@ -935,6 +941,7 @@ pub fn inspect(
         relocation_placements: Vec::new(),
         source_bridges: Vec::new(),
         compiled_boundaries: Vec::new(),
+        compiled_terminal_suffixes: Vec::new(),
     };
     let mut seen = BTreeSet::new();
     for entry in config.units {
@@ -2404,6 +2411,7 @@ mod tests {
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
             compiled_boundaries: Vec::new(),
+            compiled_terminal_suffixes: Vec::new(),
         };
         let units = BTreeSet::from(["A.cpp".into(), "B.cpp".into()]);
         let targets = BTreeSet::from([body_hash]);
@@ -2501,6 +2509,7 @@ mod tests {
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
             compiled_boundaries: Vec::new(),
+            compiled_terminal_suffixes: Vec::new(),
         };
         evidence
             .canonicalize(
@@ -2626,6 +2635,7 @@ mod tests {
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
             compiled_boundaries: Vec::new(),
+            compiled_terminal_suffixes: Vec::new(),
         };
         let target = |address: &str, end: &str| TargetFunctionObservation {
             name: "helper".into(),

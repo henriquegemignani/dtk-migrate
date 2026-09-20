@@ -174,6 +174,7 @@ fn fixture() -> (
         relocation_placements: Vec::new(),
         source_bridges: Vec::new(),
         compiled_boundaries: Vec::new(),
+        compiled_terminal_suffixes: Vec::new(),
     };
     evidence.canonicalize(&units, &BTreeSet::from(["a".repeat(64)]), true).unwrap();
     evidence.canonicalize_target_references(&targets).unwrap();

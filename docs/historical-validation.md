@@ -94,6 +94,17 @@ are on F: under `target/policy21-final-heldout-everything/`,
 `target/policy21-final-pal-calibration/` and
 `target/policy21-head-light-score/`.
 
+Policy 22's focused F-drive run `20716-115833` started from the policy-20
+Head/Light split and extended `CTeamAiMgr.cpp` by its complete three-function
+terminal suffix, `0x8022AFD8–0x8022B3D4`. It rebuilt to the same PAL retail
+SHA-1. The exact-baseline, verified-oracle score at
+`target/policy22-team-ai-focused-verified-score/` records 1,020 correct code
+bytes gained, zero known wrong or lost bytes, and 424 unchanged verified
+controls. `CTeamAiMgr` is still partial because its 276-byte prefix is missing.
+All five PAL calibration scenarios and held-out GM8E01_02 `everything` exit 0
+with the same per-unit outcomes and alternative states as policy 21. This was
+a focused coverage-only run, not the pending full historical migration.
+
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven

@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 19;
+pub const IDENTIFICATION_SCHEMA: u32 = 20;
 #[derive(Clone, Copy)]
 enum DestructorPlacement {
     Unchecked,
@@ -556,6 +556,9 @@ pub enum ClaimClass {
     /// A member of a two-unit compiled boundary whose whole transaction
     /// preserves both flanks and claims every function at the seam together.
     CompiledBoundaryMember,
+    /// One member of a complete terminal source/compiled/retail run. The
+    /// whole run and both bounds must be present in the transaction.
+    CompiledTerminalSuffixMember,
 }
 
 /// Where position places an unattributed function relative to a unit.
@@ -646,11 +649,15 @@ pub struct OwnershipAssessment {
     pub new_complete_sequence_members: u32,
     #[serde(default)]
     pub new_compiled_boundary_members: u32,
+    #[serde(default)]
+    pub new_compiled_terminal_suffix_members: u32,
 }
 
 impl OwnershipAssessment {
     pub fn permits_automatic_claim(&self) -> bool {
-        (self.independent_members > 0 || self.new_compiled_boundary_members > 0)
+        (self.independent_members > 0
+            || self.new_compiled_boundary_members > 0
+            || self.new_compiled_terminal_suffix_members > 0)
             && self.new_shared_helpers == 0
             && self.new_conflicts == 0
             && self.new_unresolved == 0
@@ -806,6 +813,17 @@ impl ObservationIndex {
                 .is_some_and(|evidence| !evidence.compiled_boundaries.is_empty())
         {
             bail!("Identification schema {} cannot carry compiled boundaries", report.schema);
+        }
+        if report.schema < 20
+            && report
+                .object_evidence
+                .as_ref()
+                .is_some_and(|evidence| !evidence.compiled_terminal_suffixes.is_empty())
+        {
+            bail!(
+                "Identification schema {} cannot carry compiled terminal suffixes",
+                report.schema
+            );
         }
         if report.schema < 15 {
             // Old reports never measured this fact. Clear even a supplied flag
@@ -1108,6 +1126,15 @@ impl ObservationIndex {
             if report.schema >= 19 {
                 evidence.compiled_boundaries =
                     crate::analysis::object_boundary::compiled_boundaries(
+                        evidence,
+                        &report.source_functions,
+                        &report.target_functions,
+                        &report.attributions,
+                    );
+            }
+            if report.schema >= 20 {
+                evidence.compiled_terminal_suffixes =
+                    crate::analysis::object_boundary::compiled_terminal_suffixes(
                         evidence,
                         &report.source_functions,
                         &report.target_functions,
@@ -1783,6 +1810,7 @@ impl ObservationIndex {
                             result.new_complete_sequence_members += 1;
                         }
                         (false, ClaimClass::CompiledBoundaryMember) => unreachable!(),
+                        (false, ClaimClass::CompiledTerminalSuffixMember) => unreachable!(),
                         (false, ClaimClass::Padding) => unreachable!(),
                     }
                     result.records.push(ClaimRecord {
@@ -3853,6 +3881,7 @@ mod tests {
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
             compiled_boundaries: Vec::new(),
+            compiled_terminal_suffixes: Vec::new(),
         });
         let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
         let matches = &index.report().object_evidence.as_ref().unwrap().order_matches;

@@ -187,6 +187,18 @@ that their source splits own every corresponding source function. The normal
 transaction, ownership-assessment, build and retail-hash gates still apply.
 Schema-18 reports remain readable without a boundary record or this route.
 
+Identification schema 20 rederives clean-object terminal suffixes. A record
+requires at least three contiguous functions at the end of both a source unit
+and its clean target-version compiled object, each joined to the same unowned
+retail sequence by a source–compiled–retail bridge. A held, binary-paired
+predecessor must match the compiled object immediately before the run; an
+independently identified function of the next source unit must immediately
+follow it in retail code. At least one suffix function must be non-weak in the
+compiled object. Coverage policy 22 can extend the current split by the
+entire run only when the source split owns every member and the resulting
+transaction ends at the corroborated boundary. Individual bridges do not
+grant ownership. Older report schemas keep their original derived records.
+
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
 least one endpoint must be unique in both the observed objects and target.

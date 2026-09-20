@@ -4,13 +4,51 @@ Status: living implementation plan. A–F's safety and composition mechanisms,
 H's scoped code/data certificates and I's bounded retry and final-validation
 mechanisms are implemented. G's helper families, optional object evidence,
 source–compiled–retail bridges and unresolved clusters are diagnostic; narrow
-destructor and two-unit compiled-boundary placement rules now participate in
-ownership decisions, while general emitted-owner and relocation-placement
+destructor, two-unit compiled-boundary and clean-object terminal-suffix rules
+now participate in ownership decisions, while general emitted-owner and relocation-placement
 records do not yet drive ownership transactions. The
 full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 positive emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Policy 22: complete clean-object terminal suffix
+
+The old `b65ad2a6` PAL split ends `CTeamAiMgr.cpp` at `0x8022AFD8`.
+Three functions immediately after it form the terminal run in both its NTSC
+source unit and its clean PAL compiled object. All three have unique
+source–compiled–retail bridges with matching body sizes and relocation sites;
+one compiled definition is non-weak. The preceding function is already held
+by `CTeamAiMgr` and paired in both binaries and the compiled object. The next
+retail function has an independent foreign identity, and the next NTSC source
+function belongs to that same foreign unit. The rule requires all of these
+facts together, complete known source extents, no intervening function or
+foreign owner, and the source split to own every source member. It offers the
+whole 1,020-byte suffix in one transaction; a partial suffix or an individual
+bridge is not an ownership certificate. A non-weak definition or incomplete
+compiled inventory alone remains insufficient.
+
+The candidate is generic: it uses no class name or oracle address to decide
+eligibility. The frozen schema-19 identification report has exactly one
+candidate of this shape, and an opt-in test rederives it as schema 20 and
+checks the complete proposal and source-ownership gate. Focused run
+`20716-115833` on the F-drive `b65ad2a6` checkout, which already held the
+policy-20 Head/Light correction, accepted and published the complete suffix.
+The rebuilt PAL DOL retained retail SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. A benchmark manifest tied
+to that run's exact saved baseline and the independently verified later oracle
+scores 1,020 correct code bytes gained, zero known wrong or lost bytes and no
+change to 424 verified control units. The source unit remains partial because
+its 276-byte prefix is unresolved. The oracle was used only after publication
+to score the result.
+
+All five frozen GM8E01_00→GM8P01_00 calibration scenarios on `ca286f45` have
+identical per-unit selected ownership and alternative states to policy 21;
+all have zero incorrect alternatives, wrong bytes and revised-neighbour loss.
+The held-out GM8E01_00→GM8E01_02 `everything` scenario also agrees per unit
+with policy 21 and exits 0. These scenarios do not exercise the new suffix
+because their oracle already owns it. Records and the verified focused score
+are under `target/policy22-*` on F:.
 
 ### Policy 21: a competing source-order slot vetoes isolated identity
 
