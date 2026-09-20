@@ -1430,6 +1430,75 @@ pub fn build(
         .collect();
     sort_drafts(&mut vtable_heads);
 
+    let mut relocation_runs: Vec<Draft> = observations
+        .relocation_linked_runs()
+        .iter()
+        .filter(|run| run.unit == unit.name)
+        .filter_map(|run| {
+            let start = parse_address(&run.start)?;
+            let end = parse_address(&run.end)?;
+            let source_vtable = parse_address(&run.source_vtable)?;
+            let target_vtable = parse_address(&run.target_vtable)?;
+            let source_start =
+                observations.report().source_functions.iter().find(|function| {
+                    function.unit == unit.name && function.section == run.section
+                })?;
+            let source_end =
+                observations.report().source_functions.iter().rfind(|function| {
+                    function.unit == unit.name && function.section == run.section
+                })?;
+            let left = observations.attribution(&run.left_attribution_id)?;
+            let right = observations.attribution(&run.right_attribution_id)?;
+            if !block_contains_range(
+                source_blocks,
+                &unit.name,
+                &run.section,
+                parse_address(&source_start.address)?,
+                parse_address(&source_end.end)?,
+            ) || !block_contains_range(
+                source_blocks,
+                &unit.name,
+                &run.vtable_section,
+                source_vtable,
+                source_vtable.checked_add(1)?,
+            ) || overlaps_other(&unit.name, &run.section, start, end, target_blocks)
+                || overlaps_other(
+                    &unit.name,
+                    &run.vtable_section,
+                    target_vtable,
+                    target_vtable.checked_add(1)?,
+                    target_blocks,
+                )
+                || !block_contains_range(
+                    target_blocks,
+                    &left.source.unit,
+                    &left.target.section,
+                    parse_address(&left.target.address)?,
+                    parse_address(&left.target.end)?,
+                )
+                || !block_contains_range(
+                    target_blocks,
+                    &right.source.unit,
+                    &right.target.section,
+                    parse_address(&right.target.address)?,
+                    parse_address(&right.target.end)?,
+                )
+            {
+                return None;
+            }
+            Some(alternative(
+                &run.section,
+                start,
+                end,
+                vec![serde_json::to_value(run).ok()?],
+                "relocation-linked-run",
+                None,
+                Vec::new(),
+            ))
+        })
+        .collect();
+    sort_drafts(&mut relocation_runs);
+
     let mut adjacent: Vec<Draft> = unit
         .adjacent_owner_transitions
         .iter()
@@ -1476,6 +1545,7 @@ pub fn build(
         .chain(terminal_suffixes)
         .chain(reference_prefixes)
         .chain(vtable_heads)
+        .chain(relocation_runs)
         .chain(complete)
         .chain(adjacent)
         .chain(sequences)

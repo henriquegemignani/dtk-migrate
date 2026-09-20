@@ -5,12 +5,42 @@ H's scoped code/data certificates and I's bounded retry and final-validation
 mechanisms are implemented. G's helper families, optional object evidence,
 source–compiled–retail bridges and unresolved clusters are diagnostic; narrow
 destructor, two-unit compiled-boundary, clean-object terminal-suffix,
-reference-placed head-prefix and bounded vtable-destructor rules now participate in ownership decisions,
+reference-placed head-prefix, bounded vtable-destructor and relocation-linked
+insertion rules now participate in ownership decisions,
 while general emitted-owner and relocation-placement records do not yet drive
 ownership transactions. The full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Policy 25: an inserted PAL function inside a vtable-linked source run
+
+The historical `GuiSys/CGuiFactories.cpp` source has five consecutive code
+functions. PAL has six at the corresponding bounded location: the first two
+are attributed, then one PAL-only function precedes three identical but
+globally duplicated helper bodies. Hashes alone cannot assign those helpers
+to this TU. The inserted function has only the paired frame factory as caller
+and directly calls a later paired helper. Two other paired functions, one a
+same-class destructor, reference the same class-vtable address in each
+version with identical HA/LO relocation offsets. The NTSC vtable start is
+inside this TU's `.data` split. The PAL address is not held by another TU.
+The immediate left and right source-order neighbours still hold their PAL
+functions, and the right one is independently attributed. The rule admits
+only one complete source/target alignment with one insertion; partial claims
+do not inherit its member certificate.
+
+The final F-drive focused run `20716-162946` offered only this full code claim,
+published `.text 0x802ADCD8–0x802AE178`, and passed the retail SHA-1 check.
+Its interrupted integration was resumed with the worker result reused. The
+verified benchmark at `target/gui-policy25-final-verified-score/` credits 1,184 correct
+code bytes, no wrong or lost bytes, and all 424 verified controls unchanged.
+The full TU remains partial because its `.rodata` and `.data` ranges are not
+claimed. The saved historical split was restored to SHA-256 `a59a122d…`.
+All five frozen PAL calibration scenarios and the held-out GM8E01_02
+`everything` scenario have zero incorrect boundaries, wrong bytes or neighbour
+losses. Their summaries and every material per-unit record match policy 24;
+only policy IDs and the new zero-valued assessment field differ. These
+calibrations check collateral effects; the focused run exercises the new rule.
 
 ### Policy 24: a vtable-bound destructor occupies a two-function head
 

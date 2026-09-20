@@ -32,6 +32,8 @@ use crate::analysis::{
 };
 
 pub const IDENTIFICATION_SCHEMA: u32 = 22;
+mod relocation_run;
+pub use relocation_run::RelocationLinkedRun;
 #[derive(Clone, Copy)]
 enum DestructorPlacement {
     Unchecked,
@@ -538,6 +540,7 @@ pub struct ObservationIndex {
     competing_source_slots: BTreeMap<String, crate::analysis::source_slot::CompetingSourceSlot>,
     reference_prefixes: Vec<ReferencePlacedPrefix>,
     vtable_heads: Vec<VtablePlacedHead>,
+    relocation_runs: Vec<RelocationLinkedRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -645,6 +648,9 @@ pub enum ClaimClass {
     /// A complete two-function destructor head placed by independently
     /// bounded source/target order and matching class-vtable relocation sites.
     VtablePlacedHeadMember,
+    /// An ordered run with one target-only insertion, placed by both foreign
+    /// seams and two corresponding references to its class vtable.
+    RelocationLinkedRunMember,
 }
 
 /// Where position places an unattributed function relative to a unit.
@@ -741,6 +747,8 @@ pub struct OwnershipAssessment {
     pub new_reference_placed_prefix_members: u32,
     #[serde(default)]
     pub new_vtable_placed_head_members: u32,
+    #[serde(default)]
+    pub new_relocation_linked_run_members: u32,
 }
 
 impl OwnershipAssessment {
@@ -1424,9 +1432,11 @@ impl ObservationIndex {
             competing_source_slots,
             reference_prefixes: Vec::new(),
             vtable_heads: Vec::new(),
+            relocation_runs: Vec::new(),
         };
         index.reference_prefixes = index.derive_reference_placed_prefixes();
         index.vtable_heads = index.derive_vtable_placed_heads();
+        index.relocation_runs = index.derive_relocation_linked_runs();
         Ok(index)
     }
 
@@ -1435,6 +1445,8 @@ impl ObservationIndex {
     pub fn reference_placed_prefixes(&self) -> &[ReferencePlacedPrefix] { &self.reference_prefixes }
 
     pub fn vtable_placed_heads(&self) -> &[VtablePlacedHead] { &self.vtable_heads }
+
+    pub fn relocation_linked_runs(&self) -> &[RelocationLinkedRun] { &self.relocation_runs }
 
     fn derive_reference_placed_prefixes(&self) -> Vec<ReferencePlacedPrefix> {
         if self.report.schema < 21 {
@@ -2356,6 +2368,25 @@ impl ObservationIndex {
                     } else {
                         class
                     };
+                    let class = if !retained
+                        && !cuts_member
+                        && matches!(
+                            class,
+                            ClaimClass::UnresolvedFunction
+                                | ClaimClass::SharedHelper
+                                | ClaimClass::CallerConfinedHelper
+                                | ClaimClass::CompleteSequenceMember
+                        )
+                        && self.relocation_runs.iter().any(|run| {
+                            run.unit == unit
+                                && run.section == *section
+                                && parse_hex(&run.start) == start
+                                && parse_hex(&run.end) == end
+                        }) {
+                        ClaimClass::RelocationLinkedRunMember
+                    } else {
+                        class
+                    };
                     match (retained, class) {
                         (_, ClaimClass::IndependentlyAttributed) => {
                             result.independent_members += 1;
@@ -2372,6 +2403,9 @@ impl ObservationIndex {
                         }
                         (false, ClaimClass::CompleteSequenceMember) => {
                             result.new_complete_sequence_members += 1;
+                        }
+                        (false, ClaimClass::RelocationLinkedRunMember) => {
+                            result.new_relocation_linked_run_members += 1;
                         }
                         (false, ClaimClass::CompiledBoundaryMember) => unreachable!(),
                         (false, ClaimClass::CompiledTerminalSuffixMember) => unreachable!(),

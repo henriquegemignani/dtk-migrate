@@ -150,6 +150,21 @@ decisions against policy 23. This is a focused trial, not the
 pending full historical migration; the older named-gap table below describes
 the full run before this policy.
 
+Policy 25's F-drive focused run `20716-162946` recovered
+`GuiSys/CGuiFactories.cpp` `.text 0x802ADCD8–0x802AE178` from an ordered
+five-function source run, one PAL-only insertion, and two corresponding
+class-vtable relocation relationships. Its worker accepted the transaction;
+an interrupted integration was resumed with that worker result reused. The
+published PAL DOL has retail SHA-1 `4d3780c7…`. At
+`target/gui-policy25-final-verified-score/`, the independently verified
+later split rates its code exact: 1,184 correct bytes gained, zero wrong or
+lost bytes, and all 424 controls unchanged. The TU's `.rodata` and `.data`
+remain unclaimed, so its complete body is partial. The trial's split was
+restored to SHA-256 `a59a122d…`. The five frozen PAL calibration scenarios
+and held-out GM8E01_02 `everything` have zero incorrect boundaries or
+neighbour losses; after excluding content-addressed IDs and the new zero
+field, all per-unit records match policy 24.
+
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven

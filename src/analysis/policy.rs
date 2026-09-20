@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 24;
+pub const POLICY_VERSION: u32 = 25;
 pub const MIN_COMPILED_TERMINAL_MEMBERS: usize = 3;
 pub const MAX_COMPILED_TERMINAL_MEMBERS: usize = 8;
 pub const MIN_REFERENCE_PLACED_DATA_PAIRS: usize = 2;

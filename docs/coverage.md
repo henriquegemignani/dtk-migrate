@@ -228,6 +228,23 @@ checked again when its transaction is replayed. A name or vtable reference by
 itself does not assign an emitter; incomplete seams and competing callers
 withhold the claim. Earlier report schemas do not gain this rule.
 
+Coverage policy 25 also permits a small complete source run with exactly one
+target-only function inserted. Every source function must pair in order with a
+complete target function: an existing unambiguous attribution or an identical
+normalized body. The first member must be independently attributed, at least
+two otherwise unmatched members must have exact bodies, and held source-order
+neighbours must bound both target ends (the right neighbour independently).
+The inserted function must have one caller from inside the run and call a
+later paired member. Two paired source functions, including the same-class
+destructor, must refer to one class vtable in the source unit's `.data`; their
+target counterparts must refer to one target `.data` address with identical
+HA/LO relocation sites. Only a unique alignment is offered. The source
+vtable start must remain in the source split, the target data address must be
+unowned, and the two target neighbours must still be held when the proposal
+is built. The certificate applies only to the complete code range; a partial
+claim cannot borrow its proof. This rule needs identification schema 22 and
+does not infer ownership from a repeated helper body or vtable name alone.
+
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
 least one endpoint must be unique in both the observed objects and target.
