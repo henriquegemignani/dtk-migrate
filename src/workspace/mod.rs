@@ -6,9 +6,9 @@
 //! the original untouched until there is something proven to publish.
 //!
 //! What gets copied is the *current* state of the checkout, not committed HEAD:
-//! dirty files and untracked ones are exactly what someone wants tested. Each
-//! file is hashed on the way in, so a later run can say whether the thing it
-//! measured is still the thing on disk.
+//! dirty files and untracked build inputs are exactly what someone wants
+//! tested. Each included file is hashed on the way in, so a later run can say
+//! whether the thing it measured is still the thing on disk.
 
 use std::{
     collections::BTreeMap,
@@ -24,9 +24,10 @@ use walkdir::WalkDir;
 
 pub const LOCK_NAME: &str = ".migration.lock";
 
-/// Directories that are caches or history rather than build inputs.
-const CACHE_NAMES: [&str; 9] = [
+/// Directories that are caches, history or agent scratch rather than build inputs.
+const CACHE_NAMES: [&str; 10] = [
     ".git",
+    ".agents",
     "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
@@ -409,14 +410,22 @@ mod tests {
     #[test]
     fn a_manifest_holds_inputs_and_tools_but_not_output_or_history() {
         let dir = project();
+        std::fs::create_dir_all(dir.path().join(".agents/state")).unwrap();
+        std::fs::write(dir.path().join(".agents/state/continuation.md"), "private notes").unwrap();
+        std::fs::create_dir_all(dir.path().join("config/.agents")).unwrap();
+        std::fs::write(dir.path().join("config/.agents/scratch.txt"), "scratch").unwrap();
+        std::fs::create_dir_all(dir.path().join("orig/PAL")).unwrap();
+        std::fs::write(dir.path().join("orig/PAL/main.dol"), "retail binary").unwrap();
         let manifest = snapshot_manifest(dir.path()).unwrap();
         let names: Vec<&str> = manifest.keys().map(String::as_str).collect();
         assert!(names.contains(&"configure.py"));
         assert!(names.contains(&"config/PAL/splits.txt"));
         assert!(names.contains(&"build/tools/dtk.exe"), "the toolchain is an input");
+        assert!(names.contains(&"orig/PAL/main.dol"), "retail DOLs are inputs even if ignored");
         assert!(!names.contains(&"build/PAL/src/a.o"), "build output is regenerated");
         assert!(!names.contains(&"build.ninja"), "the build graph is generated");
         assert!(!names.iter().any(|n| n.starts_with(".git")), "history is not an input");
+        assert!(!names.iter().any(|n| n.split('/').any(|part| part == ".agents")));
     }
 
     #[test]
@@ -432,11 +441,14 @@ mod tests {
     #[test]
     fn a_copy_contains_every_input_and_nothing_else() {
         let dir = project();
+        std::fs::create_dir_all(dir.path().join(".agents/state")).unwrap();
+        std::fs::write(dir.path().join(".agents/state/continuation.md"), "private notes").unwrap();
         let into = tempfile::tempdir().unwrap();
         let manifest = snapshot_manifest(dir.path()).unwrap();
         let destination = into.path().join("baseline");
         copy_snapshot(dir.path(), &destination, &manifest).unwrap();
         assert_eq!(snapshot_manifest(&destination).unwrap(), manifest);
+        assert!(!destination.join(".agents").exists());
     }
 
     #[test]

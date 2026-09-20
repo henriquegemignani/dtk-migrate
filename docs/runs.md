@@ -8,8 +8,8 @@ a run that stops halfway can be continued rather than restarted.
 ## The shape
 
 **Prepare once.** Each stage copies the project's *current* state into a frozen
-baseline and works out its candidates there. Dirty and untracked files are
-included: those are usually exactly what someone wants tested. Every worker
+baseline and works out its candidates there. Dirty and untracked build inputs
+are included: those are usually exactly what someone wants tested. Every worker
 resets from that one baseline, so two candidates evaluated in different lanes
 were measured against the same thing.
 
@@ -50,8 +50,10 @@ build graph.
 
 The snapshot covers everything except what a build regenerates: `build.ninja`,
 `objdiff.json`, compile databases and Ninja's own logs are excluded, and under
-`build/` only `compilers`, `tools` and `binutils` are kept. Caches and `.git` are
-skipped.
+`build/` only `compilers`, `tools` and `binutils` are kept. Caches, `.git` and
+`.agents` directories at any depth are skipped. Git ignore rules are not used
+as a blanket filter: Prime ignores retail DOLs under `orig/` and downloaded
+toolchain files under `build/`, both of which the trial needs.
 
 Symlinks and reparse points are refused outright. A snapshot that follows a link
 is not a copy of the project; it is a second name for the original, and a trial
