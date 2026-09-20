@@ -58,6 +58,8 @@ pub struct BuildContext {
     pub root: PathBuf,
     pub source: String,
     pub target: String,
+    /// Names requested by a focused run; empty means all candidates.
+    pub only: Vec<String>,
     pub tools: Toolchain,
     /// Where the command log and this stage's evidence are written.
     pub output: PathBuf,

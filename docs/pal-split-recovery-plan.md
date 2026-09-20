@@ -1107,6 +1107,16 @@ current command inputs. Its original command log was removed with the older
 C-drive run, so the cause of that specific failure cannot be assigned to an
 interaction or dependency without inventing evidence.
 
+The discover-only experiment exposed an independent focus bug: preparation
+published 139 matcher symbol renames despite `--only GuiSys/CGuiPane.cpp` and
+no accepted split. Focused discovery now skips that global rename batch while
+retaining its already-generated split proposals. A coordinator fixture proves
+focused symbols stay unchanged and an unfocused run still applies the batch.
+The real F-drive rerun at the same historical revision (run `20716-001911`)
+still deferred Pane as `no-matched-code-gain`, reproduced the retail SHA-1,
+and published zero file changes; both target `splits.txt` and `symbols.txt`
+remained byte-identical to the baseline.
+
 ## 9. Compatibility, reporting and documentation (continuous)
 
 **Files:** `src/analysis/coverage.rs` and shared policy module, `src/stages/coverage/mod.rs`, `src/run/mod.rs`, `src/analysis/coverage_fixture.rs`, `tests/cascade.rs`, `README.md`, `docs/coverage.md`, `docs/runs.md`, `docs/prime.md`.

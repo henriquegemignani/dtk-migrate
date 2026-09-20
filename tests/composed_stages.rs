@@ -91,6 +91,51 @@ fn fixture() -> Option<common::Fixture> {
 }
 
 #[test]
+fn focused_discovery_does_not_publish_global_matcher_renames() {
+    let Some(fixture) = fixture() else {
+        eprintln!("skipped: needs ninja and python on PATH");
+        return;
+    };
+    let symbols = "fn_80001000 = .text:0x80001000; // type:function size:0x20\n";
+    std::fs::write(fixture.root.join("config/PAL/symbols.txt"), symbols).unwrap();
+    std::fs::write(fixture.evidence.join("discover-renames.txt"), "fn_80001000 = RenamedFn\n")
+        .unwrap();
+
+    let output = fixture.migrate(&["--stages", "coverage,discover", "--only", "A.cpp"], &[]);
+    assert!(output.status.success(), "{}", describe(&output));
+    assert_eq!(fixture.read("config/PAL/symbols.txt"), symbols);
+    let id = fixture.run_id();
+    let prepared = fixture.json(&format!("build/dtk-migrate/runs/{id}/discover/prepared.json"));
+    assert!(
+        prepared["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["status"] == "rename-batch-skipped-by-only"),
+        "{prepared:#}"
+    );
+}
+
+#[test]
+fn unfocused_discovery_still_applies_confident_matcher_renames() {
+    let Some(fixture) = fixture() else {
+        eprintln!("skipped: needs ninja and python on PATH");
+        return;
+    };
+    std::fs::write(
+        fixture.root.join("config/PAL/symbols.txt"),
+        "fn_80001000 = .text:0x80001000; // type:function size:0x20\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.evidence.join("discover-renames.txt"), "fn_80001000 = RenamedFn\n")
+        .unwrap();
+
+    let output = fixture.migrate(&["--stages", "coverage,discover"], &[]);
+    assert!(output.status.success(), "{}", describe(&output));
+    assert!(fixture.read("config/PAL/symbols.txt").contains("RenamedFn = .text:0x80001000"));
+}
+
+#[test]
 fn coverage_data_and_verify_publish_one_composed_body() {
     let Some(fixture) = fixture() else {
         eprintln!("skipped: needs ninja and python on PATH");

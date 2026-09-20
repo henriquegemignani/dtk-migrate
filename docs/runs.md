@@ -201,3 +201,6 @@ Derived renames are scoped as symbols, so an old symbol spelled `A.cpp` cannot
 reserve the unit `A.cpp`. With `--only A.cpp`, derive selects renames whose
 compiled-object evidence names that unit, regardless of the old symbol's
 spelling; a same-spelling symbol in another unit does not satisfy the request.
+Discover skips its whole-executable matcher rename batch under `--only`; its
+split candidates were generated before that batch, and a focused run must not
+publish symbol changes outside the requested unit.

@@ -492,11 +492,26 @@ impl Stage for Discover {
         // proposals on symbol names, so a name established here widens what
         // every later candidate can be. The batch is kept only if it builds and
         // costs no existing unit its matched code.
-        let reason = match apply_renames(ctx, &mut symbols, &renames_path, &starting) {
-            Ok(None) => None,
-            Ok(Some(reason)) => Some(reason),
-            Err(error) if is_trial_failure(&error) => Some(format!("{error:#}")),
-            Err(error) => return Err(error),
+        let reason = if ctx.only.is_empty() {
+            match apply_renames(ctx, &mut symbols, &renames_path, &starting) {
+                Ok(None) => None,
+                Ok(Some(reason)) => Some(reason),
+                Err(error) if is_trial_failure(&error) => Some(format!("{error:#}")),
+                Err(error) => return Err(error),
+            }
+        } else {
+            // These renames span the whole executable, not only the selected
+            // TU. The matcher's split proposals were generated before this
+            // batch, so a focused run can still evaluate its requested unit
+            // without publishing unrelated symbol changes.
+            let renames = std::fs::read_to_string(&renames_path).unwrap_or_default();
+            if renames
+                .lines()
+                .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            {
+                events.push(Event::new("", "rename-batch-skipped-by-only"));
+            }
+            None
         };
         if let Some(reason) = reason {
             symbols.restore()?;

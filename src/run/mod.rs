@@ -266,6 +266,7 @@ pub fn context(
         root: root.to_path_buf(),
         source: run.source.clone(),
         target: run.target.clone(),
+        only: run.only.clone(),
         tools: crate::build::context::Toolchain {
             dtk: run.tools.dtk.clone(),
             ninja: run.tools.ninja.clone(),
