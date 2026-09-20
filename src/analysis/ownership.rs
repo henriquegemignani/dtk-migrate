@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 14;
+pub const IDENTIFICATION_SCHEMA: u32 = 15;
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -168,6 +168,10 @@ pub struct TargetFunctionObservation {
     pub section: String,
     pub address: String,
     pub end: String,
+    /// The DOL symbol has an explicit size and its complete bytes are present.
+    /// Older reports do not establish this fact.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub extent_known: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_owner: Option<String>,
     #[serde(default)]
@@ -199,6 +203,9 @@ pub struct SourceFunctionObservation {
     pub section: String,
     pub address: String,
     pub end: String,
+    /// The DOL symbol has an explicit size and its complete bytes are present.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub extent_known: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalized_body_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -462,6 +469,16 @@ impl ObservationIndex {
             })
         {
             bail!("Identification schema {} cannot carry external compiled objects", report.schema);
+        }
+        if report.schema < 15 {
+            // Old reports never measured this fact. Clear even a supplied flag
+            // so an old-schema artifact cannot certify a new split edge.
+            for function in &mut report.source_functions {
+                function.extent_known = false;
+            }
+            for function in &mut report.target_functions {
+                function.extent_known = false;
+            }
         }
         report.attributions.sort_by(|left, right| left.id.cmp(&right.id));
 
@@ -775,6 +792,26 @@ impl ObservationIndex {
 
     pub fn attribution(&self, id: &str) -> Option<&FunctionAttribution> {
         self.by_id.get(id).map(|&index| &self.report.attributions[index])
+    }
+
+    /// Both sides of an attribution have explicit, complete function extents.
+    /// The per-function facts are checked against the attribution rather than
+    /// trusting an additional derived flag on the attribution itself.
+    pub fn attribution_extents_known(&self, item: &FunctionAttribution) -> bool {
+        self.report.source_functions.iter().any(|function| {
+            function.extent_known
+                && function.unit == item.source.unit
+                && function.module == item.source.module
+                && function.section == item.source.section
+                && function.address == item.source.address
+                && function.end == item.source.end
+        }) && self.report.target_functions.iter().any(|function| {
+            function.extent_known
+                && function.module == item.target.module
+                && function.section == item.target.section
+                && function.address == item.target.address
+                && function.end == item.target.end
+        })
     }
 
     pub fn at_target(
@@ -2028,14 +2065,21 @@ pub fn identify_units(
             .graph
             .iter()
             .filter_map(|(node, function)| {
+                let unit = source.unit_of(node)?;
+                let body_digest = helpers::body_digest(&source.obj, function);
+                let extent_known = body_digest.is_some()
+                    || (source.obj.symbols[function.symbol].size_known
+                        && function.size < 8
+                        && normalized_body(&source.obj, function).len() == function.size as usize);
                 Some(SourceFunctionObservation {
                     name: source.symbol_name(node).to_string(),
-                    unit: source.unit_of(node)?.to_string(),
+                    unit: unit.to_string(),
                     module: EXECUTABLE_MODULE.into(),
                     section: source.obj.sections[function.section].name.clone(),
                     address: hex(function.address),
                     end: hex(function.address + function.size),
-                    normalized_body_sha256: helpers::body_digest(&source.obj, function),
+                    extent_known,
+                    normalized_body_sha256: body_digest,
                     weak: source.obj.symbols[function.symbol].flags.is_weak(),
                 })
             })
@@ -2043,29 +2087,37 @@ pub fn identify_units(
         target_functions: target
             .graph
             .iter()
-            .map(|(node, function)| TargetFunctionObservation {
-                name: target.symbol_name(node).to_string(),
-                module: EXECUTABLE_MODULE.into(),
-                section: target.obj.sections[function.section].name.clone(),
-                address: hex(function.address),
-                end: hex(function.address + function.size),
-                current_owner: target.unit_of(node).map(str::to_string),
-                owner_autogenerated: target
-                    .unit_of(node)
-                    .is_some_and(|unit| target.obj.is_unit_autogenerated(unit)),
-                callers: function
-                    .callers
-                    .iter()
-                    .map(|&caller| {
-                        let caller = target.graph.node(caller);
-                        CallerReference {
-                            section: target.obj.sections[caller.section].name.clone(),
-                            address: hex(caller.address),
-                        }
-                    })
-                    .collect(),
-                normalized_body_sha256: helpers::body_digest(&target.obj, function),
-                weak: target.obj.symbols[function.symbol].flags.is_weak(),
+            .map(|(node, function)| {
+                let body_digest = helpers::body_digest(&target.obj, function);
+                let extent_known = body_digest.is_some()
+                    || (target.obj.symbols[function.symbol].size_known
+                        && function.size < 8
+                        && normalized_body(&target.obj, function).len() == function.size as usize);
+                TargetFunctionObservation {
+                    name: target.symbol_name(node).to_string(),
+                    module: EXECUTABLE_MODULE.into(),
+                    section: target.obj.sections[function.section].name.clone(),
+                    address: hex(function.address),
+                    end: hex(function.address + function.size),
+                    extent_known,
+                    current_owner: target.unit_of(node).map(str::to_string),
+                    owner_autogenerated: target
+                        .unit_of(node)
+                        .is_some_and(|unit| target.obj.is_unit_autogenerated(unit)),
+                    callers: function
+                        .callers
+                        .iter()
+                        .map(|&caller| {
+                            let caller = target.graph.node(caller);
+                            CallerReference {
+                                section: target.obj.sections[caller.section].name.clone(),
+                                address: hex(caller.address),
+                            }
+                        })
+                        .collect(),
+                    normalized_body_sha256: body_digest,
+                    weak: target.obj.symbols[function.symbol].flags.is_weak(),
+                }
             })
             .collect(),
         helper_families: Vec::new(),
@@ -2733,6 +2785,7 @@ mod tests {
             section: ".text".into(),
             address: "0x00001300".into(),
             end: "0x00001340".into(),
+            extent_known: true,
             current_owner: None,
             owner_autogenerated: false,
             callers: callers
@@ -2913,6 +2966,7 @@ mod tests {
             section: ".text".into(),
             address: "0x00001100".into(),
             end: "0x00001140".into(),
+            extent_known: true,
             current_owner: None,
             owner_autogenerated: false,
             callers: vec![CallerReference {
@@ -3023,6 +3077,7 @@ mod tests {
             section: ".text".into(),
             address: "0x00001320".into(),
             end: "0x00001340".into(),
+            extent_known: true,
             current_owner: None,
             owner_autogenerated: false,
             callers: Vec::new(),
@@ -3037,6 +3092,18 @@ mod tests {
         assert!(historical.report().unresolved_target_clusters.is_empty());
         let serialized = serde_json::to_value(historical.report()).unwrap();
         assert!(serialized.get("unresolved_target_clusters").is_none());
+    }
+
+    #[test]
+    fn schema_fourteen_cannot_certify_function_extents() {
+        let (mut report, expected) = with_helper(&[]);
+        assert!(report.source_functions.iter().any(|function| function.extent_known));
+        assert!(report.target_functions.iter().any(|function| function.extent_known));
+        report.schema = 14;
+        let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        assert!(index.report().source_functions.iter().all(|function| !function.extent_known));
+        assert!(index.report().target_functions.iter().all(|function| !function.extent_known));
+        assert!(!index.attribution_extents_known(&index.report().attributions[0]));
     }
 
     #[test]

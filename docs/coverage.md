@@ -34,13 +34,13 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 16, evidence schema 11, identification schema 14. Every threshold
+Policy version 17, evidence schema 11, identification schema 15. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
 strongest first until one survives a build. Every alternative is one
 [ownership transaction](#ownership-transactions) over all the units it changes.
-Policy 16 requires an extract inventory for every unit a transaction writes;
+The policy requires an extract inventory for every unit a transaction writes;
 missing inventory data stops a current run rather than meaning that no extract
 is required.
 
@@ -149,6 +149,12 @@ compiler, Ninja freshness and inventory checks as mapped objects. Two
 compiled objects mapped to one unit cannot establish a unique emitter. Earlier
 diagnostic records retain their original schema and digest.
 
+Identification schema 15 records whether each source and target function has
+an explicit symbol size and a complete normalized body at that extent. Older
+reports leave this fact unknown. An attached ownership claim requires it on
+both sides; an inferred end address cannot become a split boundary merely
+because the function identity is independently supported.
+
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
 least one endpoint must be unique in both the observed objects and target.
@@ -195,6 +201,17 @@ The forms of evidence it accepts:
 layout are identical in both versions, unique on both sides, with known extents
 and no weak or template symbol involved. Adjacent anchors also offer their merged
 range, and each anchor offers its own range alone.
+
+**Attached independent functions.** A canonical independent binary attribution
+may extend an existing split by its target function's exact extent when that
+function touches the split without a gap and no other unit owns it. The source
+function must lie wholly inside that source unit's split, and both function
+extents must be known from complete binary bodies. The function need not
+pass the free-standing exact-anchor size threshold, have the same size in both
+versions, or add matched source code. A single uncorroborated call-site match is
+not independent. This route proposes only the identified function, not any
+unexplained neighbouring bytes, and uses the same complete-body assessment and
+atomic transaction trial as other coverage claims.
 
 **Corroborated `this`-layout groups.** Functions differing only where a member
 offset moved. A group needs at least two unique functions agreeing on the same

@@ -10,6 +10,42 @@ NTSC→PAL runs and held-out diagnostics are reported in
 positive emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
 
+### Policy 17: independently attributed functions attached to represented units
+
+The frozen historical run exposed two exact 96-byte discover proposals for
+`CColorOverrideInstruction` and `CPopStateInstruction` that were refused solely
+because neither improved matched source code. Their new `Invoke` functions have
+corroborated caller-site attributions in the normal-name binary report; neither
+is a unique exact-body anchor. Coverage now offers the individual target
+function when its canonical attribution is independent, its source function is
+inside that source unit's split, it touches the target unit's existing split,
+its source and target extents are explicitly known and complete, and it
+conflicts with no other owner. Identification schema 15 stores that extent
+fact per function; older reports cannot supply it. The offer still passes full-body
+assessment, atomic transaction preview, extracted-input checks, the retail
+build and the regression gate. No guessed gap or helper is included. This rule
+does not depend on equal function sizes or a tuned byte minimum.
+
+A focused F-drive run at `46bd33805` (`20716-061334`) offered and accepted both
+transactions, published exactly their 96-byte split extensions, deferred none,
+and rebuilt to PAL SHA-1 `4d3780c77842ae7fddbdd5732b70bed100df5c65`.
+The isolated checkout's tracked split file was then restored; the run artifacts
+retain the accepted transactions and publication. Five-scenario calibration
+with final identification schema 15 recovered 345, 174, 212, 252 and 14 exact
+boundaries in `everything`, `isolated-unit`, `consecutive-units`,
+`truncated-splits` and `misplaced-helper`. Relative to the initial rule with
+equal-size and 64-byte restrictions, truncated splits gained 24 exact units
+and one partial unit, with no known wrong bytes or revised-owner loss in any
+scenario. Nineteen of those gains were below 64 bytes; six had different
+source and target sizes. Calibration still exits 1 because the pre-existing
+`ScriptLoader.cpp` fallback/anchor hypothesis is wrong in `everything` and
+`consecutive-units`; no selected boundary for it is wrong. A full historical
+rerun with policy 17 remains separate; the policy-16 benchmark counts below
+are not silently updated by this focused run.
+The read-only scorer still gives the saved policy-16 run `20716-030131`
+byte-identical population, regression and per-unit score records under the
+schema-15 binary; legacy reports do not acquire known extents on load.
+
 ### Compiled objects outside the baseline split inventory (schema 14)
 
 The scanner now reads all configured main-DOL compiled objects, including
@@ -1138,7 +1174,7 @@ Separate schema versions from policy versions. Bump policy whenever acceptance s
 
 Update the stale policy-8 documentation, statements that represented units cannot be candidates, and wording implying a retail build settles ownership. Document the four distinct results: identification, boundary recovery, applied ownership and verified source linkage. Reports should link every identified but unresolved TU to its concrete blockers and competing hypotheses.
 
-**Step 9 checkpoint (run schema 9, policy 16):** current runs require the
+**Step 9 checkpoint (run schema 9, policy 16):** that change made runs require the
 coverage proposal and applied-record extract inventories, stage selection and
 applied histories, the baseline ownership inventory, and the permission limits
 stored with preparation. Missing fields fail deserialization instead of

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 16;
+pub const POLICY_VERSION: u32 = 17;
 
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;

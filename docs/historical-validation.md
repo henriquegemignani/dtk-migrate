@@ -30,6 +30,21 @@ These are sums of stage wall times and logged builds, not elapsed time or
 compiler-process counts. The original historical run's complete build logs
 were removed, so an equivalent runtime comparison to it is unavailable.
 
+A separate policy-17 **focused coverage-only** run at `46bd33805`
+(`20716-061334`, identification schema 15) accepted exact 96-byte extensions for
+`Kyoto/Text/CColorOverrideInstruction.cpp` and
+`Kyoto/Text/CPopStateInstruction.cpp`. It published to the same PAL retail
+SHA-1. Scored against the frozen later oracle, both are code- and full-body
+exact, with 192 correct bytes gained and no known wrong or lost bytes. This
+focused run does not replace either complete policy-16 run or establish their
+combined result with later stages. Its score is retained at
+`target/attached-policy17-schema15-score/score.json` on F:.
+The policy-17 five-scenario calibration is retained under
+`target/attached-policy17-schema15-calibration/`. It adds 24 exact unit
+recoveries in the truncated-splits scenario without known wrong or lost bytes;
+its exit remains 1 for the pre-existing unselected `ScriptLoader.cpp`
+alternative/anchor fault in two scenarios.
+
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven
@@ -84,8 +99,10 @@ CTime TU absent. Optional compiled-object evidence changed no confidence
 outcome for these 35. These held-out diagnostics were not used to tune the
 policy after scoring.
 
-The next recall work is evidence-backed code ownership without a matched-code
-gain, positive emitted-owner proof with complete competitor inventory,
-typed data/vtable/BSS ownership transfers, then insertion/deletion-aware
-member matching. None should turn a diagnostic family or orphan cluster into
-an owner by name, unique body or sole caller alone.
+The attached independent-function rule covers represented units whose next
+function is already attributed without a matched-code gain. Remaining recall
+work includes non-attached ownership with similarly strong evidence, positive
+emitted-owner proof with complete competitor inventory, typed data/vtable/BSS
+ownership transfers, and insertion/deletion-aware member matching. None should
+turn a diagnostic family or orphan cluster into an owner by name, unique body
+or sole caller alone.
