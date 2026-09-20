@@ -22,7 +22,7 @@ use crate::{
         mask::{self, Scenario},
         matching::{MatchOptions, MatchTier},
         object_evidence,
-        ownership::identify_units,
+        ownership::identify_units_with_data,
         unit_matching::propose_units,
     },
     matching::{
@@ -141,7 +141,7 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
     let data_matches = prepared.data_matches.as_ref();
     // Identification is an observation layer, so build it before any output
     // chooses eligibility thresholds or attempts a mutation.
-    let mut identifications = identify_units(source, target, result);
+    let mut identifications = identify_units_with_data(source, target, result, data_matches);
     if let Some((root, version)) = &object_root {
         let units = identifications.units.iter().map(|item| item.unit.clone()).collect();
         let target_hashes: BTreeSet<String> = identifications

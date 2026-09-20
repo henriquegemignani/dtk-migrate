@@ -4,13 +4,57 @@ Status: living implementation plan. A–F's safety and composition mechanisms,
 H's scoped code/data certificates and I's bounded retry and final-validation
 mechanisms are implemented. G's helper families, optional object evidence,
 source–compiled–retail bridges and unresolved clusters are diagnostic; narrow
-destructor, two-unit compiled-boundary and clean-object terminal-suffix rules
-now participate in ownership decisions, while general emitted-owner and relocation-placement
-records do not yet drive ownership transactions. The
-full historical NTSC→PAL runs and held-out diagnostics are reported in
+destructor, two-unit compiled-boundary, clean-object terminal-suffix and
+reference-placed head-prefix rules now participate in ownership decisions,
+while general emitted-owner and relocation-placement records do not yet drive
+ownership transactions. The full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
-positive emitted-owner proof, additional recall rules and independently
+broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Policy 23: local-data references place an unattributed head function
+
+The historical CStreamAudioManager prefix is now offered from binary evidence
+alone. Identification schema 21 keeps the unmatched target function's outgoing
+relocations and unique local-data pairs from confidently matched functions.
+The policy requires two *distinct named* local data symbols wholly held by
+the same source TU, each paired bidirectionally and referenced by both HA and
+LO relocations in the unattributed target function. It also requires a direct
+call to an independently attributed, already-owned member of that TU. The
+unknown function must be complete, unowned and exactly between a held foreign
+function and the first held function of the candidate unit. Source order must
+put that foreign function immediately before the candidate unit's first
+function. The right-hand attribution must independently place its emitter;
+the left-hand attribution must be binary-supported and complete. A recorded
+foreign local-data pair vetoes the claim. These facts are rederived from the
+content-addressed raw observations when the transaction is checked.
+
+Focused coverage run `20716-135443` on the F-drive `b65ad2a6` checkout
+offered both a narrow `reference-placed-prefix` and a full-body
+`boundary-sequence` alternative, chose the latter, and extended CStreamAudioManager
+from `0x8034F45C` to `0x8034F370`. Its one transaction gained 236 code bytes,
+rebuilt to retail SHA-1 `4d3780c7…`, and scored those bytes exact against the
+verified later split. There were zero wrong or lost known bytes and all 424
+verified controls were unchanged (`target/stream-prefix-focused-verified-score/`).
+The ordinary 240-byte BSS allocation was deliberately absent from this
+coverage-only run. Combined `coverage,discover` run `20716-141044` started
+from the same saved baseline, accepted the code prefix first and the ordinary
+BSS allocation second, and rebuilt to the retail SHA-1 after both stages.
+Against the verified later split, CStreamAudioManager is exact in both code
+and complete ownership: 476 correct bytes gained, zero wrong or lost bytes,
+and all 424 verified controls unchanged
+(`target/stream-combined-verified-score/`). It still does not prove the old
+compiled source object linkable. All five frozen GM8E01_00→GM8P01_00
+calibration scenarios completed at `target/policy23-pal-calibration/` with
+zero incorrect boundaries or neighbour losses. Their aggregate measures and
+every material per-unit record match policy 22; transaction IDs differ because
+the policy and observations are content-addressed. The held-out
+GM8E01_00→GM8E01_02 `everything` scenario at
+`target/policy23-heldout-e02-everything/` likewise has unchanged decisions and
+zero incorrect boundaries or neighbour losses. These runs test for collateral
+changes; the focused historical migration and verified-oracle score exercise
+the new proof itself.
+The old checkout's split was restored to the saved pretrial hash after scoring.
 
 ### Data evidence schema 3: complete ordinary BSS allocations
 
@@ -39,17 +83,17 @@ controls at `target/stream-bss-focused-verified-score/`. After the replay
 dependency check was added, focused run `20716-130752` accepted the same
 range, rebuilt to the same retail SHA-1, and scored identically at
 `target/stream-bss-replay-verified-score/`. This was a data-only
-trial; the 236-byte code prefix is still unresolved, and the old source object
+trial; the 236-byte code prefix was unresolved at that point, and the old source object
 was not proved linked. Its PAL build report still has only 3,320 of 4,944 code
 bytes matched (67.15%), so verification cannot yet enable its source object.
 A full historical migration under this schema remains
 to be run after the other open recall rules. The prefix is target
 `fn_8034F370` (`0x8034F370–0x8034F45C`); its one recorded caller is
 `CInGameGuiManager::PauseGame` at `0x800FF304`. This call is a lead for
-cross-version call-site pairing, not emitted-owner proof. The current compiled
-PAL object has no source–compiled–retail bridge for that prefix, so the next
-code rule must resolve its identity and emitter without reading the later
-split as an answer.
+cross-version call-site pairing, not emitted-owner proof. The compiled PAL
+object has no source–compiled–retail bridge for that prefix. Policy 23 instead
+uses its two local-static references and same-unit call, without reading the
+later split or an assembly filename as an answer.
 
 All five frozen GM8E01_00→GM8P01_00 calibration scenarios completed at
 `target/data-schema3-pal-calibration/`. Their per-unit records and aggregate

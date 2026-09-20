@@ -212,6 +212,8 @@ mod tests {
             schema: 19,
             source: String::new(),
             target: String::new(),
+            unattributed_references: Vec::new(),
+            local_data_pairs: Vec::new(),
             attributions: vec![
                 attribution("B.cpp", "before", 0x2000, 0x1000, false),
                 attribution("A.cpp", "same_body", 0x3000, 0x1010, true),

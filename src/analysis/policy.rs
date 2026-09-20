@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 22;
+pub const POLICY_VERSION: u32 = 23;
 pub const MIN_COMPILED_TERMINAL_MEMBERS: usize = 3;
 pub const MAX_COMPILED_TERMINAL_MEMBERS: usize = 8;
+pub const MIN_REFERENCE_PLACED_DATA_PAIRS: usize = 2;
 
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
@@ -221,6 +222,13 @@ pub struct CoveragePolicy {
     /// between two binary-supported target neighbours.
     #[serde(default)]
     pub veto_competing_source_slots: bool,
+    /// An unattributed function may extend the head of an owned unit when
+    /// independent local data references, a same-unit callee and exact source
+    /// and retail seams identify its emitter together.
+    #[serde(default)]
+    pub infer_reference_placed_prefixes: bool,
+    #[serde(default)]
+    pub minimum_reference_placed_data_pairs: u32,
 }
 
 /// The policy as this build of the tool applies it.
@@ -322,5 +330,7 @@ pub fn current_policy() -> CoveragePolicy {
         minimum_compiled_terminal_members: MIN_COMPILED_TERMINAL_MEMBERS as u32,
         maximum_compiled_terminal_members: MAX_COMPILED_TERMINAL_MEMBERS as u32,
         veto_competing_source_slots: true,
+        infer_reference_placed_prefixes: true,
+        minimum_reference_placed_data_pairs: MIN_REFERENCE_PLACED_DATA_PAIRS as u32,
     }
 }

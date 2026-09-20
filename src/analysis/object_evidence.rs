@@ -675,7 +675,7 @@ fn unscanned_configured_count(
         .count() as u32
 }
 
-fn sort_references(references: &mut [CompiledReference]) {
+pub(crate) fn sort_references(references: &mut [CompiledReference]) {
     references.sort_by(|left, right| {
         (
             left.offset,
@@ -696,7 +696,7 @@ fn sort_references(references: &mut [CompiledReference]) {
     });
 }
 
-fn references_valid(references: &[CompiledReference], size: u32) -> bool {
+pub(crate) fn references_valid(references: &[CompiledReference], size: u32) -> bool {
     let mut offsets = BTreeSet::new();
     references.iter().all(|reference| {
         reference.offset < size
@@ -719,7 +719,7 @@ fn same_reference_signature(compiled: &[CompiledReference], target: &[CompiledRe
         })
 }
 
-fn reference_record(obj: &ObjInfo, reference: &FunctionRef) -> CompiledReference {
+pub(crate) fn reference_record(obj: &ObjInfo, reference: &FunctionRef) -> CompiledReference {
     let target = &obj.symbols[reference.target_symbol];
     CompiledReference {
         offset: reference.offset,

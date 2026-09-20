@@ -11,24 +11,26 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use decomp_toolkit::obj::ObjSymbolKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::analysis::{
     callgraph::NodeIndex,
+    data_matching::DataMatch,
     fingerprint::normalized_body,
     helpers::{self, HelperFamily, HelperTailHypothesis, UnresolvedTargetCluster},
     matching::{
         CONTESTED_MARGIN, Match, MatchMethod, MatchResult, MatchTarget, MatchTier, classify_tier,
     },
-    object_evidence::ObjectEvidence,
+    object_evidence::{self, ObjectEvidence, TargetFunctionReferences},
     policy::{
         MAX_COMPOSED_PADDING_GAP, MAX_NEW_CALLER_CONFINED_HELPERS,
-        MIN_COMPLETE_SEQUENCE_INDEPENDENT_MEMBERS,
+        MIN_COMPLETE_SEQUENCE_INDEPENDENT_MEMBERS, MIN_REFERENCE_PLACED_DATA_PAIRS,
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 20;
+pub const IDENTIFICATION_SCHEMA: u32 = 21;
 #[derive(Clone, Copy)]
 enum DestructorPlacement {
     Unchecked,
@@ -65,6 +67,14 @@ pub struct IdentificationReport {
     pub source_functions: Vec<SourceFunctionObservation>,
     #[serde(default)]
     pub target_functions: Vec<TargetFunctionObservation>,
+    /// Outgoing relocations of unattributed target functions. They are raw
+    /// observations, not a decision about which source object emitted them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unattributed_references: Vec<TargetFunctionReferences>,
+    /// Unique local data correspondences established by aligned references
+    /// in confidently paired source/target functions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_data_pairs: Vec<LocalDataPair>,
     /// Diagnostic exact-body families. These never certify emitted ownership.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub helper_families: Vec<HelperFamily>,
@@ -80,6 +90,33 @@ pub struct IdentificationReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_evidence: Option<ObjectEvidence>,
     pub units: Vec<UnitIdentification>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LocalDataPair {
+    pub unit: String,
+    pub source_section: String,
+    pub source_address: String,
+    pub source_name: String,
+    pub target_section: String,
+    pub target_address: String,
+    pub target_name: String,
+    pub reference_positions: u32,
+}
+
+/// An otherwise unattributed target function placed at a source-unit head by
+/// two independently paired local data starts, a same-unit call, and the
+/// source/target seam. This record is rederived from raw observations on use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferencePlacedPrefix {
+    pub unit: String,
+    pub section: String,
+    pub start: String,
+    pub end: String,
+    pub left_attribution_id: String,
+    pub right_attribution_id: String,
+    pub callee_attribution_id: String,
+    pub data_pairs: Vec<LocalDataPair>,
 }
 
 /// A destructor's identical body identifies a function, but does not by
@@ -388,6 +425,8 @@ impl IdentificationReport {
             attributions: Vec::new(),
             source_functions: Vec::new(),
             target_functions: Vec::new(),
+            unattributed_references: Vec::new(),
+            local_data_pairs: Vec::new(),
             helper_families: Vec::new(),
             unresolved_target_clusters: Vec::new(),
             helper_tail_hypotheses: Vec::new(),
@@ -458,6 +497,7 @@ pub struct ObservationIndex {
     destructor_ids: BTreeSet<String>,
     placed_destructors: BTreeSet<String>,
     competing_source_slots: BTreeMap<String, crate::analysis::source_slot::CompetingSourceSlot>,
+    reference_prefixes: Vec<ReferencePlacedPrefix>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -559,6 +599,9 @@ pub enum ClaimClass {
     /// One member of a complete terminal source/compiled/retail run. The
     /// whole run and both bounds must be present in the transaction.
     CompiledTerminalSuffixMember,
+    /// An unattributed function at a unit head, placed by two local data
+    /// correspondences, an independent same-unit callee and bounded order.
+    ReferencePlacedPrefix,
 }
 
 /// Where position places an unattributed function relative to a unit.
@@ -651,13 +694,16 @@ pub struct OwnershipAssessment {
     pub new_compiled_boundary_members: u32,
     #[serde(default)]
     pub new_compiled_terminal_suffix_members: u32,
+    #[serde(default)]
+    pub new_reference_placed_prefix_members: u32,
 }
 
 impl OwnershipAssessment {
     pub fn permits_automatic_claim(&self) -> bool {
         (self.independent_members > 0
             || self.new_compiled_boundary_members > 0
-            || self.new_compiled_terminal_suffix_members > 0)
+            || self.new_compiled_terminal_suffix_members > 0
+            || self.new_reference_placed_prefix_members > 0)
             && self.new_shared_helpers == 0
             && self.new_conflicts == 0
             && self.new_unresolved == 0
@@ -824,6 +870,11 @@ impl ObservationIndex {
                 "Identification schema {} cannot carry compiled terminal suffixes",
                 report.schema
             );
+        }
+        if report.schema < 21
+            && (!report.unattributed_references.is_empty() || !report.local_data_pairs.is_empty())
+        {
+            bail!("Identification schema {} cannot carry local-reference evidence", report.schema);
         }
         if report.schema < 15 {
             // Old reports never measured this fact. Clear even a supplied flag
@@ -1041,6 +1092,58 @@ impl ObservationIndex {
                 .flatten();
         }
 
+        let mut reference_locations = BTreeSet::new();
+        for raw in &mut report.unattributed_references {
+            let start = parse_address_checked(&raw.address, "target reference", &raw.section)?;
+            let end = parse_address_checked(&raw.end, "target reference", &raw.section)?;
+            if end <= start
+                || !target_functions.contains(&(
+                    EXECUTABLE_MODULE.to_string(),
+                    raw.section.clone(),
+                    start,
+                    end,
+                ))
+                || by_target.contains_key(&AddressKey {
+                    module: EXECUTABLE_MODULE.to_string(),
+                    section: raw.section.clone(),
+                    address: start,
+                })
+                || !reference_locations.insert((raw.section.clone(), start))
+                || !object_evidence::references_valid(&raw.references, end - start)
+                || raw.references.iter().any(|reference| reference.offset % 4 != 0)
+            {
+                bail!("Invalid unattributed target reference inventory at {}", raw.address);
+            }
+            raw.address = hex(start);
+            raw.end = hex(end);
+            object_evidence::sort_references(&mut raw.references);
+        }
+        report
+            .unattributed_references
+            .sort_by(|a, b| (&a.section, &a.address).cmp(&(&b.section, &b.address)));
+        let mut source_data = BTreeSet::new();
+        let mut target_data = BTreeSet::new();
+        for pair in &mut report.local_data_pairs {
+            let source_address =
+                parse_address_checked(&pair.source_address, "source data", &pair.source_name)?;
+            let target_address =
+                parse_address_checked(&pair.target_address, "target data", &pair.target_name)?;
+            if !expected_units.contains(&pair.unit)
+                || pair.source_section.is_empty()
+                || pair.target_section.is_empty()
+                || pair.source_name.is_empty()
+                || pair.target_name.is_empty()
+                || pair.reference_positions < 2
+                || !source_data.insert((pair.source_section.clone(), source_address))
+                || !target_data.insert((pair.target_section.clone(), target_address))
+            {
+                bail!("Invalid local data correspondence for {}", pair.target_name);
+            }
+            pair.source_address = hex(source_address);
+            pair.target_address = hex(target_address);
+        }
+        report.local_data_pairs.sort();
+
         let destructor_placement = DestructorPlacement::for_schema(report.schema);
         let mut by_unit = BTreeMap::new();
         let supplied_count = report.units.len();
@@ -1204,7 +1307,7 @@ impl ObservationIndex {
         let competing_source_slots = crate::analysis::source_slot::competing_source_slots(&report);
         let bytes = serde_json::to_vec(&report)?;
         let digest = format!("{:x}", Sha256::digest(bytes));
-        Ok(Self {
+        let mut index = Self {
             report,
             digest,
             by_id,
@@ -1213,10 +1316,143 @@ impl ObservationIndex {
             destructor_ids,
             placed_destructors,
             competing_source_slots,
-        })
+            reference_prefixes: Vec::new(),
+        };
+        index.reference_prefixes = index.derive_reference_placed_prefixes();
+        Ok(index)
     }
 
     pub fn report(&self) -> &IdentificationReport { &self.report }
+
+    pub fn reference_placed_prefixes(&self) -> &[ReferencePlacedPrefix] { &self.reference_prefixes }
+
+    fn derive_reference_placed_prefixes(&self) -> Vec<ReferencePlacedPrefix> {
+        if self.report.schema < 21 {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for raw in &self.report.unattributed_references {
+            let functions = self.section_functions(EXECUTABLE_MODULE, &raw.section);
+            let Some(index) = functions.iter().position(|item| item.address == raw.address) else {
+                continue;
+            };
+            let Some(function) = functions.get(index) else { continue };
+            let (Some(left), Some(right)) =
+                (index.checked_sub(1).and_then(|at| functions.get(at)), functions.get(index + 1))
+            else {
+                continue;
+            };
+            if !function.extent_known
+                || function.weak
+                || function.end != right.address
+                || left.end != function.address
+                || function.current_owner.is_some()
+            {
+                continue;
+            }
+            let Some(left_owner) = left.current_owner.as_deref() else { continue };
+            let Some(unit) = right.current_owner.as_deref() else { continue };
+            if left_owner == unit || right.owner_autogenerated {
+                continue;
+            }
+            let (Some(left_attribution), Some(right_attribution)) = (
+                self.at_target(EXECUTABLE_MODULE, &raw.section, parse_hex(&left.address)),
+                self.at_target(EXECUTABLE_MODULE, &raw.section, parse_hex(&right.address)),
+            ) else {
+                continue;
+            };
+            if left_attribution.source.unit != left_owner
+                || !left_attribution.binary_supported
+                || left_attribution.ambiguous
+                || left_attribution.source_weak
+                || left_attribution.target_weak
+                || !self.attribution_extents_known(left_attribution)
+                || right_attribution.source.unit != unit
+                || !self.ownership_independent(right_attribution)
+                || !self.attribution_extents_known(right_attribution)
+            {
+                continue;
+            }
+            let first_source = self
+                .report
+                .source_functions
+                .iter()
+                .filter(|item| {
+                    item.unit == unit
+                        && item.module == EXECUTABLE_MODULE
+                        && item.section == raw.section
+                })
+                .min_by_key(|item| parse_hex(&item.address));
+            if first_source.is_none_or(|item| {
+                !item.extent_known || item.weak || item.address != left_attribution.source.end
+            }) {
+                continue;
+            }
+            let mut pairs = BTreeMap::new();
+            let mut foreign_pair = false;
+            for reference in &raw.references {
+                if !matches!(reference.kind.as_str(), "PpcAddr16Ha" | "PpcAddr16Lo") {
+                    continue;
+                }
+                for pair in &self.report.local_data_pairs {
+                    if reference.target_section.as_deref() == Some(pair.target_section.as_str())
+                        && reference.target_address == u64::from(parse_hex(&pair.target_address))
+                        && reference.target == pair.target_name
+                    {
+                        if pair.unit != unit {
+                            foreign_pair = true;
+                        } else {
+                            pairs
+                                .entry(pair.target_address.clone())
+                                .or_insert_with(|| (pair.clone(), BTreeSet::new()))
+                                .1
+                                .insert(reference.kind.as_str());
+                        }
+                    }
+                }
+            }
+            if foreign_pair {
+                continue;
+            }
+            let supporting: Vec<LocalDataPair> = pairs
+                .into_values()
+                .filter_map(|(pair, kinds)| {
+                    (kinds.contains("PpcAddr16Ha") && kinds.contains("PpcAddr16Lo")).then_some(pair)
+                })
+                .collect();
+            if supporting.len() < MIN_REFERENCE_PLACED_DATA_PAIRS {
+                continue;
+            }
+            let callee = raw
+                .references
+                .iter()
+                .filter(|reference| {
+                    reference.kind == "PpcRel24"
+                        && reference.target_section.as_deref() == Some(raw.section.as_str())
+                })
+                .find_map(|reference| {
+                    let address = u32::try_from(reference.target_address).ok()?;
+                    let item = self.at_target(EXECUTABLE_MODULE, &raw.section, address)?;
+                    (item.source.unit == unit
+                        && self.ownership_independent(item)
+                        && self.attribution_extents_known(item)
+                        && item.current_target_owner.as_deref() == Some(unit))
+                    .then_some(item)
+                });
+            let Some(callee) = callee else { continue };
+            result.push(ReferencePlacedPrefix {
+                unit: unit.to_string(),
+                section: raw.section.clone(),
+                start: raw.address.clone(),
+                end: raw.end.clone(),
+                left_attribution_id: left_attribution.id.clone(),
+                right_attribution_id: right_attribution.id.clone(),
+                callee_attribution_id: callee.id.clone(),
+                data_pairs: supporting,
+            });
+        }
+        result
+    }
 
     pub fn digest(&self) -> &str { &self.digest }
 
@@ -1811,6 +2047,7 @@ impl ObservationIndex {
                         }
                         (false, ClaimClass::CompiledBoundaryMember) => unreachable!(),
                         (false, ClaimClass::CompiledTerminalSuffixMember) => unreachable!(),
+                        (false, ClaimClass::ReferencePlacedPrefix) => unreachable!(),
                         (false, ClaimClass::Padding) => unreachable!(),
                     }
                     result.records.push(ClaimRecord {
@@ -2585,6 +2822,8 @@ pub fn identify_units(
                 }
             })
             .collect(),
+        unattributed_references: Vec::new(),
+        local_data_pairs: Vec::new(),
         helper_families: Vec::new(),
         unresolved_target_clusters: Vec::new(),
         helper_tail_hypotheses: Vec::new(),
@@ -2600,6 +2839,74 @@ pub fn identify_units(
         &report.attributions,
         &[],
     );
+    report
+}
+
+/// Enrich the function inventory with raw references and independently paired
+/// local data starts. The pairs identify data; only a later ownership policy
+/// may decide whether a function referencing them belongs to that unit.
+pub fn identify_units_with_data(
+    source: &MatchTarget,
+    target: &MatchTarget,
+    result: &MatchResult,
+    data_matches: &[DataMatch],
+) -> IdentificationReport {
+    let mut report = identify_units(source, target, result);
+    let matched: BTreeSet<NodeIndex> = result.matches.iter().map(|item| item.target).collect();
+    report.unattributed_references = target
+        .graph
+        .iter()
+        .filter(|(node, _)| !matched.contains(node))
+        .map(|(_, function)| TargetFunctionReferences {
+            section: target.obj.sections[function.section].name.clone(),
+            address: hex(function.address),
+            end: hex(function.address + function.size),
+            references: function
+                .refs
+                .iter()
+                .map(|reference| object_evidence::reference_record(&target.obj, reference))
+                .collect(),
+        })
+        .collect();
+    report.local_data_pairs = data_matches
+        .iter()
+        .filter_map(|pair| {
+            if pair.evidence < 2
+                || !source.is_local_at(pair.source)
+                || !target.is_local_at(pair.target)
+                || !source.is_named_at(pair.source)
+                || !target.is_named_at(pair.target)
+            {
+                return None;
+            }
+            let left = &source.obj.symbols[pair.source];
+            let right = &target.obj.symbols[pair.target];
+            if left.kind != ObjSymbolKind::Object
+                || right.kind != ObjSymbolKind::Object
+                || left.flags.is_weak()
+                || right.flags.is_weak()
+                || left.size == 0
+            {
+                return None;
+            }
+            let section = source.obj.sections.get(left.section?)?;
+            let (_, split) = section.splits.for_address(u32::try_from(left.address).ok()?)?;
+            if left.address.checked_add(left.size)? > u64::from(split.end) {
+                return None;
+            }
+            Some(LocalDataPair {
+                unit: split.unit.clone(),
+                source_section: section.name.clone(),
+                source_address: hex(u32::try_from(left.address).ok()?),
+                source_name: left.name.clone(),
+                target_section: target.obj.sections.get(right.section?)?.name.clone(),
+                target_address: hex(u32::try_from(right.address).ok()?),
+                target_name: right.name.clone(),
+                reference_positions: pair.evidence,
+            })
+        })
+        .collect();
+    report.local_data_pairs.sort();
     report
 }
 
@@ -4254,5 +4561,144 @@ mod tests {
         assert!(!report.attributions[0].independent);
         assert_eq!(report.units[0].confidence, IdentificationConfidence::Tentative);
         assert_eq!(report.units[0].unresolved_helpers.len(), 1);
+    }
+
+    #[test]
+    fn two_local_data_pairs_and_a_callee_place_only_the_bounded_prefix() {
+        use crate::analysis::{
+            coverage_fixture::{anchor, report, unit},
+            object_evidence::{CompiledReference, TargetFunctionReferences},
+        };
+
+        let left = anchor("foreign", 0x1000, 0x1020);
+        let mut first = anchor("first", 0x1120, 0x1140);
+        first.source_address = hex(0x1020);
+        let mut callee = anchor("callee", 0x1200, 0x1220);
+        callee.source_address = hex(0x1040);
+        let fixture = report("source", "target", vec![
+            unit("Left.cpp", vec![left]),
+            unit("Audio.cpp", vec![first, callee]),
+        ]);
+        let units = fixture.source_units.clone();
+        let mut report = fixture.identifications;
+        for function in &mut report.target_functions {
+            function.current_owner = Some(if function.address == hex(0x1000) {
+                "Left.cpp".into()
+            } else {
+                "Audio.cpp".into()
+            });
+        }
+        report.target_functions.push(TargetFunctionObservation {
+            name: "unknown".into(),
+            module: "main".into(),
+            section: ".text".into(),
+            address: hex(0x1020),
+            end: hex(0x1120),
+            extent_known: true,
+            current_owner: None,
+            owner_autogenerated: false,
+            callers: Vec::new(),
+            normalized_body_sha256: None,
+            weak: false,
+        });
+        let reference =
+            |offset, kind: &str, name: &str, section: &str, address| CompiledReference {
+                offset,
+                kind: kind.into(),
+                target: name.into(),
+                target_section: Some(section.into()),
+                target_address: address,
+                addend: 0,
+            };
+        report.unattributed_references.push(TargetFunctionReferences {
+            section: ".text".into(),
+            address: hex(0x1020),
+            end: hex(0x1120),
+            references: vec![
+                reference(0, "PpcAddr16Ha", "a", ".bss", 0x2000),
+                reference(4, "PpcAddr16Lo", "a", ".bss", 0x2000),
+                reference(8, "PpcAddr16Ha", "b", ".bss", 0x2100),
+                reference(12, "PpcAddr16Lo", "b", ".bss", 0x2100),
+                reference(16, "PpcRel24", "callee", ".text", 0x1200),
+            ],
+        });
+        report.local_data_pairs = [("a", 0x2000), ("b", 0x2100)]
+            .into_iter()
+            .map(|(name, address)| LocalDataPair {
+                unit: "Audio.cpp".into(),
+                source_section: ".bss".into(),
+                source_address: hex(address),
+                source_name: name.into(),
+                target_section: ".bss".into(),
+                target_address: hex(address),
+                target_name: name.into(),
+                reference_positions: 2,
+            })
+            .collect();
+        let expected = BTreeSet::from(["Left.cpp".into(), "Audio.cpp".into()]);
+        let load = |report| ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        let index = load(report.clone());
+        let proof = index.reference_placed_prefixes();
+        assert_eq!(proof.len(), 1);
+        assert_eq!((proof[0].start.as_str(), proof[0].end.as_str()), ("0x00001020", "0x00001120"));
+
+        let by_name = units.iter().map(|unit| (unit.name.clone(), unit)).collect();
+        let target_blocks = indexmap::IndexMap::from([
+            ("Left.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x1000, 0x1020, "",
+            )]),
+            ("Audio.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x1120, 0x1220, "",
+            )]),
+        ]);
+        let source_blocks = indexmap::IndexMap::from([
+            ("Left.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x1000, 0x1020, "",
+            )]),
+            ("Audio.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x1020, 0x1060, "",
+            )]),
+        ]);
+        let alternatives = crate::stages::coverage::alternatives::build(
+            &units[1],
+            &target_blocks,
+            &by_name,
+            &source_blocks,
+            &index,
+        );
+        let placed = alternatives
+            .iter()
+            .find(|alternative| alternative.evidence == "reference-placed-prefix")
+            .unwrap();
+        assert_eq!((placed.start.as_str(), placed.end.as_str()), ("0x00001020", "0x00001120"));
+        assert_eq!(placed.ownership.new_reference_placed_prefix_members, 1);
+        assert_eq!(
+            placed.transaction.reads.iter().map(|read| read.unit.as_str()).collect::<Vec<_>>(),
+            ["Left.cpp"]
+        );
+
+        let mut one_pair = report.clone();
+        one_pair.local_data_pairs.pop();
+        assert!(load(one_pair).reference_placed_prefixes().is_empty());
+        let mut no_callee = report.clone();
+        no_callee.unattributed_references[0].references.pop();
+        assert!(load(no_callee).reference_placed_prefixes().is_empty());
+        let mut foreign = report.clone();
+        foreign.local_data_pairs[1].unit = "Left.cpp".into();
+        assert!(load(foreign).reference_placed_prefixes().is_empty());
+        let mut duplicate = report.clone();
+        duplicate.unattributed_references.push(duplicate.unattributed_references[0].clone());
+        assert!(ObservationIndex::load(duplicate, "source", "target", &expected).is_err());
+        let mut stale_schema = report.clone();
+        stale_schema.schema = 20;
+        assert!(ObservationIndex::load(stale_schema, "source", "target", &expected).is_err());
+        let mut no_seam = report;
+        no_seam
+            .target_functions
+            .iter_mut()
+            .find(|f| f.address == hex(0x1120))
+            .unwrap()
+            .current_owner = None;
+        assert!(load(no_seam).reference_placed_prefixes().is_empty());
     }
 }

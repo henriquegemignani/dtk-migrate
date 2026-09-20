@@ -112,12 +112,30 @@ added `.bss 0x804025F0–0x804026E0` alongside the unit's existing common BSS
 and rebuilt to the same retail SHA-1. The exact-baseline verified-oracle score
 at `target/stream-bss-focused-verified-score/` records 240 correct data bytes
 gained, zero known wrong or lost bytes, and 424 unchanged verified controls.
-The old code prefix remains missing; this focused data-only run is not a
+The old code prefix was still missing in these data-only runs, which are not a
 source-link verification or a full historical migration. The replay-gate rerun
 `20716-130752` accepted the same range and has an identical verified score at
 `target/stream-bss-replay-verified-score/`. All five PAL code-calibration
 scenarios have per-unit records and measures identical to policy 22; those
 scenarios do not exercise discovery's new BSS route.
+
+Policy 23's focused coverage run `20716-135443` started again from the same
+pretrial split hash and recovered the separate 236-byte CStreamAudioManager
+code prefix. The generated transaction was accepted and rebuilt to the retail
+SHA-1. The verified score at `target/stream-prefix-focused-verified-score/`
+rates its code body exact, with 236 correct bytes gained, zero wrong or lost
+bytes, and all 424 verified controls unchanged. The BSS allocation was absent
+from this coverage-only run. Combined `coverage,discover` run `20716-141044`
+started from the same baseline, accepted code and BSS in that order, and
+rebuilt to the retail hash after each stage. The full-body verified score at
+`target/stream-combined-verified-score/` makes CStreamAudioManager exact:
+476 correct bytes gained, zero wrong or lost bytes, and the same 424 controls
+unchanged. Neither run proves that the old compiled source object may link.
+Policy 23's five frozen PAL calibration scenarios and held-out GM8E01_02
+`everything` scenario completed with zero incorrect boundaries or neighbour
+losses. After excluding content-addressed IDs, every per-unit decision and
+aggregate measure is identical to policy 22; these scenarios do not contain
+the local-data evidence needed to exercise the new prefix rule.
 
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted

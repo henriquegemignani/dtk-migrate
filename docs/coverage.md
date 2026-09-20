@@ -199,6 +199,20 @@ entire run only when the source split owns every member and the resulting
 transaction ends at the corroborated boundary. Individual bridges do not
 grant ownership. Older report schemas keep their original derived records.
 
+Identification schema 21 also records outgoing relocations for target
+functions the matcher could not pair, plus uniquely paired named local data
+symbols wholly held by source units. Coverage policy 23 may place one complete,
+unowned function at a unit's head when it references two distinct paired local
+data symbols with HA/LO address relocations, calls an independently attributed
+and already-owned member of that unit, and lies exactly between a held foreign
+function and the first held member of the candidate. Source order must have
+the foreign function immediately before the candidate unit's first function.
+A foreign paired local-data reference, an incomplete extent or an unproved
+seam withholds the route. The raw references, data correspondences, source
+order and attributions are rechecked when the transaction is replayed; the
+normal ownership, build and retail-hash gates still apply. Earlier report
+schemas do not gain this rule.
+
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
 least one endpoint must be unique in both the observed objects and target.
