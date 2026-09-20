@@ -27,10 +27,11 @@ use crate::analysis::{
     policy::{
         MAX_COMPOSED_PADDING_GAP, MAX_NEW_CALLER_CONFINED_HELPERS,
         MIN_COMPLETE_SEQUENCE_INDEPENDENT_MEMBERS, MIN_REFERENCE_PLACED_DATA_PAIRS,
+        MIN_VTABLE_HEAD_SHARED_CALLS,
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 21;
+pub const IDENTIFICATION_SCHEMA: u32 = 22;
 #[derive(Clone, Copy)]
 enum DestructorPlacement {
     Unchecked,
@@ -71,10 +72,19 @@ pub struct IdentificationReport {
     /// observations, not a decision about which source object emitted them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unattributed_references: Vec<TargetFunctionReferences>,
+    /// Relocations of unmatched source functions that reference a vtable.
+    /// Kept apart from target references to re-prove changed-body seams.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmatched_source_references: Vec<TargetFunctionReferences>,
     /// Unique local data correspondences established by aligned references
     /// in confidently paired source/target functions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_data_pairs: Vec<LocalDataPair>,
+    /// Same-named, non-weak class vtables uniquely observed inside the same
+    /// unit's source and target data splits. Name correspondence is only a
+    /// component of a placement proof.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vtable_pairs: Vec<VtablePair>,
     /// Diagnostic exact-body families. These never certify emitted ownership.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub helper_families: Vec<HelperFamily>,
@@ -117,6 +127,33 @@ pub struct ReferencePlacedPrefix {
     pub right_attribution_id: String,
     pub callee_attribution_id: String,
     pub data_pairs: Vec<LocalDataPair>,
+}
+
+/// A two-function target head corresponding to one unmatched source
+/// destructor. Independent neighbours place the cluster; identical vtable
+/// relocation sites and a direct internal call resolve its membership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VtablePlacedHead {
+    pub unit: String,
+    pub section: String,
+    pub start: String,
+    pub middle: String,
+    pub end: String,
+    pub source_destructor: String,
+    pub vtable_name: String,
+    pub left_attribution_id: String,
+    pub right_attribution_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VtablePair {
+    pub unit: String,
+    pub name: String,
+    pub size: u32,
+    pub source_section: String,
+    pub source_address: String,
+    pub target_section: String,
+    pub target_address: String,
 }
 
 /// A destructor's identical body identifies a function, but does not by
@@ -426,7 +463,9 @@ impl IdentificationReport {
             source_functions: Vec::new(),
             target_functions: Vec::new(),
             unattributed_references: Vec::new(),
+            unmatched_source_references: Vec::new(),
             local_data_pairs: Vec::new(),
+            vtable_pairs: Vec::new(),
             helper_families: Vec::new(),
             unresolved_target_clusters: Vec::new(),
             helper_tail_hypotheses: Vec::new(),
@@ -498,6 +537,7 @@ pub struct ObservationIndex {
     placed_destructors: BTreeSet<String>,
     competing_source_slots: BTreeMap<String, crate::analysis::source_slot::CompetingSourceSlot>,
     reference_prefixes: Vec<ReferencePlacedPrefix>,
+    vtable_heads: Vec<VtablePlacedHead>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -602,6 +642,9 @@ pub enum ClaimClass {
     /// An unattributed function at a unit head, placed by two local data
     /// correspondences, an independent same-unit callee and bounded order.
     ReferencePlacedPrefix,
+    /// A complete two-function destructor head placed by independently
+    /// bounded source/target order and matching class-vtable relocation sites.
+    VtablePlacedHeadMember,
 }
 
 /// Where position places an unattributed function relative to a unit.
@@ -696,6 +739,8 @@ pub struct OwnershipAssessment {
     pub new_compiled_terminal_suffix_members: u32,
     #[serde(default)]
     pub new_reference_placed_prefix_members: u32,
+    #[serde(default)]
+    pub new_vtable_placed_head_members: u32,
 }
 
 impl OwnershipAssessment {
@@ -703,7 +748,8 @@ impl OwnershipAssessment {
         (self.independent_members > 0
             || self.new_compiled_boundary_members > 0
             || self.new_compiled_terminal_suffix_members > 0
-            || self.new_reference_placed_prefix_members > 0)
+            || self.new_reference_placed_prefix_members > 0
+            || self.new_vtable_placed_head_members > 0)
             && self.new_shared_helpers == 0
             && self.new_conflicts == 0
             && self.new_unresolved == 0
@@ -875,6 +921,11 @@ impl ObservationIndex {
             && (!report.unattributed_references.is_empty() || !report.local_data_pairs.is_empty())
         {
             bail!("Identification schema {} cannot carry local-reference evidence", report.schema);
+        }
+        if report.schema < 22
+            && (!report.unmatched_source_references.is_empty() || !report.vtable_pairs.is_empty())
+        {
+            bail!("Identification schema {} cannot carry vtable-head evidence", report.schema);
         }
         if report.schema < 15 {
             // Old reports never measured this fact. Clear even a supplied flag
@@ -1121,6 +1172,35 @@ impl ObservationIndex {
         report
             .unattributed_references
             .sort_by(|a, b| (&a.section, &a.address).cmp(&(&b.section, &b.address)));
+        let mut unmatched_source_locations = BTreeSet::new();
+        for raw in &mut report.unmatched_source_references {
+            let start = parse_address_checked(&raw.address, "source reference", &raw.section)?;
+            let end = parse_address_checked(&raw.end, "source reference", &raw.section)?;
+            if end <= start
+                || !source_functions.iter().any(|item| {
+                    item.0 == EXECUTABLE_MODULE
+                        && item.1 == raw.section
+                        && item.2 == start
+                        && item.3 == end
+                })
+                || source_locations.contains(&(
+                    EXECUTABLE_MODULE.to_string(),
+                    raw.section.clone(),
+                    start,
+                ))
+                || !unmatched_source_locations.insert((raw.section.clone(), start))
+                || !object_evidence::references_valid(&raw.references, end - start)
+                || raw.references.iter().any(|reference| reference.offset % 4 != 0)
+            {
+                bail!("Invalid unmatched source reference inventory at {}", raw.address);
+            }
+            raw.address = hex(start);
+            raw.end = hex(end);
+            object_evidence::sort_references(&mut raw.references);
+        }
+        report
+            .unmatched_source_references
+            .sort_by(|a, b| (&a.section, &a.address).cmp(&(&b.section, &b.address)));
         let mut source_data = BTreeSet::new();
         let mut target_data = BTreeSet::new();
         for pair in &mut report.local_data_pairs {
@@ -1143,6 +1223,32 @@ impl ObservationIndex {
             pair.target_address = hex(target_address);
         }
         report.local_data_pairs.sort();
+        let mut source_vtables = BTreeSet::new();
+        let mut target_vtables = BTreeSet::new();
+        let mut vtable_names = BTreeSet::new();
+        for pair in &mut report.vtable_pairs {
+            let source_address =
+                parse_address_checked(&pair.source_address, "source vtable", &pair.name)?;
+            let target_address =
+                parse_address_checked(&pair.target_address, "target vtable", &pair.name)?;
+            if !expected_units.contains(&pair.unit)
+                || !pair.name.starts_with("__vt__")
+                || pair.size < 8
+                || pair.size % 4 != 0
+                || source_address % 4 != 0
+                || target_address % 4 != 0
+                || pair.source_section != ".data"
+                || pair.target_section != ".data"
+                || !vtable_names.insert(pair.name.clone())
+                || !source_vtables.insert((pair.source_section.clone(), source_address))
+                || !target_vtables.insert((pair.target_section.clone(), target_address))
+            {
+                bail!("Invalid vtable correspondence for {}", pair.name);
+            }
+            pair.source_address = hex(source_address);
+            pair.target_address = hex(target_address);
+        }
+        report.vtable_pairs.sort();
 
         let destructor_placement = DestructorPlacement::for_schema(report.schema);
         let mut by_unit = BTreeMap::new();
@@ -1317,14 +1423,18 @@ impl ObservationIndex {
             placed_destructors,
             competing_source_slots,
             reference_prefixes: Vec::new(),
+            vtable_heads: Vec::new(),
         };
         index.reference_prefixes = index.derive_reference_placed_prefixes();
+        index.vtable_heads = index.derive_vtable_placed_heads();
         Ok(index)
     }
 
     pub fn report(&self) -> &IdentificationReport { &self.report }
 
     pub fn reference_placed_prefixes(&self) -> &[ReferencePlacedPrefix] { &self.reference_prefixes }
+
+    pub fn vtable_placed_heads(&self) -> &[VtablePlacedHead] { &self.vtable_heads }
 
     fn derive_reference_placed_prefixes(&self) -> Vec<ReferencePlacedPrefix> {
         if self.report.schema < 21 {
@@ -1449,6 +1559,224 @@ impl ObservationIndex {
                 right_attribution_id: right_attribution.id.clone(),
                 callee_attribution_id: callee.id.clone(),
                 data_pairs: supporting,
+            });
+        }
+        result
+    }
+
+    fn derive_vtable_placed_heads(&self) -> Vec<VtablePlacedHead> {
+        if self.report.schema < 22 {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for pair in &self.report.vtable_pairs {
+            let destructor_prefix =
+                format!("__dt__{}F", pair.name.strip_prefix("__vt__").expect("validated vtable"));
+            let source_candidates: Vec<_> = self
+                .report
+                .source_functions
+                .iter()
+                .filter(|item| {
+                    item.unit == pair.unit
+                        && item.module == EXECUTABLE_MODULE
+                        && item.section == ".text"
+                        && item.name.starts_with(&destructor_prefix)
+                        && item.extent_known
+                        && !item.weak
+                })
+                .filter_map(|item| {
+                    let refs = self.report.unmatched_source_references.iter().find(|raw| {
+                        raw.section == item.section
+                            && raw.address == item.address
+                            && raw.end == item.end
+                    })?;
+                    let sites = vtable_reference_sites(
+                        &refs.references,
+                        &pair.name,
+                        &pair.source_section,
+                        &pair.source_address,
+                    );
+                    (sites.len() == 2
+                        && sites.iter().any(|(_, kind)| *kind == "PpcAddr16Ha")
+                        && sites.iter().any(|(_, kind)| *kind == "PpcAddr16Lo"))
+                    .then_some((item, refs, sites))
+                })
+                .collect();
+            let [(source_destructor, source_refs, source_sites)] = source_candidates.as_slice()
+            else {
+                continue;
+            };
+            let source_functions: Vec<_> = self
+                .report
+                .source_functions
+                .iter()
+                .filter(|item| {
+                    item.module == EXECUTABLE_MODULE && item.section == source_destructor.section
+                })
+                .collect();
+            if source_functions
+                .iter()
+                .any(|item| item.unit == pair.unit && item.address < source_destructor.address)
+            {
+                continue;
+            }
+            let Some(source_index) =
+                source_functions.iter().position(|item| item.address == source_destructor.address)
+            else {
+                continue;
+            };
+            let (Some(source_left), Some(source_right)) = (
+                source_index.checked_sub(1).and_then(|idx| source_functions.get(idx)),
+                source_functions.get(source_index + 1),
+            ) else {
+                continue;
+            };
+            if source_left.unit == pair.unit
+                || source_right.unit != pair.unit
+                || source_left.end != source_destructor.address
+                || source_destructor.end != source_right.address
+            {
+                continue;
+            }
+            let left_attribution = self.report.attributions.iter().find(|item| {
+                item.source.unit == source_left.unit
+                    && item.source.section == source_left.section
+                    && item.source.address == source_left.address
+            });
+            let right_attribution = self.report.attributions.iter().find(|item| {
+                item.source.unit == pair.unit
+                    && item.source.section == source_right.section
+                    && item.source.address == source_right.address
+            });
+            let (Some(left_attribution), Some(right_attribution)) =
+                (left_attribution, right_attribution)
+            else {
+                continue;
+            };
+            if !self.ownership_independent(left_attribution)
+                || !self.ownership_independent(right_attribution)
+                || !self.attribution_extents_known(left_attribution)
+                || !self.attribution_extents_known(right_attribution)
+                || left_attribution.current_target_owner.as_deref()
+                    != Some(source_left.unit.as_str())
+                || right_attribution.current_target_owner.as_deref() != Some(pair.unit.as_str())
+            {
+                continue;
+            }
+            let functions =
+                self.section_functions(EXECUTABLE_MODULE, &right_attribution.target.section);
+            let Some(right_index) =
+                functions.iter().position(|item| item.address == right_attribution.target.address)
+            else {
+                continue;
+            };
+            if right_index < 3 {
+                continue;
+            }
+            let (left, first, second, right) = (
+                &functions[right_index - 3],
+                &functions[right_index - 2],
+                &functions[right_index - 1],
+                &functions[right_index],
+            );
+            if left.address != left_attribution.target.address
+                || left.owner_autogenerated
+                || right.owner_autogenerated
+                || functions[..right_index - 2]
+                    .iter()
+                    .any(|item| item.current_owner.as_deref() == Some(pair.unit.as_str()))
+                || left.end != first.address
+                || first.end != second.address
+                || second.end != right.address
+                || first.current_owner.is_some()
+                || second.current_owner.is_some()
+                || !first.extent_known
+                || !second.extent_known
+                || first.weak
+                || second.weak
+                || second.callers.as_slice()
+                    != [CallerReference {
+                        section: first.section.clone(),
+                        address: first.address.clone(),
+                    }]
+            {
+                continue;
+            }
+            let first_refs = self.report.unattributed_references.iter().find(|raw| {
+                raw.section == first.section && raw.address == first.address && raw.end == first.end
+            });
+            let second_refs = self.report.unattributed_references.iter().find(|raw| {
+                raw.section == second.section
+                    && raw.address == second.address
+                    && raw.end == second.end
+            });
+            let (Some(first_refs), Some(second_refs)) = (first_refs, second_refs) else {
+                continue;
+            };
+            if vtable_reference_sites(
+                &first_refs.references,
+                &pair.name,
+                &pair.target_section,
+                &pair.target_address,
+            ) != *source_sites
+                || !first_refs.references.iter().any(|reference| {
+                    reference.kind == "PpcRel24"
+                        && reference.target_section.as_deref() == Some(second.section.as_str())
+                        && reference.target_address == u64::from(parse_hex(&second.address))
+                })
+            {
+                continue;
+            }
+            let source_calls: BTreeSet<_> = source_refs
+                .references
+                .iter()
+                .filter(|reference| reference.kind == "PpcRel24")
+                .map(|reference| reference.target.as_str())
+                .collect();
+            let shared_calls: BTreeSet<_> = first_refs
+                .references
+                .iter()
+                .chain(&second_refs.references)
+                .filter(|reference| {
+                    reference.kind == "PpcRel24" && source_calls.contains(reference.target.as_str())
+                })
+                .map(|reference| reference.target.as_str())
+                .collect();
+            let independently_paired_call = source_refs.references.iter().any(|source_call| {
+                source_call.kind == "PpcRel24"
+                    && first_refs.references.iter().chain(&second_refs.references).any(
+                        |target_call| {
+                            target_call.kind == "PpcRel24"
+                                && source_call.target == target_call.target
+                                && self.report.attributions.iter().any(|item| {
+                                    item.source.module == EXECUTABLE_MODULE
+                                        && item.target.module == EXECUTABLE_MODULE
+                                        && source_call.target_section.as_deref()
+                                            == Some(item.source.section.as_str())
+                                        && target_call.target_section.as_deref()
+                                            == Some(item.target.section.as_str())
+                                        && source_call.target_address
+                                            == u64::from(parse_hex(&item.source.address))
+                                        && target_call.target_address
+                                            == u64::from(parse_hex(&item.target.address))
+                                        && self.ownership_independent(item)
+                                })
+                        },
+                    )
+            });
+            if shared_calls.len() < MIN_VTABLE_HEAD_SHARED_CALLS || !independently_paired_call {
+                continue;
+            }
+            result.push(VtablePlacedHead {
+                unit: pair.unit.clone(),
+                section: first.section.clone(),
+                start: first.address.clone(),
+                middle: second.address.clone(),
+                end: right.address.clone(),
+                source_destructor: source_destructor.address.clone(),
+                vtable_name: pair.name.clone(),
+                left_attribution_id: left_attribution.id.clone(),
+                right_attribution_id: right_attribution.id.clone(),
             });
         }
         result
@@ -2048,6 +2376,7 @@ impl ObservationIndex {
                         (false, ClaimClass::CompiledBoundaryMember) => unreachable!(),
                         (false, ClaimClass::CompiledTerminalSuffixMember) => unreachable!(),
                         (false, ClaimClass::ReferencePlacedPrefix) => unreachable!(),
+                        (false, ClaimClass::VtablePlacedHeadMember) => unreachable!(),
                         (false, ClaimClass::Padding) => unreachable!(),
                     }
                     result.records.push(ClaimRecord {
@@ -2823,7 +3152,9 @@ pub fn identify_units(
             })
             .collect(),
         unattributed_references: Vec::new(),
+        unmatched_source_references: Vec::new(),
         local_data_pairs: Vec::new(),
+        vtable_pairs: Vec::new(),
         helper_families: Vec::new(),
         unresolved_target_clusters: Vec::new(),
         helper_tail_hypotheses: Vec::new(),
@@ -2852,6 +3183,28 @@ pub fn identify_units_with_data(
     data_matches: &[DataMatch],
 ) -> IdentificationReport {
     let mut report = identify_units(source, target, result);
+    let matched_source: BTreeSet<NodeIndex> =
+        result.matches.iter().map(|item| item.source).collect();
+    report.unmatched_source_references = source
+        .graph
+        .iter()
+        .filter(|(node, _)| !matched_source.contains(node))
+        .filter_map(|(_, function)| {
+            let references: Vec<_> = function
+                .refs
+                .iter()
+                .map(|reference| object_evidence::reference_record(&source.obj, reference))
+                .collect();
+            references.iter().any(|reference| reference.target.starts_with("__vt__")).then(|| {
+                TargetFunctionReferences {
+                    section: source.obj.sections[function.section].name.clone(),
+                    address: hex(function.address),
+                    end: hex(function.address + function.size),
+                    references,
+                }
+            })
+        })
+        .collect();
     let matched: BTreeSet<NodeIndex> = result.matches.iter().map(|item| item.target).collect();
     report.unattributed_references = target
         .graph
@@ -2907,6 +3260,63 @@ pub fn identify_units_with_data(
         })
         .collect();
     report.local_data_pairs.sort();
+    let vtables = |input: &MatchTarget| {
+        let mut names: BTreeMap<String, Vec<(String, u32, String, u32)>> = BTreeMap::new();
+        for (_, symbol) in input.obj.symbols.iter() {
+            if !symbol.name.starts_with("__vt__")
+                || symbol.kind != ObjSymbolKind::Object
+                || symbol.flags.is_weak()
+                || symbol.size < 8
+            {
+                continue;
+            }
+            let Some(section) = symbol.section.and_then(|idx| input.obj.sections.get(idx)) else {
+                continue;
+            };
+            if section.name != ".data" {
+                continue;
+            }
+            let Ok(address) = u32::try_from(symbol.address) else { continue };
+            let Ok(size) = u32::try_from(symbol.size) else { continue };
+            let Some((_, split)) = section.splits.for_address(address) else { continue };
+            if symbol.address.checked_add(symbol.size).is_none_or(|end| end > u64::from(split.end))
+            {
+                continue;
+            }
+            names.entry(symbol.name.clone()).or_default().push((
+                section.name.clone(),
+                address,
+                split.unit.clone(),
+                size,
+            ));
+        }
+        names
+            .into_iter()
+            .filter_map(|(name, locations)| {
+                (locations.len() == 1).then(|| (name, locations.into_iter().next().unwrap()))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let source_vtables = vtables(source);
+    let target_vtables = vtables(target);
+    report.vtable_pairs = source_vtables
+        .into_iter()
+        .filter_map(|(name, (source_section, source_address, unit, size))| {
+            let (target_section, target_address, target_unit, target_size) =
+                target_vtables.get(&name)?;
+            (unit == *target_unit && size == *target_size && size >= 8 && size % 4 == 0).then(
+                || VtablePair {
+                    unit,
+                    name,
+                    size,
+                    source_section,
+                    source_address: hex(source_address),
+                    target_section: target_section.clone(),
+                    target_address: hex(*target_address),
+                },
+            )
+        })
+        .collect();
     report
 }
 
@@ -3403,6 +3813,24 @@ fn callable_name(name: &str) -> &str {
 }
 
 fn round(value: f32) -> f32 { (value * 1000.0).round() / 1000.0 }
+
+fn vtable_reference_sites(
+    references: &[object_evidence::CompiledReference],
+    name: &str,
+    section: &str,
+    address: &str,
+) -> BTreeSet<(u32, String)> {
+    references
+        .iter()
+        .filter(|reference| {
+            matches!(reference.kind.as_str(), "PpcAddr16Ha" | "PpcAddr16Lo")
+                && reference.target == name
+                && reference.target_section.as_deref() == Some(section)
+                && reference.target_address == u64::from(parse_hex(address))
+        })
+        .map(|reference| (reference.offset, reference.kind.clone()))
+        .collect()
+}
 
 fn hex(value: u32) -> String { format!("{value:#010X}") }
 
@@ -4700,5 +5128,228 @@ mod tests {
             .unwrap()
             .current_owner = None;
         assert!(load(no_seam).reference_placed_prefixes().is_empty());
+    }
+
+    #[test]
+    fn bounded_vtable_destructor_cluster_places_both_head_functions() {
+        use crate::analysis::{
+            coverage_fixture::{anchor, report, unit},
+            object_evidence::{CompiledReference, TargetFunctionReferences},
+        };
+
+        let mut left = anchor("before", 0x2000, 0x2020);
+        left.source_address = hex(0x1000);
+        let mut right = anchor("after", 0x2140, 0x2160);
+        right.source_address = hex(0x1100);
+        let mut free = anchor("Free", 0x6000, 0x6020);
+        free.source_address = hex(0x5000);
+        let fixture = report("source", "target", vec![
+            unit("Left.cpp", vec![left]),
+            unit("Team.cpp", vec![right]),
+            unit("Runtime.cpp", vec![free]),
+        ]);
+        let units = fixture.source_units.clone();
+        let mut report = fixture.identifications;
+        for function in &mut report.target_functions {
+            function.current_owner = Some(if function.address == hex(0x2000) {
+                "Left.cpp".into()
+            } else if function.address == hex(0x6000) {
+                "Runtime.cpp".into()
+            } else {
+                "Team.cpp".into()
+            });
+        }
+        report.source_functions.push(SourceFunctionObservation {
+            name: "__dt__4TeamFv".into(),
+            unit: "Team.cpp".into(),
+            module: "main".into(),
+            section: ".text".into(),
+            address: hex(0x1020),
+            end: hex(0x1100),
+            extent_known: true,
+            normalized_body_sha256: None,
+            weak: false,
+        });
+        for (start, end, callers) in [
+            (0x2020, 0x2080, Vec::new()),
+            (0x2080, 0x2140, vec![CallerReference {
+                section: ".text".into(),
+                address: hex(0x2020),
+            }]),
+        ] {
+            report.target_functions.push(TargetFunctionObservation {
+                name: format!("fn_{start:X}"),
+                module: "main".into(),
+                section: ".text".into(),
+                address: hex(start),
+                end: hex(end),
+                extent_known: true,
+                current_owner: None,
+                owner_autogenerated: false,
+                callers,
+                normalized_body_sha256: None,
+                weak: false,
+            });
+        }
+        let reference =
+            |offset, kind: &str, name: &str, section: &str, address| CompiledReference {
+                offset,
+                kind: kind.into(),
+                target: name.into(),
+                target_section: Some(section.into()),
+                target_address: address,
+                addend: 0,
+            };
+        report.unmatched_source_references.push(TargetFunctionReferences {
+            section: ".text".into(),
+            address: hex(0x1020),
+            end: hex(0x1100),
+            references: vec![
+                reference(0, "PpcAddr16Ha", "__vt__4Team", ".data", 0x3000),
+                reference(4, "PpcAddr16Lo", "__vt__4Team", ".data", 0x3000),
+                reference(8, "PpcRel24", "Free", ".text", 0x5000),
+                reference(12, "PpcRel24", "BaseDtor", ".text", 0x5100),
+            ],
+        });
+        report.unattributed_references = vec![
+            TargetFunctionReferences {
+                section: ".text".into(),
+                address: hex(0x2020),
+                end: hex(0x2080),
+                references: vec![
+                    reference(0, "PpcAddr16Ha", "__vt__4Team", ".data", 0x4000),
+                    reference(4, "PpcAddr16Lo", "__vt__4Team", ".data", 0x4000),
+                    reference(8, "PpcRel24", "Free", ".text", 0x6000),
+                    reference(12, "PpcRel24", "BaseDtor", ".text", 0x6100),
+                    reference(16, "PpcRel24", "fn_2080", ".text", 0x2080),
+                ],
+            },
+            TargetFunctionReferences {
+                section: ".text".into(),
+                address: hex(0x2080),
+                end: hex(0x2140),
+                references: Vec::new(),
+            },
+        ];
+        report.vtable_pairs.push(VtablePair {
+            unit: "Team.cpp".into(),
+            name: "__vt__4Team".into(),
+            size: 0x20,
+            source_section: ".data".into(),
+            source_address: hex(0x3000),
+            target_section: ".data".into(),
+            target_address: hex(0x4000),
+        });
+        let expected = BTreeSet::from(["Left.cpp".into(), "Team.cpp".into(), "Runtime.cpp".into()]);
+        let load = |report| ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        let index = load(report.clone());
+        let heads = index.vtable_placed_heads();
+        assert_eq!(heads.len(), 1);
+        assert_eq!((heads[0].start.as_str(), heads[0].end.as_str()), ("0x00002020", "0x00002140"));
+
+        let by_name = units.iter().map(|unit| (unit.name.clone(), unit)).collect();
+        let target_blocks = indexmap::IndexMap::from([
+            ("Left.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x2000, 0x2020, "",
+            )]),
+            ("Team.cpp".into(), vec![
+                crate::project::splits::entry_line(".text", 0x2140, 0x2160, ""),
+                crate::project::splits::entry_line(".data", 0x4000, 0x4020, ""),
+            ]),
+            ("Runtime.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x6000, 0x6020, "",
+            )]),
+        ]);
+        let source_blocks = indexmap::IndexMap::from([
+            ("Left.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x1000, 0x1020, "",
+            )]),
+            ("Team.cpp".into(), vec![
+                crate::project::splits::entry_line(".text", 0x1020, 0x1120, ""),
+                crate::project::splits::entry_line(".data", 0x3000, 0x3020, ""),
+            ]),
+            ("Runtime.cpp".into(), vec![crate::project::splits::entry_line(
+                ".text", 0x5000, 0x5020, "",
+            )]),
+        ]);
+        let alternatives = crate::stages::coverage::alternatives::build(
+            &units[1],
+            &target_blocks,
+            &by_name,
+            &source_blocks,
+            &index,
+        );
+        let placed =
+            alternatives.iter().find(|item| item.evidence == "vtable-placed-head").unwrap();
+        assert_eq!(placed.ownership.new_vtable_placed_head_members, 2);
+        assert_eq!(placed.ownership.new_unresolved, 0);
+        assert_eq!(placed.transaction.members[0].after, vec![
+            crate::project::splits::entry_line(".text", 0x2020, 0x2160, ""),
+            crate::project::splits::entry_line(".data", 0x4000, 0x4020, ""),
+        ]);
+        let mut without_target_vtable = target_blocks.clone();
+        without_target_vtable.get_mut("Team.cpp").unwrap().pop();
+        assert!(
+            crate::stages::coverage::alternatives::build(
+                &units[1],
+                &without_target_vtable,
+                &by_name,
+                &source_blocks,
+                &index,
+            )
+            .iter()
+            .all(|item| item.evidence != "vtable-placed-head")
+        );
+        let mut without_source_vtable = source_blocks.clone();
+        without_source_vtable.get_mut("Team.cpp").unwrap().pop();
+        assert!(
+            crate::stages::coverage::alternatives::build(
+                &units[1],
+                &target_blocks,
+                &by_name,
+                &without_source_vtable,
+                &index,
+            )
+            .iter()
+            .all(|item| item.evidence != "vtable-placed-head")
+        );
+
+        let mut changed_site = report.clone();
+        changed_site.unattributed_references[0].references[1].offset = 24;
+        assert!(load(changed_site).vtable_placed_heads().is_empty());
+        let mut other_class = report.clone();
+        other_class
+            .source_functions
+            .iter_mut()
+            .find(|item| item.address == hex(0x1020))
+            .unwrap()
+            .name = "__dt__5OtherFv".into();
+        assert!(load(other_class).vtable_placed_heads().is_empty());
+        let mut extra_caller = report.clone();
+        extra_caller
+            .target_functions
+            .iter_mut()
+            .find(|item| item.address == hex(0x2080))
+            .unwrap()
+            .callers
+            .push(CallerReference { section: ".text".into(), address: hex(0x2000) });
+        assert!(load(extra_caller).vtable_placed_heads().is_empty());
+        let mut missing_call = report.clone();
+        missing_call.unattributed_references[0].references.pop();
+        assert!(load(missing_call).vtable_placed_heads().is_empty());
+        let mut one_shared_callee = report.clone();
+        one_shared_callee.unmatched_source_references[0]
+            .references
+            .retain(|item| item.target != "BaseDtor");
+        assert!(load(one_shared_callee).vtable_placed_heads().is_empty());
+        let mut no_independent_callee = report.clone();
+        no_independent_callee.attributions.retain(|item| item.source.name != "Free");
+        assert!(load(no_independent_callee).vtable_placed_heads().is_empty());
+        let mut missing_pair = report.clone();
+        missing_pair.vtable_pairs.clear();
+        assert!(load(missing_pair).vtable_placed_heads().is_empty());
+        let mut old_schema = report;
+        old_schema.schema = 21;
+        assert!(ObservationIndex::load(old_schema, "source", "target", &expected).is_err());
     }
 }

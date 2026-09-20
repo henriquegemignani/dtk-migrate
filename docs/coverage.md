@@ -213,6 +213,21 @@ order and attributions are rechecked when the transaction is replayed; the
 normal ownership, build and retail-hash gates still apply. Earlier report
 schemas do not gain this rule.
 
+Identification schema 22 retains the relocations of unmatched source
+functions that reference class vtables, and unique same-named, non-weak
+vtables wholly held in the same unit's source and target data splits. Coverage
+policy 24 can place a two-function unowned target head for one unmatched
+source destructor of that vtable's class only when independent held functions bound both sequences,
+the source destructor and first target function reference that vtable with
+identical HA/LO relocation offsets, the first target function directly calls
+the second, and that call is the second function's only recorded caller. At
+least two distinct named callees must be shared between the source destructor
+and target pair, including one independently paired call target. The complete vtable range must still be in that unit's source
+and target blocks when the alternative is built, and target ownership is
+checked again when its transaction is replayed. A name or vtable reference by
+itself does not assign an emitter; incomplete seams and competing callers
+withhold the claim. Earlier report schemas do not gain this rule.
+
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
 least one endpoint must be unique in both the observed objects and target.

@@ -137,6 +137,19 @@ losses. After excluding content-addressed IDs, every per-unit decision and
 aggregate measure is identical to policy 22; these scenarios do not contain
 the local-data evidence needed to exercise the new prefix rule.
 
+Policy 24's focused coverage run `20716-153739` started from the same saved
+pretrial split, accepted CTeamAiMgr's two-function destructor head
+`0x80227D90–0x80227EA4`, and rebuilt to retail SHA-1 `4d3780c7…`.
+The independently verified later split makes CTeamAiMgr exact in code and
+complete ownership: 276 correct bytes gained, no known wrong or lost bytes,
+and all 424 verified controls unchanged at
+`target/team-head-policy24-final-verified-score/`. All five frozen PAL
+calibration scenarios and held-out GM8E01_02 `everything` completed with
+zero incorrect boundaries or neighbour losses and unchanged material per-unit
+decisions against policy 23. This is a focused trial, not the
+pending full historical migration; the older named-gap table below describes
+the full run before this policy.
+
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven

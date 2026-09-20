@@ -255,7 +255,9 @@ pub fn report(source: &str, target: &str, units: Vec<CoverageUnit>) -> CoverageR
         target: target.to_string(),
         attributions: attributions.clone(),
         unattributed_references: Vec::new(),
+        unmatched_source_references: Vec::new(),
         local_data_pairs: Vec::new(),
+        vtable_pairs: Vec::new(),
         source_functions: attributions
             .iter()
             .map(|item| SourceFunctionObservation {

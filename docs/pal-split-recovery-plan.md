@@ -4,13 +4,46 @@ Status: living implementation plan. A–F's safety and composition mechanisms,
 H's scoped code/data certificates and I's bounded retry and final-validation
 mechanisms are implemented. G's helper families, optional object evidence,
 source–compiled–retail bridges and unresolved clusters are diagnostic; narrow
-destructor, two-unit compiled-boundary, clean-object terminal-suffix and
-reference-placed head-prefix rules now participate in ownership decisions,
+destructor, two-unit compiled-boundary, clean-object terminal-suffix,
+reference-placed head-prefix and bounded vtable-destructor rules now participate in ownership decisions,
 while general emitted-owner and relocation-placement records do not yet drive
 ownership transactions. The full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Policy 24: a vtable-bound destructor occupies a two-function head
+
+The old PAL `CTeamAiMgr.cpp` split began at `UpdateTeamCaptain` at
+`0x80227EA4`. Its two preceding complete functions were unattributed, while
+the NTSC source had one unmatched destructor immediately before the paired
+`UpdateTeamCaptain`. Identification schema 22 keeps the unmatched source
+same-class destructor's relocations and uniquely named non-weak vtables wholly held by
+the same source and target data splits. The first target function and source
+destructor address the same class vtable with HA and LO relocations at the
+same offsets. The target first calls the second, which has no other recorded
+caller, and their combined named calls share two distinct callees with the
+source destructor, including one independently paired callee. Independently attributed, held functions bound both
+source and target seams. The ownership rule requires the full vtable data
+range to remain in the candidate unit's source and target blocks; replay
+rechecks target ownership. Neither the vtable name nor a destructor label
+alone permits a claim.
+
+Focused coverage run `20716-153739` on the F-drive `b65ad2a6` checkout
+offered exactly one vtable-head transaction and extended CTeamAiMgr's `.text`
+start to `0x80227D90`. It rebuilt to retail SHA-1 `4d3780c7…`. Against the
+verified later split, the unit is exact in code and full ownership: 276
+correct code bytes gained, zero wrong or lost bytes, and all 424 verified
+controls unchanged (`target/team-head-policy24-final-verified-score/`). The old
+checkout's split was restored to its pretrial SHA-256 `a59a122d…`. All five
+frozen GM8E01_00→GM8P01_00 calibration scenarios completed at
+`target/policy24-pal-calibration/` with zero incorrect boundaries or
+neighbour losses. Their aggregate measures and every material per-unit record
+match policy 23; only content-addressed IDs change. The held-out
+GM8E01_00→GM8E01_02 `everything` scenario at
+`target/policy24-heldout-e02-everything/` likewise has unchanged decisions
+and zero incorrect boundaries or neighbour losses. These scenarios check for
+collateral changes; the focused historical trial exercises the new proof.
 
 ### Policy 23: local-data references place an unattributed head function
 

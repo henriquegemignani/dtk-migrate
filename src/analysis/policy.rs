@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 23;
+pub const POLICY_VERSION: u32 = 24;
 pub const MIN_COMPILED_TERMINAL_MEMBERS: usize = 3;
 pub const MAX_COMPILED_TERMINAL_MEMBERS: usize = 8;
 pub const MIN_REFERENCE_PLACED_DATA_PAIRS: usize = 2;
+pub const MIN_VTABLE_HEAD_SHARED_CALLS: usize = 2;
 
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
@@ -229,6 +230,12 @@ pub struct CoveragePolicy {
     pub infer_reference_placed_prefixes: bool,
     #[serde(default)]
     pub minimum_reference_placed_data_pairs: u32,
+    /// A changed destructor may occupy a two-function head when independent
+    /// bounds, a unique class vtable and relocation structure all agree.
+    #[serde(default)]
+    pub infer_vtable_placed_heads: bool,
+    #[serde(default)]
+    pub minimum_vtable_head_shared_calls: u32,
 }
 
 /// The policy as this build of the tool applies it.
@@ -332,5 +339,7 @@ pub fn current_policy() -> CoveragePolicy {
         veto_competing_source_slots: true,
         infer_reference_placed_prefixes: true,
         minimum_reference_placed_data_pairs: MIN_REFERENCE_PLACED_DATA_PAIRS as u32,
+        infer_vtable_placed_heads: true,
+        minimum_vtable_head_shared_calls: MIN_VTABLE_HEAD_SHARED_CALLS as u32,
     }
 }
