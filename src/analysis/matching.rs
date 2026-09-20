@@ -41,6 +41,21 @@ impl MatchTarget {
         Self { name, obj, graph, fingerprints, layout, layout_position }
     }
 
+    /// A fresh ownership view over the same analysed functions. The caller
+    /// must first compare [`same_matching_inputs`]; split-dependent signatures
+    /// can change symbols during DOL analysis, so fresh splits alone are not
+    /// proof that these derived fields are reusable.
+    pub(crate) fn with_cached_analysis(name: String, obj: ObjInfo, cached: &Self) -> Self {
+        Self {
+            name,
+            obj,
+            graph: cached.graph.clone(),
+            fingerprints: cached.fingerprints.clone(),
+            layout: cached.layout.clone(),
+            layout_position: cached.layout_position.clone(),
+        }
+    }
+
     pub fn symbol_name(&self, node: NodeIndex) -> &str {
         self.symbol_name_at(self.graph.node(node).symbol)
     }
@@ -96,6 +111,45 @@ impl MatchTarget {
 
     /// Position of `node` within [`Self::layout`].
     pub fn layout_position(&self, node: NodeIndex) -> u32 { self.layout_position[node as usize] }
+}
+
+/// Exact inputs to call-graph construction, fingerprinting and function/data
+/// matching after dtk has fully analysed the DOL. Split ownership and link
+/// order are deliberately excluded: later identification and proposals read
+/// those from a newly loaded `ObjInfo`, never from the cached target.
+///
+/// Comparing analysed symbols matters. dtk applies some signatures according
+/// to existing splits, so a split edit can change the function inventory even
+/// when the DOL bytes and symbols.txt have not changed.
+pub(crate) fn same_matching_inputs(left: &ObjInfo, right: &ObjInfo) -> bool {
+    if left.kind != right.kind
+        || left.architecture != right.architecture
+        || left.symbols.count() != right.symbols.count()
+        || left.sections.len() != right.sections.len()
+        || !left.symbols.iter().zip(right.symbols.iter()).all(|((_, a), (_, b))| a == b)
+    {
+        return false;
+    }
+    left.sections.iter().zip(right.sections.iter()).all(|((_, a), (_, b))| {
+        a.name == b.name
+            && a.kind == b.kind
+            && a.address == b.address
+            && a.size == b.size
+            && a.data == b.data
+            && a.align == b.align
+            && a.elf_index == b.elf_index
+            && a.virtual_address == b.virtual_address
+            && a.file_offset == b.file_offset
+            && a.section_known == b.section_known
+            && a.relocations.len() == b.relocations.len()
+            && a.relocations.iter().zip(b.relocations.iter()).all(|((at, a), (bt, b))| {
+                at == bt
+                    && a.kind == b.kind
+                    && a.target_symbol == b.target_symbol
+                    && a.addend == b.addend
+                    && a.module == b.module
+            })
+    })
 }
 
 /// How a pair of functions was matched, in decreasing order of directness.
@@ -235,6 +289,7 @@ pub(crate) fn classify_tier(
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct MatchOptions {
     /// Propagated matches scoring below this are discarded rather than
     /// accepted. Anchors carry a fixed, high confidence and aren't filtered by

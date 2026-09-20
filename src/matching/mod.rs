@@ -19,9 +19,8 @@ use typed_path::{Utf8NativePath, Utf8NativePathBuf};
 use crate::{
     analysis::{
         coverage::{ExtractCatalogs, build_report as build_coverage_report},
-        data_matching::match_data,
         mask::{self, Scenario},
-        matching::{MatchOptions, MatchTarget, MatchTier, match_functions},
+        matching::{MatchOptions, MatchTier},
         object_evidence,
         ownership::identify_units,
         unit_matching::propose_units,
@@ -34,9 +33,12 @@ use crate::{
     project::analyze::{extract_specs, load_analyzed},
 };
 
+mod cache;
 pub mod data_evidence;
 pub mod proposals;
 pub mod report;
+
+pub(crate) use cache::{CacheUse, MatchingCache};
 
 /// Which files a run should write. Everything is optional; the matching itself
 /// happens either way.
@@ -91,6 +93,11 @@ impl Request {
 }
 
 pub fn run(request: &Request) -> Result<()> {
+    let mut cache = MatchingCache::default();
+    run_with_cache(request, &mut cache).map(|_| ())
+}
+
+pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Result<CacheUse> {
     let object_root = request
         .object_root
         .as_ref()
@@ -119,15 +126,22 @@ pub fn run(request: &Request) -> Result<()> {
         );
     }
 
-    let source = MatchTarget::new(request.source_config.to_string(), source_obj);
-    let target = MatchTarget::new(request.target_config.to_string(), target_obj);
+    let prepared = cache.prepare(
+        request.source_config.to_string(),
+        request.target_config.to_string(),
+        source_obj,
+        target_obj,
+        &options,
+    );
+    let source = prepared.source.as_ref();
+    let target = prepared.target.as_ref();
     info!("Matching {} functions against {} functions", source.graph.len(), target.graph.len());
-
-    let result = match_functions(&source, &target, &options);
-    let data_matches = match_data(&source, &target, &result);
+    info!("Function matching cache: {:?}", prepared.cache_use);
+    let result = prepared.result.as_ref();
+    let data_matches = prepared.data_matches.as_ref();
     // Identification is an observation layer, so build it before any output
     // chooses eligibility thresholds or attempts a mutation.
-    let mut identifications = identify_units(&source, &target, &result);
+    let mut identifications = identify_units(source, target, result);
     if let Some((root, version)) = &object_root {
         let units = identifications.units.iter().map(|item| item.unit.clone()).collect();
         let target_hashes: BTreeSet<String> = identifications
@@ -137,11 +151,11 @@ pub fn run(request: &Request) -> Result<()> {
             .collect();
         let mut evidence = object_evidence::inspect(root, version, &units, &target_hashes);
         if evidence.status == object_evidence::ScanStatus::Scanned {
-            evidence.target_image_sha256 = Some(object_evidence::target_image_digest(&target));
+            evidence.target_image_sha256 = Some(object_evidence::target_image_digest(target));
         }
         let validated = evidence.canonicalize(&units, &target_hashes, true).and_then(|()| {
             evidence.target_references = object_evidence::capture_target_references(
-                &target,
+                target,
                 &identifications.target_functions,
                 &evidence.definitions,
             );
@@ -191,7 +205,7 @@ pub fn run(request: &Request) -> Result<()> {
             compiled,
         );
     }
-    let report = Report::build(&source, &target, &result, request.validate);
+    let report = Report::build(source, target, result, request.validate);
     report.print_summary();
 
     let outputs = &request.outputs;
@@ -213,7 +227,7 @@ pub fn run(request: &Request) -> Result<()> {
             count += 1;
         }
         let mut data_count = 0;
-        for dm in renameable_data(&source, &target, &data_matches) {
+        for dm in renameable_data(source, target, data_matches) {
             write!(
                 file,
                 "{} = {}",
@@ -233,7 +247,7 @@ pub fn run(request: &Request) -> Result<()> {
         write_candidates(&path, &report)?;
     }
     if outputs.splits.is_some() || outputs.data_evidence.is_some() {
-        let proposals = propose_units(&source, &target, &result, &data_matches);
+        let proposals = propose_units(source, target, result, data_matches);
         let version = |config: &Utf8NativePath| -> String {
             Path::new(config.as_str())
                 .parent()
@@ -242,15 +256,15 @@ pub fn run(request: &Request) -> Result<()> {
                 .unwrap_or_default()
         };
         let evidence = DataEvidenceReport::build(
-            &source,
-            &target,
-            &data_matches,
+            source,
+            target,
+            data_matches,
             &proposals,
             &version(&request.source_config),
             &version(&request.target_config),
         );
         if let Some(path) = native(outputs.splits.as_ref()) {
-            write_unit_proposals(&path, &target, &proposals, &evidence)?;
+            write_unit_proposals(&path, target, &proposals, &evidence)?;
         }
         if let Some(path) = native(outputs.data_evidence.as_ref()) {
             let mut file = buf_writer(&path)?;
@@ -263,9 +277,9 @@ pub fn run(request: &Request) -> Result<()> {
         let source_extracts = extract_specs(&source_config);
         let target_extracts = extract_specs(&target_config);
         let coverage = build_coverage_report(
-            &source,
-            &target,
-            &result,
+            source,
+            target,
+            result,
             identifications.clone(),
             request.validate,
             &masked,
@@ -282,7 +296,7 @@ pub fn run(request: &Request) -> Result<()> {
         file.flush()?;
         info!("Wrote TU identifications to {}", path);
     }
-    Ok(())
+    Ok(prepared.cache_use)
 }
 
 fn check_object_root(object_root: &Path, target_config: &Utf8NativePath) -> Result<String> {

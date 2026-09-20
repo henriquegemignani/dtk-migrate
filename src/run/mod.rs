@@ -60,7 +60,7 @@ const MAX_REDISCOVERY_ROUNDS: usize = 3;
 
 pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
     Ok(match name {
-        "coverage" => Box::new(Coverage),
+        "coverage" => Box::new(Coverage::default()),
         "discover" => Box::new(Discover),
         "verify" => Box::new(Verify),
         "derive" => Box::new(Derive),

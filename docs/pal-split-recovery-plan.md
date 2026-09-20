@@ -1086,12 +1086,22 @@ Coverage rediscovery offers only untried transaction states. Its retry key
 includes the write and read sets, evidence, policy and local ownership
 certificates, but excludes the digest of the whole observation report; the
 coordinator treats this refreshed set as authoritative instead of appending
-old refusals. The coverage result separately
-counts attempted alternative trials, states skipped as unchanged, units
+old refusals. The coverage result separately counts attempted alternative
+trials, states skipped as unchanged, units
 regenerated, and exhausted rediscovery budgets. A final acceptance only counts
 as budget exhaustion when a last rediscovery still finds work. Tests cover
 adjacent command failures, relevant versus unrelated state changes, and the
-immutable matching cache remains for the rest of this step.
+cascade.
+
+The matching cache reuses graphs, fingerprints and function/data pairing only
+after fresh DOL analysis confirms identical symbols, sections and relocations;
+fresh ownership feeds every downstream inference. It remains in-memory and
+starts cold on resume. Warm/cold output equivalence, symbol/code invalidation
+and changed matching options are covered by tests.
+On the frozen `b65ad2a6` Prime Pane/SliderGroup experiment, preparation logged
+`Rebuilt` and rediscovery logged `Reused` (run `20716-005658`). The retail SHA-1,
+accepted unit and published boundaries were identical to the earlier cold run;
+the experiment's split edit was restored afterward.
 
 **Pane check on the untouched historical Prime revision.** An isolated F-drive
 checkout at `b65ad2a6` ran coverage with only `GuiSys/CGuiPane.cpp` and

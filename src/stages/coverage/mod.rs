@@ -24,6 +24,7 @@ pub mod extracts;
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
 };
 
 use anyhow::{Context, Result, bail};
@@ -54,7 +55,10 @@ use crate::{
     },
 };
 
-pub struct Coverage;
+#[derive(Default)]
+pub struct Coverage {
+    matching_cache: Mutex<crate::matching::MatchingCache>,
+}
 
 /// The evidence schema this stage understands.
 pub const EVIDENCE_SCHEMA: u32 = 11;
@@ -416,7 +420,7 @@ impl Stage for Coverage {
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let expected_units = source_blocks.keys().cloned().collect();
-        let evidence = generate_evidence(ctx)?;
+        let evidence = generate_evidence(ctx, &self.matching_cache)?;
         let (evidence, observations) =
             validate_evidence(evidence, &expected_units, &ctx.source, &ctx.target)?;
         let observation = persist_observations(ctx, &observations)?;
@@ -712,7 +716,7 @@ impl Stage for Coverage {
         prepared: &Prepared,
         tried: &Tried,
     ) -> Result<Option<Rediscovery>> {
-        Ok(Some(revisit(ctx, &prepared.permitted, tried)?))
+        Ok(Some(revisit(ctx, &prepared.permitted, tried, &self.matching_cache)?))
     }
 
     fn validate(
@@ -1075,11 +1079,12 @@ fn revisit(
     ctx: &BuildContext,
     permitted: &Permitted,
     tried: &BTreeMap<String, BTreeSet<String>>,
+    matching_cache: &Mutex<crate::matching::MatchingCache>,
 ) -> Result<Rediscovery> {
     let source_blocks =
         Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
     let expected_units = source_blocks.keys().cloned().collect();
-    let evidence = generate_evidence(ctx)?;
+    let evidence = generate_evidence(ctx, matching_cache)?;
     let (evidence, observations) =
         validate_evidence(evidence, &expected_units, &ctx.source, &ctx.target)?;
     let observation = persist_observations(ctx, &observations)?;
@@ -1295,7 +1300,10 @@ pub fn injected_evidence_digest() -> Result<Option<String>> {
     Ok(Some(format!("{:x}", sha2::Digest::finalize(digest))))
 }
 
-fn generate_evidence(ctx: &BuildContext) -> Result<CoverageReport> {
+fn generate_evidence(
+    ctx: &BuildContext,
+    matching_cache: &Mutex<crate::matching::MatchingCache>,
+) -> Result<CoverageReport> {
     let path = ctx.output.join("coverage-evidence.json");
     match injected_evidence_dir() {
         Some(directory) => {
@@ -1314,7 +1322,11 @@ fn generate_evidence(ctx: &BuildContext) -> Result<CoverageReport> {
             );
             request.object_root = Some(ctx.root.clone());
             request.outputs.coverage = Some(path.clone());
-            crate::matching::run(&request).with_context(|| {
+            crate::matching::run_with_cache(
+                &request,
+                &mut matching_cache.lock().unwrap_or_else(|e| e.into_inner()),
+            )
+            .with_context(|| {
                 format!(
                     "Failed to generate coverage evidence from {} and {} in {}",
                     request.source_config,

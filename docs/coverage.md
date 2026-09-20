@@ -296,6 +296,15 @@ functions, windows and explored states, so it cannot
 silently pick the best partition seen before exhaustion. Source order is used
 only within a run whose independent members also occur in that target order.
 
+Coverage keeps one in-memory function-matching result through preparation and
+coordinator rediscovery. Each round still analyses both DOLs: dtk can create
+function symbols from constructor, destructor and init signatures according to
+the current splits. The cache reuses call graphs, fingerprints, function matches
+and data pairings only when the freshly analysed symbol lists, section bytes
+and relocations match exactly and the matching options are unchanged. The
+fresh ownership view feeds identification, object evidence and proposals. A
+resumed run starts with an empty cache and reaches the same result.
+
 ### Ownership transactions
 
 A transaction (`src/project/ownership_transaction.rs`) is the only form in which
