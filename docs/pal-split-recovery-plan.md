@@ -1088,9 +1088,24 @@ of the whole observation report; the coordinator treats this refreshed set as
 authoritative instead of appending old refusals. The coverage result separately
 counts attempted alternative trials, states skipped as unchanged, units
 regenerated, and exhausted rediscovery budgets. Tests cover adjacent command
-failures, relevant versus unrelated state changes, and the cascade. The Pane
-historical reproduction and immutable matching cache remain for the rest of
-this step.
+failures, relevant versus unrelated state changes, and the cascade. The
+immutable matching cache remains for the rest of this step.
+
+**Pane check on the untouched historical Prime revision.** An isolated F-drive
+checkout at `b65ad2a6` ran coverage with only `GuiSys/CGuiPane.cpp` and
+`GuiSys/CGuiSliderGroup.cpp` (run `20715-235204`). It accepted the joint
+transaction: Pane `.text` became `0x802B1338–0x802B199C`, SliderGroup became
+`0x802B199C–0x802B219C`, and the published build retained the retail SHA-1
+`4d3780c7…`. SliderGroup's separate worker proposal was refused as
+`stale-precondition` after the joint change. No undefined-symbol failure
+occurred. After restoring only the experiment's split edit, discover ran on
+the same baseline with Pane alone (run `20716-000504`). Its proposal began at
+`0x802B1344`, 12 bytes after the oracle's start, and was deferred after a
+successful retail build as `no-matched-code-gain`; it published no split edit.
+The older undefined-animation-symbol refusal is not reproducible from these
+current command inputs. Its original command log was removed with the older
+C-drive run, so the cause of that specific failure cannot be assigned to an
+interaction or dependency without inventing evidence.
 
 ## 9. Compatibility, reporting and documentation (continuous)
 
