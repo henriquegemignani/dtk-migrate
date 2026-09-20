@@ -152,7 +152,8 @@ pub struct OwnerRevision {
     pub revised_end: String,
 }
 
-/// One complete way a unit could claim a target range.
+/// One complete way a unit could claim a primary target range. The transaction
+/// may also claim independently evidenced ranges in other sections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alternative {
     /// The identity of `transaction`, which is what a worker and the
@@ -160,9 +161,11 @@ pub struct Alternative {
     pub id: String,
     pub evidence: String,
     pub support_group: Option<String>,
+    /// Primary section used to judge code boundaries and rank the claim.
     pub section: String,
     pub start: String,
     pub end: String,
+    /// Width of the primary range; `gained_bytes` includes every section.
     pub covered_bytes: u32,
     /// Bytes the unit would own that it does not own already. For a unit with
     /// no block this is the whole claim; for one being extended it is only the
@@ -284,6 +287,14 @@ struct Expansion {
     end: u32,
 }
 
+/// Another section of the candidate unit that the same evidence must claim.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+struct OwnExpansion {
+    section: String,
+    start: u32,
+    end: u32,
+}
+
 /// What a generator proposes, before it is a transaction.
 #[derive(Debug, Clone)]
 struct Draft {
@@ -294,6 +305,7 @@ struct Draft {
     end: u32,
     anchors: Vec<serde_json::Value>,
     owner_revisions: Vec<OwnerRevision>,
+    own_expansions: Vec<OwnExpansion>,
     /// Another unit whose represented range must grow in the same atomic
     /// transaction for a cross-unit boundary to be justified.
     other_expansions: Vec<Expansion>,
@@ -347,6 +359,7 @@ fn alternative(
         end,
         anchors,
         owner_revisions,
+        own_expansions: Vec::new(),
         other_expansions: Vec::new(),
         other_required_extracts: Vec::new(),
         edge_families: None,
@@ -824,10 +837,15 @@ pub fn assess_member(
 /// Turns a draft into an offered alternative, or explains nothing and drops
 /// it: an incomplete body, a transaction the current splits refuse, or a
 /// receiver whose new ground the observations do not support.
-fn finish(draft: Draft, setting: &Setting) -> Option<Alternative> {
+fn finish(mut draft: Draft, setting: &Setting) -> Option<Alternative> {
+    draft.own_expansions.sort();
+    draft.own_expansions.dedup();
     let unit = setting.unit;
     let existing = setting.blocks.get(unit).map(Vec::as_slice).unwrap_or_default();
-    let lines = complete_body(existing, &draft.section, draft.start, draft.end)?;
+    let mut lines = complete_body(existing, &draft.section, draft.start, draft.end)?;
+    for expansion in &draft.own_expansions {
+        lines = complete_body(&lines, &expansion.section, expansion.start, expansion.end)?;
+    }
     let mut changes = vec![(unit.to_string(), lines.clone())];
     for expansion in &draft.other_expansions {
         let prior = setting.blocks.get(&expansion.unit).map(Vec::as_slice).unwrap_or_default();
@@ -1662,7 +1680,7 @@ pub fn build(
     let mut seen: BTreeSet<(String, u32, u32, String)> = BTreeSet::new();
     let complete = complete_sequences(unit, target_blocks, observations);
 
-    for item in composed
+    for mut item in composed
         .into_iter()
         .chain(compiled_boundaries)
         .chain(terminal_suffixes)
@@ -1678,12 +1696,18 @@ pub fn build(
         .chain(individual)
         .chain(attached)
     {
+        item.own_expansions.sort();
+        item.own_expansions.dedup();
         let key = (
             item.section.clone(),
             item.start,
             item.end,
-            serde_json::to_string(&(&item.owner_revisions, &item.other_expansions))
-                .unwrap_or_default(),
+            serde_json::to_string(&(
+                &item.owner_revisions,
+                &item.own_expansions,
+                &item.other_expansions,
+            ))
+            .unwrap_or_default(),
         );
         if seen.insert(key) {
             drafts.push(item);
@@ -1857,6 +1881,7 @@ fn compositions<'a>(
             end: right,
             anchors,
             owner_revisions: Vec::new(),
+            own_expansions: Vec::new(),
             other_expansions: Vec::new(),
             other_required_extracts: Vec::new(),
             edge_families: Some((families(&lefts[&left]), families(&rights[&right]))),
@@ -3800,6 +3825,49 @@ mod tests {
         assert_eq!(id(0x100, 0x200, "exact-body"), id(0x100, 0x200, "exact-body"));
         assert_ne!(id(0x100, 0x200, "exact-body"), id(0x100, 0x200, "boundary-sequence"));
         assert_ne!(id(0x100, 0x200, "exact-body"), id(0x100, 0x300, "exact-body"));
+    }
+
+    #[test]
+    fn a_candidate_can_claim_two_sections_in_one_transaction() {
+        let observations = observed(&[(0x100, 0x200)], &[]);
+        let empty = IndexMap::new();
+        let setting = Setting {
+            unit: "a.cpp",
+            blocks: &empty,
+            observations: &observations,
+            required_extracts: &[],
+            policy: policy_digest(),
+        };
+        let code_only = alternative(".text", 0x100, 0x200, vec![], "paired-run", None, vec![]);
+        let mut with_data = code_only.clone();
+        with_data.own_expansions.push(OwnExpansion {
+            section: ".data".into(),
+            start: 0x500,
+            end: 0x510,
+        });
+        let code = finish(code_only, &setting).unwrap();
+        let combined = finish(with_data.clone(), &setting).unwrap();
+        assert_ne!(code.id, combined.id);
+        assert_eq!(combined.transaction.writes().collect::<Vec<_>>(), ["a.cpp"]);
+        assert_eq!(combined.transaction.gained_bytes("a.cpp"), 0x110);
+        assert_eq!(combined.transaction.member("a.cpp").unwrap().after, [
+            split_line(".text", 0x100, 0x200),
+            split_line(".data", 0x500, 0x510),
+        ]);
+
+        let mut forward = alternative(".text", 0x100, 0x200, vec![], "paired-run", None, vec![]);
+        forward.own_expansions = vec![
+            OwnExpansion { section: ".rodata".into(), start: 0x400, end: 0x408 },
+            OwnExpansion { section: ".data".into(), start: 0x500, end: 0x510 },
+        ];
+        let mut reverse = forward.clone();
+        reverse.own_expansions.reverse();
+        assert_eq!(finish(forward, &setting).unwrap().id, finish(reverse, &setting).unwrap().id);
+
+        let mut occupied = IndexMap::new();
+        occupied.insert("owner.cpp".into(), vec![split_line(".data", 0x500, 0x510)]);
+        let blocked = Setting { blocks: &occupied, ..setting };
+        assert!(finish(with_data, &blocked).is_none());
     }
 
     #[test]

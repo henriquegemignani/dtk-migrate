@@ -32,6 +32,28 @@ current build configuration, not a case for reading the leftover object as
 evidence. Recovering its weak vtable owner still needs independent target
 placement and emitter evidence; this policy change makes no such claim.
 
+Coverage drafts can now carry additional sections of their own candidate in
+one atomic transaction. The two-section test proves the stored transaction
+and ID include both code and data, and that a foreign data owner refuses the
+whole proposal. No generator uses this path yet, so it changes no current
+split. It is the application path for a future cross-section certificate.
+
+For `CGuiFactories`, the existing relocation-linked code run pairs the weak
+NTSC vtable at `0x803EC7B8` with PAL's anonymous table at `0x803D4608`.
+Both are 16 bytes with the same layout after translating the destructor
+pointer. The eight-byte string at `0x803D6888` likewise matches the one at
+`0x803C1D88`. These are identity and content observations, not emitted-owner
+proof: CodeWarrior may emit a weak vtable from another TU, and the string is
+pooled. A data rule must additionally establish which linker input supplied
+each allocation and its exact aligned bounds. The current `vtable_pairs`
+inventory intentionally excludes weak or unnamed tables; merely relaxing that
+filter would turn these observations into unsupported ownership.
+The link edge places the anonymous `.data` and `.text` objects together, but
+link-input adjacency is not a general data-owner rule: the same checkout's
+`CGuiFrame` source object appears later in the link inputs than the extracted
+object holding its vtable. A future certificate must check section-specific
+emission, not infer it from one global input sequence.
+
 ### Data evidence schema 5: complete singleton ordinary BSS allocations
 
 The old PAL split for `CScriptSound.cpp` omitted its 24-byte ordinary `.bss`
