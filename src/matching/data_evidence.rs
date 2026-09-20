@@ -10,18 +10,29 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use decomp_toolkit::obj::{ObjDataKind, ObjSection, ObjSectionKind, ObjSymbol, SymbolIndex};
+use decomp_toolkit::{
+    obj::{
+        ObjDataKind, ObjInfo, ObjSection, ObjSectionKind, ObjSymbol, ObjSymbolKind, SymbolIndex,
+    },
+    util::elf::process_elf,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use typed_path::Utf8NativePath;
 
-use crate::analysis::{
-    data_matching::DataMatch,
-    matching::MatchTarget,
-    object_evidence::target_image_digest,
-    unit_matching::{UnitProposal, UnitTier, required_alignment},
+use crate::{
+    analysis::{
+        data_matching::DataMatch,
+        matching::MatchTarget,
+        object_evidence::{
+            BuildFreshness, ObjectEvidence, ObjectStatus, ScanStatus, target_image_digest,
+        },
+        unit_matching::{UnitProposal, UnitTier, required_alignment},
+    },
+    project::analyze::with_working_directory,
 };
 
-pub const SCHEMA: u32 = 2;
+pub const SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +88,28 @@ pub struct DataRangeEvidence {
     pub reasons: Vec<String>,
     pub required_alignment: u32,
     pub members: Vec<DataMemberEvidence>,
+    /// A whole ordinary BSS allocation proved by a clean target-version
+    /// object. It never makes an individual inferred symbol size exact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_ordinary_bss: Option<CompiledOrdinaryBss>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledOrdinaryBss {
+    pub object_sha256: String,
+    pub compiled_size: u32,
+    pub section_align: u32,
+    pub symbols: Vec<CompiledDataSymbol>,
+    pub next_owner: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledDataSymbol {
+    pub name: String,
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,9 +209,17 @@ fn size_basis(symbol: &ObjSymbol, section: &ObjSection, split_exact: bool) -> Da
 }
 
 impl DataRangeEvidence {
-    /// Target-side linker mode, only when every member agrees. A missing
-    /// `common` symbol flag never establishes ordinary BSS on its own.
+    pub fn ordinary_bss_proven(&self) -> bool {
+        self.compiled_ordinary_bss.as_ref().is_some_and(|proof| proof.valid(self))
+    }
+
+    /// Linker mode when every member agrees or an entire ordinary allocation
+    /// has a compiled-layout certificate. A missing `common` flag alone never
+    /// establishes ordinary BSS.
     pub fn common_mode(&self) -> Option<bool> {
+        if self.ordinary_bss_proven() {
+            return Some(false);
+        }
         let mut mode = None;
         for member in &self.members {
             let current = if member.target_symbol_common {
@@ -218,7 +259,8 @@ impl DataRangeEvidence {
     }
 
     /// Attributes that can be justified by this target-side record. A new
-    /// ordinary BSS range remains unannotated and is withheld by discovery.
+    /// ordinary BSS range stays unannotated; discovery admits it only with a
+    /// separate complete compiled-allocation certificate.
     pub fn split_suffix(&self) -> String {
         if matches!(self.section.as_str(), ".bss" | ".sbss" | ".sbss2")
             && let Some(align) = self.common_alignment()
@@ -251,7 +293,8 @@ impl DataRangeEvidence {
                 || member.target_end <= cursor
                 || !member.source_extent_known
                 || !member.target_extent_known
-                || member.target_size_basis == DataSizeBasis::Inferred
+                || (member.target_size_basis == DataSizeBasis::Inferred
+                    && !self.ordinary_bss_proven())
                 || !member.source_wholly_owned
                 || member.source_weak
                 || member.target_weak
@@ -267,7 +310,252 @@ impl DataRangeEvidence {
     }
 }
 
+impl CompiledOrdinaryBss {
+    fn valid(&self, range: &DataRangeEvidence) -> bool {
+        if range.section != ".bss"
+            || range.start >= range.end
+            || range.required_alignment == 0
+            || !range.required_alignment.is_power_of_two()
+            || self.object_sha256.len() != 64
+            || !self.object_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || self.next_owner.is_empty()
+            || self.next_owner == range.unit
+            || self.section_align == 0
+            || !self.section_align.is_power_of_two()
+            || range.start % self.section_align != 0
+            || self.symbols.is_empty()
+            || range.members.len() < 2
+            || range.members.iter().any(|member| {
+                member.target_common.is_some()
+                    || member.target_symbol_common
+                    || member.target_owner.is_some()
+            })
+        {
+            return false;
+        }
+        let Some(aligned) = self
+            .compiled_size
+            .checked_add(range.required_alignment - 1)
+            .map(|size| size & !(range.required_alignment - 1))
+        else {
+            return false;
+        };
+        if aligned != range.end - range.start
+            || self.compiled_size == 0
+            || self.compiled_size > aligned
+        {
+            return false;
+        }
+        let mut cursor = 0;
+        for symbol in &self.symbols {
+            if symbol.name.is_empty() || symbol.start != cursor || symbol.end <= cursor {
+                return false;
+            }
+            cursor = symbol.end;
+        }
+        if cursor != self.compiled_size {
+            return false;
+        }
+        let mut named_anchors = BTreeSet::new();
+        let mut target_indices = BTreeSet::new();
+        let mut source_indices = BTreeSet::new();
+        for member in &range.members {
+            if !source_indices.insert(member.source_index)
+                || !target_indices.insert(member.target_index)
+            {
+                return false;
+            }
+            let Some(offset) = member.target_start.checked_sub(range.start) else { return false };
+            if !self.symbols.iter().any(|symbol| symbol.start == offset) {
+                return false;
+            }
+            if !member.target_name.starts_with('@') {
+                if !self
+                    .symbols
+                    .iter()
+                    .any(|symbol| symbol.start == offset && symbol.name == member.target_name)
+                {
+                    return false;
+                }
+                if !named_anchors.insert(&member.target_name) {
+                    return false;
+                }
+            }
+        }
+        named_anchors.len() >= 2
+    }
+}
+
+fn compiled_bss_witness(
+    source: &MatchTarget,
+    target: &MatchTarget,
+    range: &DataRangeEvidence,
+    object: &ObjInfo,
+    object_sha256: &str,
+) -> Option<CompiledOrdinaryBss> {
+    let first = range.members.first()?;
+    let last = range.members.last()?;
+    let source_first = &source.obj.symbols[first.source_index];
+    let source_last = &source.obj.symbols[last.source_index];
+    let source_section = source.obj.sections.get(source_first.section?)?;
+    if source_section.name != ".bss" || source_last.section != source_first.section {
+        return None;
+    }
+    let source_start = u32::try_from(source_first.address).ok()?;
+    let (split_start, source_split) = source_section.splits.for_address(source_start)?;
+    if source_split.unit != range.unit
+        || source_split.common
+        || split_start != source_start
+        || source_last.address.checked_add(source_last.size)? != u64::from(source_split.end)
+    {
+        return None;
+    }
+    let target_section_index = target.obj.symbols[first.target_index].section?;
+    let target_section = target.obj.sections.get(target_section_index)?;
+    if target_section.name != ".bss"
+        || target_section.kind != ObjSectionKind::Bss
+        || range.members.iter().any(|member| {
+            target.obj.symbols[member.target_index].section != Some(target_section_index)
+        })
+    {
+        return None;
+    }
+    let (next_start, next_split) = target_section.splits.for_address(range.end)?;
+    if next_start != range.end
+        || next_split.unit == range.unit
+        || next_split.common
+        || next_split.autogenerated
+        || !target.obj.symbols.iter().any(|(_, symbol)| {
+            symbol.section == Some(target_section_index)
+                && symbol.kind == ObjSymbolKind::Object
+                && symbol.address == u64::from(range.end)
+                && !symbol.flags.is_common()
+                && !symbol.flags.is_weak()
+        })
+    {
+        return None;
+    }
+    let target_members: BTreeSet<_> =
+        range.members.iter().map(|member| member.target_index).collect();
+    if target.obj.symbols.iter().any(|(index, symbol)| {
+        symbol.section == Some(target_section_index)
+            && symbol.kind == ObjSymbolKind::Object
+            && symbol.address >= u64::from(range.start)
+            && symbol.address < u64::from(range.end)
+            && !target_members.contains(&index)
+    }) {
+        return None;
+    }
+    let mut sections = object
+        .sections
+        .iter()
+        .filter(|(_, section)| section.name == ".bss" && section.kind == ObjSectionKind::Bss);
+    let (section_index, section) = sections.next()?;
+    if sections.next().is_some() {
+        return None;
+    }
+    let compiled_size = u32::try_from(section.size).ok()?;
+    let section_align = u32::try_from(section.align).ok()?;
+    let mut symbols: Vec<CompiledDataSymbol> = object
+        .symbols
+        .iter()
+        .filter(|(_, symbol)| {
+            symbol.section == Some(section_index) && symbol.kind == ObjSymbolKind::Object
+        })
+        .map(|(_, symbol)| {
+            Some(CompiledDataSymbol {
+                name: symbol.name.clone(),
+                start: u32::try_from(symbol.address.checked_sub(section.address)?).ok()?,
+                end: u32::try_from(
+                    symbol.address.checked_sub(section.address)?.checked_add(symbol.size)?,
+                )
+                .ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if object.symbols.iter().any(|(_, symbol)| {
+        symbol.section == Some(section_index)
+            && symbol.kind == ObjSymbolKind::Object
+            && (!symbol.size_known
+                || symbol.size == 0
+                || symbol.flags.is_weak()
+                || symbol.flags.is_common())
+    }) {
+        return None;
+    }
+    symbols.sort_by_key(|symbol| (symbol.start, symbol.end));
+    let witness = CompiledOrdinaryBss {
+        object_sha256: object_sha256.to_string(),
+        compiled_size,
+        section_align,
+        symbols,
+        next_owner: next_split.unit.clone(),
+    };
+    witness.valid(range).then_some(witness)
+}
+
 impl DataEvidenceReport {
+    /// Corroborate an entire ordinary BSS allocation with the current,
+    /// Ninja-clean target-version object. A guessed retail member size never
+    /// becomes a size witness: only the complete section layout can qualify.
+    pub fn add_compiled_bss(
+        &mut self,
+        source: &MatchTarget,
+        target: &MatchTarget,
+        objects: Option<&ObjectEvidence>,
+        root: Option<&Path>,
+    ) {
+        let (Some(objects), Some(root)) = (objects, root) else { return };
+        if objects.status != ScanStatus::Scanned
+            || objects.target_image_sha256.as_deref() != Some(self.target_image_sha256.as_str())
+        {
+            return;
+        }
+        for range in &mut self.ranges {
+            if range.section != ".bss"
+                || range.members.len() < 2
+                || range.members.iter().any(|member| {
+                    member.target_common.is_some()
+                        || member.target_symbol_common
+                        || member.target_owner.is_some()
+                })
+            {
+                continue;
+            }
+            let mut records = objects.objects.iter().filter(|record| record.unit == range.unit);
+            let Some(record) = records.next() else { continue };
+            if records.next().is_some() {
+                continue;
+            }
+            if record.status != ObjectStatus::Available
+                || record.build_freshness != BuildFreshness::Clean
+                || record.sha256.is_none()
+            {
+                continue;
+            }
+            let path = root.join(&record.base_path);
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if record.sha256.as_deref() != Some(format!("{:x}", Sha256::digest(&bytes)).as_str()) {
+                continue;
+            }
+            let Ok(object) = with_working_directory(root, || {
+                process_elf(Utf8NativePath::new(&record.base_path))
+            }) else {
+                continue;
+            };
+            if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+                continue;
+            }
+            range.compiled_ordinary_bss = compiled_bss_witness(
+                source,
+                target,
+                range,
+                &object,
+                record.sha256.as_deref().unwrap(),
+            );
+        }
+    }
+
     pub fn build(
         source: &MatchTarget,
         target: &MatchTarget,
@@ -387,6 +675,7 @@ impl DataEvidenceReport {
                 )
                 .unwrap_or(0),
                 members,
+                compiled_ordinary_bss: None,
             });
         }
         Self {
@@ -413,6 +702,9 @@ impl DataEvidenceReport {
             if !keys.insert((&range.unit, &range.section, range.start, range.end)) {
                 bail!("Data evidence repeats a unit range");
             }
+            if range.compiled_ordinary_bss.is_some() && !range.ordinary_bss_proven() {
+                bail!("Data evidence contains an invalid compiled BSS certificate");
+            }
         }
         Ok(())
     }
@@ -426,6 +718,81 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn complete_compiled_bss_layout_certifies_a_range_not_guessed_member_sizes() {
+        let member = |index, name: &str, start, end| DataMemberEvidence {
+            source_index: index,
+            target_index: index,
+            source_name: name.into(),
+            target_name: name.into(),
+            target_start: start,
+            target_end: end,
+            source_extent_known: true,
+            target_extent_known: true,
+            target_size_basis: DataSizeBasis::Inferred,
+            source_wholly_owned: true,
+            source_weak: false,
+            target_weak: false,
+            target_symbol_common: false,
+            target_common_align: None,
+            target_common_align_basis: None,
+            reference_positions: 2,
+            target_owner: None,
+            target_common: None,
+        };
+        let mut range = DataRangeEvidence {
+            unit: "audio.cpp".into(),
+            section: ".bss".into(),
+            start: 0x2000,
+            end: 0x20f0,
+            tier: UnitTier::Candidate,
+            reasons: vec![],
+            required_alignment: 8,
+            members: vec![
+                member(0, "@454", 0x2000, 0x2030),
+                member(1, "s_Players", 0x2030, 0x2094),
+                member(2, "s_QueuedPlayers", 0x2094, 0x20f0),
+            ],
+            compiled_ordinary_bss: None,
+        };
+        assert!(!range.eligible());
+        range.compiled_ordinary_bss = Some(CompiledOrdinaryBss {
+            object_sha256: "a".repeat(64),
+            compiled_size: 0xec,
+            section_align: 8,
+            symbols: [
+                ("@251", 0, 0x0c),
+                ("@252", 0x0c, 0x18),
+                ("@253", 0x18, 0x24),
+                ("@255", 0x24, 0x30),
+                ("s_Players", 0x30, 0x88),
+                ("@257", 0x88, 0x94),
+                ("s_QueuedPlayers", 0x94, 0xec),
+            ]
+            .into_iter()
+            .map(|(name, start, end)| CompiledDataSymbol { name: name.into(), start, end })
+            .collect(),
+            next_owner: "another.cpp".into(),
+        });
+        assert!(range.eligible());
+        assert_eq!(range.common_mode(), Some(false));
+        assert_eq!(range.split_suffix(), "");
+        assert_eq!(range.members[1].target_size_basis, DataSizeBasis::Inferred);
+
+        let mut damaged = range.clone();
+        damaged.compiled_ordinary_bss.as_mut().unwrap().symbols[5].start += 4;
+        assert!(!damaged.eligible());
+        let mut unbounded = range.clone();
+        unbounded.compiled_ordinary_bss.as_mut().unwrap().next_owner = range.unit.clone();
+        assert!(!unbounded.eligible());
+        let mut repeated_anchor = range.clone();
+        repeated_anchor.members[2].target_name = "s_Players".into();
+        assert!(!repeated_anchor.eligible());
+        let mut weak_anchor = range;
+        weak_anchor.members[1].target_weak = true;
+        assert!(!weak_anchor.eligible());
+    }
 
     fn target(name: &str, address: u32, owner: Option<&str>) -> MatchTarget {
         let mut splits = ObjSplits::default();

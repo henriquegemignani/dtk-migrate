@@ -262,6 +262,50 @@ pub fn data_proposals(
     existing: &IndexMap<String, Vec<String>>,
     source: &IndexMap<String, Vec<String>>,
 ) -> Vec<(String, Vec<String>)> {
+    data_proposals_with_ordinary(proposals, existing, source, &BTreeMap::new())
+}
+
+type OrdinaryBssKey = (String, String, u32, u32);
+type OrdinaryBssProofs = BTreeMap<OrdinaryBssKey, String>;
+
+fn ordinary_bss_proofs(report: &DataEvidenceReport) -> OrdinaryBssProofs {
+    report
+        .ranges
+        .iter()
+        .filter(|range| range.eligible() && range.ordinary_bss_proven())
+        .map(|range| {
+            (
+                (range.unit.clone(), range.section.clone(), range.start, range.end),
+                range.compiled_ordinary_bss.as_ref().unwrap().next_owner.clone(),
+            )
+        })
+        .collect()
+}
+
+fn holds_next_ordinary_range(
+    existing: &IndexMap<String, Vec<String>>,
+    owner: &str,
+    section: &str,
+    end: u32,
+) -> bool {
+    existing.get(owner).is_some_and(|lines| {
+        lines.iter().any(|line| {
+            parse_range(line).is_some_and(|range| {
+                range.section == section
+                    && range.start == end
+                    && range.end > end
+                    && !parse_attributes(line).contains("common")
+            })
+        })
+    })
+}
+
+fn data_proposals_with_ordinary(
+    proposals: &IndexMap<String, Vec<String>>,
+    existing: &IndexMap<String, Vec<String>>,
+    source: &IndexMap<String, Vec<String>>,
+    ordinary_bss: &OrdinaryBssProofs,
+) -> Vec<(String, Vec<String>)> {
     let mut names: Vec<String> = existing.keys().cloned().collect();
     names.extend(
         proposals
@@ -290,12 +334,9 @@ pub fn data_proposals(
                 continue;
             }
             let proposed_attributes = parse_attributes(line);
-            // The matcher currently writes no `common` attribute at all. A
-            // newly proposed BSS interval may be ordinary or common, and the
-            // source version does not establish the target's linker treatment.
-            // An overlap with an existing ordinary range identifies an
-            // extension of that known range; otherwise wait for target-side
-            // attribute evidence.
+            // An unannotated new BSS interval may be ordinary or common.
+            // An existing ordinary range can establish its own mode; a new
+            // allocation needs the exact whole-range compiled certificate.
             let existing_overlap = new_body.iter().any(|current_line| {
                 parse_range(current_line).is_some_and(|current| {
                     current.section == range.section
@@ -306,6 +347,11 @@ pub fn data_proposals(
             if is_bss_section(&range.section)
                 && !existing_overlap
                 && !proposed_attributes.contains("common")
+                && !ordinary_bss
+                    .get(&(name.clone(), range.section.clone(), range.start, range.end))
+                    .is_some_and(|owner| {
+                        holds_next_ordinary_range(existing, owner, &range.section, range.end)
+                    })
             {
                 continue;
             }
@@ -400,12 +446,13 @@ fn data_completion(
     witnessed_data: &IndexMap<String, Vec<String>>,
     existing: &IndexMap<String, Vec<String>>,
     source: &IndexMap<String, Vec<String>>,
+    ordinary_bss: &OrdinaryBssProofs,
 ) -> Option<Vec<String>> {
     let ranges = witnessed_data.get(unit)?;
     let mut projected = existing.clone();
     projected.insert(unit.to_string(), code_lines.to_vec());
     let proposed = IndexMap::from([(unit.to_string(), ranges.clone())]);
-    data_proposals(&proposed, &projected, source)
+    data_proposals_with_ordinary(&proposed, &projected, source, ordinary_bss)
         .into_iter()
         .find(|(name, _)| name == unit)
         .map(|(_, lines)| lines)
@@ -463,6 +510,7 @@ impl Stage for Discover {
             config_path(ctx, &ctx.source),
             config_path(ctx, &ctx.target),
         );
+        request.object_root = Some(ctx.root.clone());
         request.outputs = crate::matching::Outputs {
             splits: Some(proposals_path.clone()),
             data_evidence: Some(data_evidence_path.clone()),
@@ -533,6 +581,7 @@ impl Stage for Discover {
             DataEvidenceReference::of(&data_evidence_path, &ctx.source, &ctx.target)?;
         let data_report = data_evidence.load(&ctx.source, &ctx.target)?;
         let witnessed_data = evidenced_data_lines(&proposals, &data_report);
+        let ordinary_bss = ordinary_bss_proofs(&data_report);
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let evidence: CoverageReport = serde_json::from_slice(&std::fs::read(&coverage_path)?)?;
@@ -560,6 +609,7 @@ impl Stage for Discover {
                         &witnessed_data,
                         &blocks,
                         &source_blocks,
+                        &ordinary_bss,
                     );
                     candidate(name, Proposal {
                         lines: completion.clone().unwrap_or_else(|| code_lines.clone()),
@@ -585,22 +635,23 @@ impl Stage for Discover {
         // Keep the data-only form behind a combined code/data candidate. The
         // coordinator selects one form after applying reservations: if an
         // earlier stage owns the code, supported data can still be completed.
-        let mut data: Vec<Candidate> = data_proposals(&witnessed_data, &blocks, &source_blocks)
-            .into_iter()
-            .map(|(name, lines)| {
-                let before_lines = blocks.get(&name).cloned().unwrap_or_default();
-                candidate(name, Proposal {
-                    lines,
-                    kind: Kind::Data,
-                    before_lines,
-                    code_lines: None,
-                    observation: None,
-                    ownership: None,
-                    data_evidence: Some(data_evidence.clone()),
-                    fallback_data: None,
+        let mut data: Vec<Candidate> =
+            data_proposals_with_ordinary(&witnessed_data, &blocks, &source_blocks, &ordinary_bss)
+                .into_iter()
+                .map(|(name, lines)| {
+                    let before_lines = blocks.get(&name).cloned().unwrap_or_default();
+                    candidate(name, Proposal {
+                        lines,
+                        kind: Kind::Data,
+                        before_lines,
+                        code_lines: None,
+                        observation: None,
+                        ownership: None,
+                        data_evidence: Some(data_evidence.clone()),
+                        fallback_data: None,
+                    })
                 })
-            })
-            .collect::<Result<_>>()?;
+                .collect::<Result<_>>()?;
         if let Some(limit) = limit {
             // A data fallback for one of the chosen code units must not use
             // up the budget for an independent data-only unit.
@@ -1052,7 +1103,7 @@ fn reproduced_data_body(
             blocks.entry(name).or_default().push(line);
             blocks
         });
-    data_proposals(&witnessed, before, source)
+    data_proposals_with_ordinary(&witnessed, before, source, &ordinary_bss_proofs(report))
         .into_iter()
         .find(|(name, _)| name == unit)
         .map(|(_, lines)| lines)
@@ -1081,6 +1132,34 @@ mod tests {
     fn data(start: u32, end: u32) -> String { format_range(".data", start, end) }
     fn bss(start: u32, end: u32) -> String { format_range(".bss", start, end) }
     fn sbss(start: u32, end: u32) -> String { format_range(".sbss", start, end) }
+
+    #[test]
+    fn a_bounded_ordinary_bss_witness_does_not_admit_any_other_bss_range() {
+        let before =
+            blocks(&[("audio.cpp", &[&text(0x100, 0x200)]), ("next.cpp", &[&bss(0x20f0, 0x2180)])]);
+        let source = blocks(&[("audio.cpp", &[&text(0x100, 0x200), &bss(0x400, 0x500)])]);
+        let proposals = blocks(&[("audio.cpp", &[&bss(0x2000, 0x20f0), &bss(0x2100, 0x2180)])]);
+        assert!(data_proposals(&proposals, &before, &source).is_empty());
+        let ordinary = BTreeMap::from([(
+            ("audio.cpp".into(), ".bss".into(), 0x2000, 0x20f0),
+            "next.cpp".into(),
+        )]);
+        let result = data_proposals_with_ordinary(&proposals, &before, &source, &ordinary);
+        assert_eq!(result, vec![("audio.cpp".into(), vec![
+            text(0x100, 0x200),
+            bss(0x2000, 0x20f0),
+        ])]);
+        let moved =
+            blocks(&[("audio.cpp", &[&text(0x100, 0x200)]), ("next.cpp", &[&bss(0x2100, 0x2180)])]);
+        assert!(data_proposals_with_ordinary(&proposals, &moved, &source, &ordinary).is_empty());
+        let changed_mode = blocks(&[
+            ("audio.cpp", &[&text(0x100, 0x200)]),
+            ("next.cpp", &[&format!("{} common", bss(0x20f0, 0x2180))]),
+        ]);
+        assert!(
+            data_proposals_with_ordinary(&proposals, &changed_mode, &source, &ordinary).is_empty()
+        );
+    }
 
     #[test]
     fn data_candidate_is_reproduced_only_from_its_member_evidence() {
@@ -1118,6 +1197,7 @@ mod tests {
                     target_owner: None,
                     target_common: None,
                 }],
+                compiled_ordinary_bss: None,
             }],
         };
         let text_proposals = blocks(&[("a.cpp", &[&data(0x900, 0xA00), &data(0xA00, 0xB00)])]);
@@ -1132,7 +1212,8 @@ mod tests {
         );
         let code_lines = vec![text(0x100, 0x300)];
         let completed =
-            data_completion("a.cpp", &code_lines, &witnessed, &before, &source).unwrap();
+            data_completion("a.cpp", &code_lines, &witnessed, &before, &source, &BTreeMap::new())
+                .unwrap();
         assert_eq!(completed, vec![text(0x100, 0x300), data(0x900, 0xA00)]);
         assert_eq!(code_ranges(&completed), code_ranges(&code_lines));
         assert_eq!(unchanged_non_code(&code_lines), unchanged_non_code(&before["a.cpp"]));
@@ -1219,7 +1300,10 @@ mod tests {
         let foreign =
             blocks(&[("a.cpp", &[&text(0x100, 0x200)]), ("b.cpp", &[&data(0x980, 0xA80)])]);
         assert!(reproduced_data_body(&report, "a.cpp", &foreign, &source).is_none());
-        assert!(data_completion("a.cpp", &code_lines, &witnessed, &foreign, &source).is_none());
+        assert!(
+            data_completion("a.cpp", &code_lines, &witnessed, &foreign, &source, &BTreeMap::new())
+                .is_none()
+        );
 
         let mut common_report = report.clone();
         common_report.ranges[0].section = ".bss".into();

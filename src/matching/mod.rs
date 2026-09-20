@@ -262,13 +262,19 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default()
         };
-        let evidence = DataEvidenceReport::build(
+        let mut evidence = DataEvidenceReport::build(
             source,
             target,
             data_matches,
             &proposals,
             &version(&request.source_config),
             &version(&request.target_config),
+        );
+        evidence.add_compiled_bss(
+            source,
+            target,
+            identifications.object_evidence.as_ref(),
+            object_root.as_ref().map(|(root, _)| root.as_path()),
         );
         if let Some(path) = native(outputs.splits.as_ref()) {
             write_unit_proposals(&path, target, &proposals, &evidence)?;

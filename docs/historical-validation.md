@@ -105,6 +105,20 @@ All five PAL calibration scenarios and held-out GM8E01_02 `everything` exit 0
 with the same per-unit outcomes and alternative states as policy 21. This was
 a focused coverage-only run, not the pending full historical migration.
 
+Data evidence schema 3's focused discover run `20716-125603` started from
+the published Head/Light and TeamAiMgr changes, with `CStreamAudioManager`'s
+ordinary BSS still absent. Its complete compiled-allocation certificate
+added `.bss 0x804025F0–0x804026E0` alongside the unit's existing common BSS
+and rebuilt to the same retail SHA-1. The exact-baseline verified-oracle score
+at `target/stream-bss-focused-verified-score/` records 240 correct data bytes
+gained, zero known wrong or lost bytes, and 424 unchanged verified controls.
+The old code prefix remains missing; this focused data-only run is not a
+source-link verification or a full historical migration. The replay-gate rerun
+`20716-130752` accepted the same range and has an identical verified score at
+`target/stream-bss-replay-verified-score/`. All five PAL code-calibration
+scenarios have per-unit records and measures identical to policy 22; those
+scenarios do not exercise discovery's new BSS route.
+
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven

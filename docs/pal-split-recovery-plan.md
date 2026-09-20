@@ -12,6 +12,51 @@ full historical NTSC→PAL runs and held-out diagnostics are reported in
 positive emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
 
+### Data evidence schema 3: complete ordinary BSS allocations
+
+The historical `CStreamAudioManager.cpp` split already held common `.bss` but
+missed an ordinary 240-byte allocation at `0x804025F0–0x804026E0`. The three
+retail symbols in that interval have inferred sizes; `s_Players`' inferred
+extent even contains an anonymous compiled symbol. Relaxing the individual
+size gate would therefore mistake guesses for evidence. The new route instead
+requires a Ninja-clean target-version object with a complete, contiguous,
+non-weak ordinary `.bss` symbol inventory, exact section size plus only
+alignment padding, at least two distinct named starts independently paired
+with the retail data references, complete ordinary source-split ownership,
+no extra retail data symbol inside the proposed interval, and an explicitly
+owned ordinary target symbol at its end. The complete range receives one
+certificate; the individual retail sizes stay inferred. Missing or dirty
+compiled objects and disputed neighbours withhold it. Replay checks that the
+named next owner still begins at the same end address. Discovery can add the
+new ordinary range beside the existing common range in one complete body.
+
+On the F-drive `b65ad2a6` historical checkout, the matcher generated exactly
+one certificate of this kind, for `CStreamAudioManager`. Focused discover run
+`20716-125603` accepted it and rebuilt to retail SHA-1 `4d3780c7…`.
+Scoring against the independently verified later split records 240 correct
+data bytes gained, no known wrong or lost bytes, and 424 unchanged verified
+controls at `target/stream-bss-focused-verified-score/`. After the replay
+dependency check was added, focused run `20716-130752` accepted the same
+range, rebuilt to the same retail SHA-1, and scored identically at
+`target/stream-bss-replay-verified-score/`. This was a data-only
+trial; the 236-byte code prefix is still unresolved, and the old source object
+was not proved linked. Its PAL build report still has only 3,320 of 4,944 code
+bytes matched (67.15%), so verification cannot yet enable its source object.
+A full historical migration under this schema remains
+to be run after the other open recall rules. The prefix is target
+`fn_8034F370` (`0x8034F370–0x8034F45C`); its one recorded caller is
+`CInGameGuiManager::PauseGame` at `0x800FF304`. This call is a lead for
+cross-version call-site pairing, not emitted-owner proof. The current compiled
+PAL object has no source–compiled–retail bridge for that prefix, so the next
+code rule must resolve its identity and emitter without reading the later
+split as an answer.
+
+All five frozen GM8E01_00→GM8P01_00 calibration scenarios completed at
+`target/data-schema3-pal-calibration/`. Their per-unit records and aggregate
+measures are identical to policy 22. Calibration exercises coverage's code
+claims, so this is a regression check, not a test of the new data inference;
+the focused discover runs and verified-oracle score are that test.
+
 ### Policy 22: complete clean-object terminal suffix
 
 The old `b65ad2a6` PAL split ends `CTeamAiMgr.cpp` at `0x8022AFD8`.
@@ -1310,8 +1355,9 @@ rejected. A `common` symbol without target alignment is withheld altogether,
 including from the ordinary-range extension route.
 Missing flags do not imply ordinary BSS. Discovery reconstructs the same
 attribute-bearing line from the saved evidence in trials and publication.
-Unknown new BSS ranges remain withheld; no linker mode is inferred from
-neighbouring splits or from the source version.
+At the schema-2 checkpoint, unknown new BSS ranges remained withheld; no
+linker mode was inferred from neighbouring splits or from the source version
+alone. The later schema-3 whole-allocation route is described above.
 The read-only matcher run against the current F-drive Prime workspace still
 reports 1,472 data ranges and 187 range-level witnesses. It found no target
 symbol with an explicit `common` flag among those ranges; 48 ranges inherited

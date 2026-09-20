@@ -492,10 +492,17 @@ Two things happen before a build is spent:
   target-side evidence for that mode: an explicit target symbol flag or an
   existing split. Its emitted `align:` comes from target symbol or split
   alignment, which may differ from the alignment required of split boundaries.
-  Absence of the flag does not establish ordinary BSS.
-  Discovery withholds every new unannotated BSS-family range until its
-  target-side linker attributes are known. It may still widen an existing
-  ordinary BSS range whose attributes are already recorded.
+  Absence of the flag does not establish ordinary BSS. Discovery normally
+  withholds a new unannotated BSS-family range; it may widen an existing
+  ordinary range whose attributes are already recorded. A separate narrow
+  route admits a complete ordinary `.bss` allocation when a Ninja-clean
+  target-version object supplies a contiguous, explicitly sized symbol
+  inventory. At least two named symbols must agree with independently paired
+  retail starts, the source split must own the complete ordinary allocation,
+  the target has no competing symbol inside it, and its aligned end must meet
+  a separately owned ordinary symbol. This supports the whole interval only;
+  individual retail symbol sizes remain inferred. An unavailable or dirty
+  object, incomplete inventory, or disputed boundary withholds the range.
 
 ## verify — whole source files
 
