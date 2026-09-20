@@ -12,6 +12,44 @@ full historical NTSC→PAL runs and held-out diagnostics are reported in
 positive emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
 
+### Policy 21: a competing source-order slot vetoes isolated identity
+
+An exact normalized body can identify a function without identifying its
+emitting TU. In held-out GM8E01_00→GM8E01_02 calibration, the source
+`CDrone.cpp` `SquadRemove` body matched a target function between two
+`CMetroidBeta.cpp` functions, while that target unit's source order has its
+own same-sized `SwarmRemove` in precisely that slot. The analogous
+`CMetroid.cpp` `SwarmRemove` match sat between `CDrone.cpp` functions around
+its same-sized `SquadRemove`. Both were incorrect unselected exact-body
+alternatives and anchors, even though each match was independently identified
+as a function.
+
+Policy 21 derives this competing slot from complete contiguous source and
+target extents, two binary-supported non-weak flanking attributions to the
+same explicitly named foreign unit, and that unit's one intervening source
+function of the target function's size. It withholds the isolated identity as an ownership
+anchor; it does not assign ownership to the foreign unit. It also withholds
+one oracle-unassigned `CScriptSpiderBallWaypoint.cpp` anchor with the same
+pattern. The held-out `everything` rerun now exits 0: both incorrect
+alternatives and both incorrect anchors are gone, with no selected-outcome or
+per-unit ownership-measure change from policy 20. The record is at
+`target/policy21-final-heldout-everything/` on F:. All five frozen PAL
+scenarios rerun with the final release binary at
+`target/policy21-final-pal-calibration/`: every per-unit selected outcome
+and ownership measure agrees with policy 20, and no wrong known byte or
+revised-neighbour loss appears. Scoring the policy-20 focused Head/Light run
+with the current benchmark reproduces its `score.json` byte-for-byte at
+`target/policy21-head-light-score/`. A broader policy-21 historical migration
+has not yet been run; this safety rule changed no PAL alternative in these
+five scenarios.
+
+This changes no delivery dependency in A–I. It does sharpen G's next
+acceptance gate: an object-order or relocation placement that promotes a
+function from identity to emitted ownership must account for a competing
+source-order slot before using that function as an independent edge. The
+`CDrone`/`CMetroid` pairs are now named counterexamples for that gate. A
+compiled bridge or distinctive body by itself remains identification evidence.
+
 ### Policy 19: ordered destructor placement
 
 The policy-18 held-out GM8E01_00→GM8E01_02 `everything` scenario showed two
@@ -515,6 +553,28 @@ code bytes gained, zero known wrong or lost bytes. LightWidget still misses
 eight data bytes. This is a focused coverage-only trial, not a full historical
 migration or proof that a clean compiled object alone establishes its retail
 emitter. The later oracle was used only after the trial to score the result.
+
+All five hidden-ownership scenarios were rerun on the frozen F-drive
+`ca286f45` checkout with that checkout's PAL splits as oracle. Exact unit
+counts were 345 (`everything`), 184 (`isolated-unit`), 221
+(`consecutive-units`), 249 (`truncated-splits`) and 19
+(`misplaced-helper`). No scenario selected wrong known ownership or lost
+ground from a revised neighbour. The records are at
+`target/policy20-pal-calibration/`. This checkout differs from the earlier
+policy-19 calibration checkout, so the counts are not a controlled policy
+delta. On the same `ca286f45` checkout, the held-out
+GM8E01_00→GM8E01_02 `everything` scenario has identical selected outcomes
+and per-unit ownership measures to policy 19. The same two pre-existing
+incorrect unselected fallback/anchor hypotheses, `CDrone.cpp` and
+`CMetroid.cpp`, still make that command exit 1. Its record is at
+`target/policy20-heldout-e02-everything/`.
+
+The broader bridge-only rule remains unsafe: on the historical PAL report,
+`CFontImageDef.cpp` has a clean compiled bridge between independently
+attributed functions, but the later oracle leaves its bridged constructor
+unassigned. That oracle is not proof of a different emitter either; it shows
+why identity and adjacency cannot be promoted to ownership without the
+complete joint-boundary evidence used above.
 
 ## Implementation checkpoint after Change F (joint runs)
 

@@ -19,5 +19,6 @@ pub mod object_evidence;
 pub mod ownership;
 pub mod ownership_score;
 pub mod policy;
+pub mod source_slot;
 pub mod unit_matching;
 pub mod unit_runs;

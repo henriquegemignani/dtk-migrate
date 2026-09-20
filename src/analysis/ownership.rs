@@ -457,6 +457,7 @@ pub struct ObservationIndex {
     by_unit: BTreeMap<String, usize>,
     destructor_ids: BTreeSet<String>,
     placed_destructors: BTreeSet<String>,
+    competing_source_slots: BTreeMap<String, crate::analysis::source_slot::CompetingSourceSlot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1173,9 +1174,19 @@ impl ObservationIndex {
             })
             .map(|item| item.id.clone())
             .collect();
+        let competing_source_slots = crate::analysis::source_slot::competing_source_slots(&report);
         let bytes = serde_json::to_vec(&report)?;
         let digest = format!("{:x}", Sha256::digest(bytes));
-        Ok(Self { report, digest, by_id, by_target, by_unit, destructor_ids, placed_destructors })
+        Ok(Self {
+            report,
+            digest,
+            by_id,
+            by_target,
+            by_unit,
+            destructor_ids,
+            placed_destructors,
+            competing_source_slots,
+        })
     }
 
     pub fn report(&self) -> &IdentificationReport { &self.report }
@@ -1192,6 +1203,7 @@ impl ObservationIndex {
         item.independent
             && (!self.destructor_ids.contains(&item.id)
                 || self.placed_destructors.contains(&item.id))
+            && !self.competing_source_slots.contains_key(&item.id)
     }
 
     /// Both sides of an attribution have explicit, complete function extents.

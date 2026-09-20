@@ -248,6 +248,17 @@ destructor cannot be an exact-body anchor, an attached-function claim, or a
 supported independent boundary; a complete ordered sequence can still place
 it using its other members.
 
+Policy 21 also withholds an apparently independent identity match as an
+ownership anchor when its two immediately adjacent target functions have
+binary-supported, non-weak attributions to the same other unit, and their
+corresponding source functions enclose exactly one contiguous, same-sized
+function in that explicitly named source unit. This is a competing
+source-order placement, not proof that the neighbour emitted it. The candidate remains identified; its
+anchor and single-body alternative are ineligible until other evidence
+resolves the emitter. The competing unit and source address are recorded in
+the anchor's reason. Existing ownership of the candidate by its own unit is
+not overturned by this veto.
+
 **Attached independent functions.** A canonical independent binary attribution
 may extend an existing split by its target function's exact extent when that
 function touches the split without a gap and no other unit owns it. The source

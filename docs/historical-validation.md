@@ -79,6 +79,21 @@ fallback/anchor cases remain. A separate held-out all-scenario sweep was
 stopped during `isolated-unit` before that scenario produced evidence, so
 the other held-out scenarios are not scored here.
 
+Policy 20's focused HeadWidget/LightWidget trial and all five PAL calibration
+scenarios are described below and in the plan. Policy 21 then adds a
+competing-source-slot veto for isolated identity matches. On the held-out
+GM8E01_00→GM8E01_02 `everything` scenario it removes the two known wrong
+unselected alternatives and anchors (`CDrone.cpp`, `CMetroid.cpp`) without
+changing any selected ownership; the command now exits 0. On the frozen
+`ca286f45` NTSC→PAL pair, all five policy-21 scenarios have identical
+per-unit selected outcomes and ownership measures to policy 20, with zero
+wrong known bytes and neighbour losses. The current benchmark's score for
+the earlier focused policy-20 run is JSON-identical to its saved score.
+These are calibration and scoring checks, not a new full migration. Records
+are on F: under `target/policy21-final-heldout-everything/`,
+`target/policy21-final-pal-calibration/` and
+`target/policy21-head-light-score/`.
+
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven

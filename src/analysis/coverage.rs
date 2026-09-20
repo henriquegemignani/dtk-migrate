@@ -14,6 +14,7 @@ use crate::analysis::{
     mask::Masked,
     matching::{MatchResult, MatchTarget, MatchTier},
     ownership::{IdentificationReport, destructor_emitter_placed},
+    source_slot::competing_source_slots,
 };
 
 pub const COVERAGE_SCHEMA: u32 = 11;
@@ -334,6 +335,27 @@ pub fn build_report(
     mask: &Masked,
     extracts: ExtractCatalogs<'_>,
 ) -> CoverageReport {
+    let source_slot_competition = competing_source_slots(&identifications);
+    let source_slot_reasons: HashMap<_, _> = identifications
+        .attributions
+        .iter()
+        .filter_map(|item| {
+            let slot = source_slot_competition.get(&item.id)?;
+            Some((
+                (
+                    item.source.unit.clone(),
+                    item.source.section.clone(),
+                    item.source.address.clone(),
+                    item.target.section.clone(),
+                    item.target.address.clone(),
+                ),
+                format!(
+                    "competing source-order slot in {} at {}",
+                    slot.foreign_unit, slot.source_address
+                ),
+            ))
+        })
+        .collect();
     let mut source_hashes: HashMap<u64, Vec<NodeIndex>> = HashMap::new();
     let mut target_hashes: HashMap<u64, Vec<NodeIndex>> = HashMap::new();
     for node in 0..source.graph.len() as NodeIndex {
@@ -447,6 +469,15 @@ pub fn build_report(
             })
         {
             reasons.push("destructor emitter lacks ordered placement evidence".into());
+        }
+        if let Some(reason) = source_slot_reasons.get(&(
+            unit.to_string(),
+            source.obj.sections[a.section].name.clone(),
+            hex(a.address),
+            section.name.clone(),
+            hex(b.address),
+        )) {
+            reasons.push(reason.clone());
         }
         if b.address % align != 0 || (b.address + b.size) % align != 0 {
             reasons.push("function range is not split-aligned".to_string());

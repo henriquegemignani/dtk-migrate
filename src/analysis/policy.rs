@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 20;
+pub const POLICY_VERSION: u32 = 21;
 
 pub const MIN_ANCHOR_BYTES: u32 = 128;
 pub const MIN_LAYOUT_SHIFT_FUNCTIONS: u32 = 2;
@@ -206,6 +206,11 @@ pub struct CoveragePolicy {
     /// when its source and retail function orders and both outer flanks agree.
     #[serde(default)]
     pub infer_compiled_boundaries: bool,
+    /// An isolated exact-body identity is not an ownership anchor when
+    /// another unit has a same-sized source function in the matching slot
+    /// between two binary-supported target neighbours.
+    #[serde(default)]
+    pub veto_competing_source_slots: bool,
 }
 
 /// The policy as this build of the tool applies it.
@@ -303,5 +308,6 @@ pub fn current_policy() -> CoveragePolicy {
         maximum_joint_windows: MAX_JOINT_WINDOWS as u32,
         maximum_joint_search_states: MAX_JOINT_SEARCH_STATES as u32,
         infer_compiled_boundaries: true,
+        veto_competing_source_slots: true,
     }
 }
