@@ -13,7 +13,7 @@ use crate::analysis::{
     fingerprint::{LayoutShiftBody, layout_shift_body, normalized_body},
     mask::Masked,
     matching::{MatchResult, MatchTarget, MatchTier},
-    ownership::IdentificationReport,
+    ownership::{IdentificationReport, destructor_emitter_placed},
 };
 
 pub const COVERAGE_SCHEMA: u32 = 11;
@@ -436,6 +436,18 @@ pub fn build_report(
             owner_auto,
             unit,
         );
+        if source_name.starts_with("__dt__")
+            && !identifications.attributions.iter().any(|item| {
+                item.source.name == source_name
+                    && item.source.unit == unit
+                    && item.source.address == hex(a.address)
+                    && item.target.address == hex(b.address)
+                    && item.independent
+                    && destructor_emitter_placed(&identifications, item)
+            })
+        {
+            reasons.push("destructor emitter lacks ordered placement evidence".into());
+        }
         if b.address % align != 0 || (b.address + b.size) % align != 0 {
             reasons.push("function range is not split-aligned".to_string());
         }

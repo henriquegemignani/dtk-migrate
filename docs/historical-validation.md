@@ -1,8 +1,9 @@
 # PAL split recovery: frozen validation
 
-This records the completed policy-16 evaluation, not a claim that every later
-PAL split can be recovered from the old binaries. The migration used only each
-frozen baseline and its NTSC source version. Later PAL splits at `ca286f45`
+This records the completed policy-16 and policy-17 migrations and subsequent
+calibration, not a claim that every later PAL split can be recovered from the
+old binaries. Each migration used only its frozen baseline and NTSC source
+version. Later PAL splits at `ca286f45`
 were used by the benchmark afterward as an oracle. The runs, manifests and
 scores are retained on F: under `target/` and the isolated Prime checkout's
 `build/dtk-migrate/runs/`.
@@ -44,6 +45,39 @@ The policy-17 five-scenario calibration is retained under
 recoveries in the truncated-splits scenario without known wrong or lost bytes;
 its exit remains 1 for the pre-existing unselected `ScriptLoader.cpp`
 alternative/anchor fault in two scenarios.
+
+The later **full policy-17 run** at `46bd33805` (`20716-064439`) completed all
+four stages, published, and rebuilt PAL to SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. Against the same frozen
+manifest, changed-code exactness rises from policy 16's 2/15 to **4/15** and
+complete-body exactness from 0/15 to **2/15**. Correct code gained rises from
+1,320 to **1,792 bytes**, with zero known wrong or lost bytes. The two newly
+exact units are `CColorOverrideInstruction` and `CPopStateInstruction` (96
+bytes each); `CImageInstruction` also gains a correct 280-byte partial body.
+The score is retained at `target/attached-policy17-full-score/score.json` on
+F:. The published checkout was restored to its original `46bd33805` tracked
+files after scoring, so later calibration uses the frozen baseline.
+
+Policy 18 reuses that same `46bd33805` baseline and saved later oracle. Its
+five-scenario calibration exits 0: `ScriptLoader.cpp`'s wrong destructor anchor
+and fallback are withheld, all exact counts are unchanged, and no selected
+wrong or revised-owner-lost bytes appear. It also withholds one correct partial
+188-byte `CTweakAutoMapper.cpp` destructor claim in `everything` and
+`isolated-unit`, pending positive emitter-placement evidence. The full
+per-scenario comparison is in `docs/pal-split-recovery-plan.md`, with records
+under `target/destructor-policy18-historical-calibration/` on F:.
+
+Policy 19 adds two order-based destructor placement routes. On the same frozen
+PAL baseline and oracle, all five calibration scenarios exit 0 with the same
+exact counts and per-unit selected outcomes as policy 18, no incorrect
+alternatives or anchors and zero selected wrong or revised-owner-lost bytes.
+The records are under `target/destructor-policy19-historical-calibration/` on
+F:. Its held-out GM8E01_00→GM8E01_02 `everything` scenario restores one
+208-byte exact unit and one 824-byte partial claim lost under policy 18,
+without adding an incorrect hypothesis; the two earlier unrelated wrong
+fallback/anchor cases remain. A separate held-out all-scenario sweep was
+stopped during `isolated-unit` before that scenario produced evidence, so
+the other held-out scenarios are not scored here.
 
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted

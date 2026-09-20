@@ -85,7 +85,7 @@ fn exact_anchor_eligible(
                 && item.source.name == anchor.source_name
                 && parse_address(&item.source.address) == parse_address(&anchor.source_address)
                 && parse_address(&item.target.end) == Some(end)
-                && item.independent
+                && observations.ownership_independent(item)
         })
 }
 
@@ -778,7 +778,7 @@ fn direct_anchor_count(
                         && parse_address(&item.source.address)
                             == parse_address(&anchor.source_address)
                         && parse_address(&item.target.end) == Some(anchor_end)
-                        && item.independent
+                        && observations.ownership_independent(item)
                 })
         })
         .count() as u32
@@ -1045,7 +1045,7 @@ fn attached_independent_members(
             || item.target.module != MODULE
             || item.source.section != item.target.section
             || !CODE_SECTIONS.contains(&item.target.section.as_str())
-            || !item.independent
+            || !observations.ownership_independent(item)
             || !item.binary_supported
         {
             continue;
@@ -1226,7 +1226,7 @@ fn complete_sequences(
                     "target_address": item.target.address,
                     "target_end": item.target.end,
                     "attribution_id": item.id,
-                    "independent": item.independent,
+                    "independent": observations.ownership_independent(item),
                 })
             })
             .collect();
@@ -2112,6 +2112,30 @@ mod tests {
         assert_eq!(found[0].start, "0x80000100");
         assert_eq!(found[0].covered_bytes, 0x100);
         assert_eq!(found[0].lines, [split_line(".text", 0x8000_0100, 0x8000_0200)]);
+    }
+
+    #[test]
+    fn a_destructor_body_without_emitter_placement_is_not_an_exact_body_claim() {
+        let orphan = unit(vec![{
+            let mut anchor = anchor(0x8000_0100, 0x8000_0200);
+            anchor.source_name = "__dt__1AFv".into();
+            anchor
+        }]);
+        assert!(
+            checked_build(&orphan, &IndexMap::new(), &BTreeMap::new(), &IndexMap::new()).is_empty()
+        );
+        let represented = blocks(&[("a.cpp", 0x8000_0000, 0x8000_0100)]);
+        let source = blocks(&[("a.cpp", 0x8000_0100, 0x8000_0200)]);
+        assert!(
+            checked_build(&orphan, &represented, &BTreeMap::new(), &source).is_empty(),
+            "touching a split must not re-admit the destructor through the attached route"
+        );
+
+        let mut placed =
+            unit(vec![anchor(0x8000_0100, 0x8000_0200), anchor(0x8000_0200, 0x8000_0300)]);
+        placed.anchors[1].source_name = "__dt__1AFv".into();
+        let found = checked_build(&placed, &IndexMap::new(), &BTreeMap::new(), &IndexMap::new());
+        assert!(found.iter().any(|alternative| alternative.start == "0x80000200"));
     }
 
     #[test]

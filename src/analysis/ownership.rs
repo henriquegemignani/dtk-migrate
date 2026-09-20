@@ -28,7 +28,23 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 15;
+pub const IDENTIFICATION_SCHEMA: u32 = 17;
+#[derive(Clone, Copy)]
+enum DestructorPlacement {
+    Unchecked,
+    Adjacent,
+    Ordered,
+}
+
+impl DestructorPlacement {
+    fn for_schema(schema: u32) -> Self {
+        match schema {
+            0..=15 => Self::Unchecked,
+            16 => Self::Adjacent,
+            _ => Self::Ordered,
+        }
+    }
+}
 /// Schema 2 lacks the caller inventory. It is still readable, and reads as a
 /// report in which no helper is caller-confined, which only ever refuses more.
 const OLDEST_READABLE_IDENTIFICATION_SCHEMA: u32 = 2;
@@ -64,6 +80,303 @@ pub struct IdentificationReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_evidence: Option<ObjectEvidence>,
     pub units: Vec<UnitIdentification>,
+}
+
+/// A destructor's identical body identifies a function, but does not by
+/// itself identify the object that emitted it. CodeWarrior can emit a copy in
+/// a different translation unit. An adjacent, independently identified
+/// ordinary member or matching source and target neighbours can supply the
+/// missing placement evidence without consulting target names or splits.
+pub fn destructor_emitter_placed(
+    report: &IdentificationReport,
+    item: &FunctionAttribution,
+) -> bool {
+    destructor_emitter_placed_in(
+        &report.source_functions,
+        &report.target_functions,
+        &report.attributions,
+        item,
+        report.schema >= 17,
+    )
+}
+
+fn destructor_emitter_placed_in(
+    source_functions: &[SourceFunctionObservation],
+    target_functions: &[TargetFunctionObservation],
+    attributions: &[FunctionAttribution],
+    item: &FunctionAttribution,
+    allow_ordered_placement: bool,
+) -> bool {
+    let Some(item_source) = source_function_for_item(source_functions, item) else {
+        return false;
+    };
+    if !item_source.name.starts_with("__dt__") {
+        return true;
+    }
+    if !item_source.extent_known
+        || !target_functions.iter().any(|function| {
+            function.module == item.target.module
+                && function.section == item.target.section
+                && function.address == item.target.address
+                && function.end == item.target.end
+                && function.extent_known
+        })
+    {
+        return false;
+    }
+    let start = parse_hex(&item.target.address);
+    let end = parse_hex(&item.target.end);
+    let functions = target_functions.iter().filter(|function| {
+        function.module == item.target.module && function.section == item.target.section
+    });
+    let before = functions
+        .clone()
+        .filter(|function| parse_hex(&function.end) <= start)
+        .max_by_key(|function| parse_hex(&function.end));
+    let after = functions
+        .filter(|function| parse_hex(&function.address) >= end)
+        .min_by_key(|function| parse_hex(&function.address));
+    if [before, after].into_iter().flatten().any(|neighbour| {
+        let neighbour_start = parse_hex(&neighbour.address);
+        let neighbour_end = parse_hex(&neighbour.end);
+        let gap =
+            if neighbour_end <= start { start - neighbour_end } else { neighbour_start - end };
+        gap <= MAX_COMPOSED_PADDING_GAP
+            && neighbour.extent_known
+            && attributions.iter().any(|other| {
+                other.target.module == neighbour.module
+                    && other.target.section == neighbour.section
+                    && other.target.address == neighbour.address
+                    && other.target.end == neighbour.end
+                    && other.source.unit == item.source.unit
+                    && other.source.module == item.source.module
+                    && other.source.section == item.source.section
+                    && other.independent
+                    && !other.ambiguous
+                    && source_functions.iter().any(|source| {
+                        same_source_function(other, source)
+                            && source.extent_known
+                            && !source.name.starts_with("__dt__")
+                    })
+            })
+    }) {
+        return true;
+    }
+    if !allow_ordered_placement {
+        return false;
+    }
+
+    // A weak destructor may separate the unique destructor from an ordinary
+    // member. It can bridge the placement only when its body and its position
+    // in both function sequences agree; its identity alone remains weak.
+    for follows in [false, true] {
+        let Some(bridge) = (if follows { after } else { before }) else { continue };
+        let Some(ordinary) = target_neighbor(
+            target_functions,
+            &item.target.module,
+            &item.target.section,
+            parse_hex(&bridge.address),
+            parse_hex(&bridge.end),
+            follows,
+        ) else {
+            continue;
+        };
+        let (Some(bridge_match), Some(ordinary_match)) =
+            (target_attribution(attributions, bridge), target_attribution(attributions, ordinary))
+        else {
+            continue;
+        };
+        let source_start = parse_hex(&item.source.address);
+        let source_end = parse_hex(&item.source.end);
+        let Some(source_bridge) = source_neighbor(
+            source_functions,
+            &item.source.module,
+            &item.source.section,
+            source_start,
+            source_end,
+            follows,
+        ) else {
+            continue;
+        };
+        let Some(source_ordinary) = source_neighbor(
+            source_functions,
+            &item.source.module,
+            &item.source.section,
+            parse_hex(&source_bridge.address),
+            parse_hex(&source_bridge.end),
+            follows,
+        ) else {
+            continue;
+        };
+        if bridge_match.source.unit == item.source.unit
+            && source_bridge.name.starts_with("__dt__")
+            && bridge_match.binary_supported
+            && !bridge_match.ambiguous
+            && ordinary_match.source.unit == item.source.unit
+            && !source_ordinary.name.starts_with("__dt__")
+            && ordinary_match.independent
+            && !ordinary_match.ambiguous
+            && same_source_function(bridge_match, source_bridge)
+            && same_source_function(ordinary_match, source_ordinary)
+            && bridge.extent_known
+            && ordinary.extent_known
+            && source_bridge.extent_known
+            && source_ordinary.extent_known
+            && source_bridge.normalized_body_sha256.is_some()
+            && source_bridge.normalized_body_sha256 == bridge.normalized_body_sha256
+            && if follows {
+                close_gap(&item.target.end, &bridge.address)
+                    && close_gap(&bridge.end, &ordinary.address)
+                    && close_gap(&item.source.end, &source_bridge.address)
+                    && close_gap(&source_bridge.end, &source_ordinary.address)
+            } else {
+                close_gap(&ordinary.end, &bridge.address)
+                    && close_gap(&bridge.end, &item.target.address)
+                    && close_gap(&source_ordinary.end, &source_bridge.address)
+                    && close_gap(&source_bridge.end, &item.source.address)
+            }
+        {
+            return true;
+        }
+    }
+
+    // A one-function source section can also be placed between two distinct,
+    // independently identified neighbouring TUs. Both source and target
+    // orders must agree, so a duplicate destructor in another cluster cannot
+    // borrow the source TU's boundaries.
+    if source_functions
+        .iter()
+        .filter(|function| {
+            function.unit == item.source.unit
+                && function.module == item.source.module
+                && function.section == item.source.section
+        })
+        .count()
+        != 1
+    {
+        return false;
+    }
+    let (Some(before), Some(after)) = (before, after) else { return false };
+    let (Some(source_before), Some(source_after)) = (
+        source_neighbor(
+            source_functions,
+            &item.source.module,
+            &item.source.section,
+            parse_hex(&item.source.address),
+            parse_hex(&item.source.end),
+            false,
+        ),
+        source_neighbor(
+            source_functions,
+            &item.source.module,
+            &item.source.section,
+            parse_hex(&item.source.address),
+            parse_hex(&item.source.end),
+            true,
+        ),
+    ) else {
+        return false;
+    };
+    let (Some(left), Some(right)) =
+        (target_attribution(attributions, before), target_attribution(attributions, after))
+    else {
+        return false;
+    };
+    left.source.unit != item.source.unit
+        && right.source.unit != item.source.unit
+        && left.source.unit != right.source.unit
+        && left.independent
+        && right.independent
+        && !left.ambiguous
+        && !right.ambiguous
+        && !source_before.name.starts_with("__dt__")
+        && !source_after.name.starts_with("__dt__")
+        && same_source_function(left, source_before)
+        && same_source_function(right, source_after)
+        && before.extent_known
+        && after.extent_known
+        && source_before.extent_known
+        && source_after.extent_known
+        && close_gap(&before.end, &item.target.address)
+        && close_gap(&item.target.end, &after.address)
+        && close_gap(&source_before.end, &item.source.address)
+        && close_gap(&item.source.end, &source_after.address)
+}
+
+fn target_attribution<'a>(
+    attributions: &'a [FunctionAttribution],
+    function: &TargetFunctionObservation,
+) -> Option<&'a FunctionAttribution> {
+    attributions.iter().find(|item| {
+        item.target.module == function.module
+            && item.target.section == function.section
+            && item.target.address == function.address
+            && item.target.end == function.end
+    })
+}
+
+fn same_source_function(item: &FunctionAttribution, function: &SourceFunctionObservation) -> bool {
+    item.source.module == function.module
+        && item.source.section == function.section
+        && item.source.unit == function.unit
+        && item.source.address == function.address
+        && item.source.end == function.end
+}
+
+fn source_function_for_item<'a>(
+    functions: &'a [SourceFunctionObservation],
+    item: &FunctionAttribution,
+) -> Option<&'a SourceFunctionObservation> {
+    functions.iter().find(|function| same_source_function(item, function))
+}
+
+fn target_neighbor<'a>(
+    functions: &'a [TargetFunctionObservation],
+    module: &str,
+    section: &str,
+    start: u32,
+    end: u32,
+    follows: bool,
+) -> Option<&'a TargetFunctionObservation> {
+    let matching = functions
+        .iter()
+        .filter(|function| function.module == module && function.section == section);
+    if follows {
+        matching
+            .filter(|function| parse_hex(&function.address) >= end)
+            .min_by_key(|function| parse_hex(&function.address))
+    } else {
+        matching
+            .filter(|function| parse_hex(&function.end) <= start)
+            .max_by_key(|function| parse_hex(&function.end))
+    }
+}
+
+fn source_neighbor<'a>(
+    functions: &'a [SourceFunctionObservation],
+    module: &str,
+    section: &str,
+    start: u32,
+    end: u32,
+    follows: bool,
+) -> Option<&'a SourceFunctionObservation> {
+    let matching = functions
+        .iter()
+        .filter(|function| function.module == module && function.section == section);
+    if follows {
+        matching
+            .filter(|function| parse_hex(&function.address) >= end)
+            .min_by_key(|function| parse_hex(&function.address))
+    } else {
+        matching
+            .filter(|function| parse_hex(&function.end) <= start)
+            .max_by_key(|function| parse_hex(&function.end))
+    }
+}
+
+fn close_gap(left_end: &str, right_start: &str) -> bool {
+    let (left, right) = (parse_hex(left_end), parse_hex(right_start));
+    left <= right && right - left <= MAX_COMPOSED_PADDING_GAP
 }
 
 impl IdentificationReport {
@@ -142,6 +455,8 @@ pub struct ObservationIndex {
     by_id: BTreeMap<String, usize>,
     by_target: BTreeMap<AddressKey, usize>,
     by_unit: BTreeMap<String, usize>,
+    destructor_ids: BTreeSet<String>,
+    placed_destructors: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -486,6 +801,7 @@ impl ObservationIndex {
         let mut by_target = BTreeMap::new();
         let mut source_locations = BTreeSet::new();
         let mut source_functions = BTreeSet::new();
+        let mut source_names = BTreeMap::new();
         for function in &mut report.source_functions {
             validate_body_digest(function.normalized_body_sha256.as_deref(), &function.name)?;
             let start =
@@ -498,15 +814,17 @@ impl ObservationIndex {
             {
                 bail!("Source function {} has an invalid extent or unit", function.name);
             }
-            if !source_functions.insert((
+            let source_key = (
                 function.module.clone(),
                 function.section.clone(),
                 start,
                 end,
                 function.unit.clone(),
-            )) {
+            );
+            if !source_functions.insert(source_key.clone()) {
                 bail!("Identification contains a duplicate source function extent");
             }
+            source_names.insert(source_key, function.name.clone());
             function.address = hex(start);
             function.end = hex(end);
         }
@@ -634,14 +952,21 @@ impl ObservationIndex {
             }
             let source_start = parse_address_checked(&item.source.address, "source", &item.id)?;
             let source_end = parse_address_checked(&item.source.end, "source", &item.id)?;
-            if !source_functions.contains(&(
+            let source_key = (
                 item.source.module.clone(),
                 item.source.section.clone(),
                 source_start,
                 source_end,
                 item.source.unit.clone(),
-            )) {
+            );
+            if !source_functions.contains(&source_key) {
                 bail!("Attribution {} is absent from the source function inventory", item.id);
+            }
+            if report.schema >= 16
+                && source_names.get(&source_key).map(String::as_str)
+                    != Some(item.source.name.as_str())
+            {
+                bail!("Attribution {} does not match the source function inventory", item.id);
             }
             item.target.address = hex(target_start);
             item.target.end = hex(target_end);
@@ -676,6 +1001,7 @@ impl ObservationIndex {
                 .flatten();
         }
 
+        let destructor_placement = DestructorPlacement::for_schema(report.schema);
         let mut by_unit = BTreeMap::new();
         let supplied_count = report.units.len();
         let mut supplied: BTreeMap<String, UnitIdentification> =
@@ -697,6 +1023,7 @@ impl ObservationIndex {
                 &report.attributions,
                 &report.source_functions,
                 &report.target_functions,
+                destructor_placement,
             );
             by_unit.insert(name.clone(), units.len());
             units.push(canonical);
@@ -781,9 +1108,35 @@ impl ObservationIndex {
             );
         }
 
+        let destructor_ids: BTreeSet<String> = report
+            .attributions
+            .iter()
+            .filter(|item| {
+                source_names
+                    .get(&(
+                        item.source.module.clone(),
+                        item.source.section.clone(),
+                        parse_hex(&item.source.address),
+                        parse_hex(&item.source.end),
+                        item.source.unit.clone(),
+                    ))
+                    .is_some_and(|name| name.starts_with("__dt__"))
+            })
+            .map(|item| item.id.clone())
+            .collect();
+        let placed_destructors = report
+            .attributions
+            .iter()
+            .filter(|item| {
+                destructor_ids.contains(&item.id)
+                    && item.independent
+                    && destructor_emitter_placed(&report, item)
+            })
+            .map(|item| item.id.clone())
+            .collect();
         let bytes = serde_json::to_vec(&report)?;
         let digest = format!("{:x}", Sha256::digest(bytes));
-        Ok(Self { report, digest, by_id, by_target, by_unit })
+        Ok(Self { report, digest, by_id, by_target, by_unit, destructor_ids, placed_destructors })
     }
 
     pub fn report(&self) -> &IdentificationReport { &self.report }
@@ -792,6 +1145,14 @@ impl ObservationIndex {
 
     pub fn attribution(&self, id: &str) -> Option<&FunctionAttribution> {
         self.by_id.get(id).map(|&index| &self.report.attributions[index])
+    }
+
+    /// Identity evidence is not always emitted-owner evidence. In particular,
+    /// a destructor needs placement beside an ordinary member of its unit.
+    pub fn ownership_independent(&self, item: &FunctionAttribution) -> bool {
+        item.independent
+            && (!self.destructor_ids.contains(&item.id)
+                || self.placed_destructors.contains(&item.id))
     }
 
     /// Both sides of an attribution have explicit, complete function extents.
@@ -880,7 +1241,7 @@ impl ObservationIndex {
                 item.source.unit == unit
                     && item.target.module == module
                     && item.target.section == section
-                    && item.independent
+                    && self.ownership_independent(item)
                     && {
                         let address = parse_hex(&item.target.address);
                         start <= address && address < end
@@ -995,7 +1356,7 @@ impl ObservationIndex {
             {
                 return None;
             }
-            independent += u32::from(item.independent);
+            independent += u32::from(self.ownership_independent(item));
             cursor = right;
         }
         if end - cursor > MAX_COMPOSED_PADDING_GAP
@@ -1012,7 +1373,7 @@ impl ObservationIndex {
             if item.source.unit == unit || item.ambiguous {
                 return None;
             }
-            if item.independent {
+            if self.ownership_independent(item) {
                 return Some(SequenceEdge::ForeignIndependent(item.source.unit.clone()));
             }
             (neighbour.is_some_and(|neighbour| neighbour.unit == item.source.unit))
@@ -1067,7 +1428,7 @@ impl ObservationIndex {
         let anchor = |extent: &TargetExtent| {
             self.at_target(&extent.module, &extent.section, extent.start).filter(|anchor| {
                 anchor.source.unit == unit
-                    && anchor.independent
+                    && self.ownership_independent(anchor)
                     && anchor.source.module == item.source.module
                     && anchor.source.section == item.source.section
                     && interval_covered(ranges, extent.start, extent.end)
@@ -1125,7 +1486,7 @@ impl ObservationIndex {
             let outermost = self.source_outermost(item, follows);
             if item.source.unit == unit {
                 Beside::Member { extent, source: parse_hex(&item.source.address), outermost }
-            } else if item.independent && outermost {
+            } else if self.ownership_independent(item) && outermost {
                 Beside::Bound
             } else {
                 Beside::Other
@@ -1200,7 +1561,7 @@ impl ObservationIndex {
                     caller.section == function.section && placement.members.contains(&extent);
                 item.source.unit == unit
                     && !item.ambiguous
-                    && (item.independent || placing)
+                    && (self.ownership_independent(item) || placing)
                     && held(&caller.section, extent.0, extent.1)
             })
     }
@@ -1285,16 +1646,24 @@ impl ObservationIndex {
                                     Some(item.source.unit.clone()),
                                 )
                             }
-                            Some(item) if item.source.unit == unit && item.independent => (
-                                ClaimClass::IndependentlyAttributed,
-                                Some(item.id.clone()),
-                                Some(item.source.unit.clone()),
-                            ),
-                            Some(item) if item.source.unit != unit && item.independent => (
-                                ClaimClass::ConflictingAttribution,
-                                Some(item.id.clone()),
-                                Some(item.source.unit.clone()),
-                            ),
+                            Some(item)
+                                if item.source.unit == unit && self.ownership_independent(item) =>
+                            {
+                                (
+                                    ClaimClass::IndependentlyAttributed,
+                                    Some(item.id.clone()),
+                                    Some(item.source.unit.clone()),
+                                )
+                            }
+                            Some(item)
+                                if item.source.unit != unit && self.ownership_independent(item) =>
+                            {
+                                (
+                                    ClaimClass::ConflictingAttribution,
+                                    Some(item.id.clone()),
+                                    Some(item.source.unit.clone()),
+                                )
+                            }
                             Some(item) => (
                                 ClaimClass::UnresolvedFunction,
                                 Some(item.id.clone()),
@@ -1510,11 +1879,12 @@ fn decisive(item: &FunctionAttribution) -> bool {
 
 fn canonical_edge(
     unit: &str,
-    module: &str,
-    section: &str,
     neighbor: Option<&TargetFunctionObservation>,
     section_boundary_reason: &str,
     all: &[FunctionAttribution],
+    source_functions: &[SourceFunctionObservation],
+    target_functions: &[TargetFunctionObservation],
+    destructor_placement: DestructorPlacement,
 ) -> EdgeEvidence {
     let Some(neighbor) = neighbor else {
         return EdgeEvidence {
@@ -1525,8 +1895,8 @@ fn canonical_edge(
     };
     let address = parse_hex(&neighbor.address);
     let Some(attribution) = all.iter().find(|item| {
-        item.target.module == module
-            && item.target.section == section
+        item.target.module == neighbor.module
+            && item.target.section == neighbor.section
             && parse_hex(&item.target.address) == address
     }) else {
         return EdgeEvidence {
@@ -1542,9 +1912,21 @@ fn canonical_edge(
             adjacent_attribution_id: Some(attribution.id.clone()),
         };
     }
+    // Canonical loading has bound source names to the inventory, so ordinary
+    // members can skip the more expensive destructor placement search.
+    let supported = attribution.independent
+        && (matches!(destructor_placement, DestructorPlacement::Unchecked)
+            || !attribution.source.name.starts_with("__dt__")
+            || destructor_emitter_placed_in(
+                source_functions,
+                target_functions,
+                all,
+                attribution,
+                matches!(destructor_placement, DestructorPlacement::Ordered),
+            ));
     EdgeEvidence {
-        supported: attribution.independent,
-        reason: if attribution.independent {
+        supported,
+        reason: if supported {
             format!(
                 "adjacent target function is independently attributed to {}",
                 attribution.source.unit
@@ -1562,6 +1944,7 @@ fn canonical_unit(
     all: &[FunctionAttribution],
     source_functions: &[SourceFunctionObservation],
     target_functions: &[TargetFunctionObservation],
+    destructor_placement: DestructorPlacement,
 ) -> UnitIdentification {
     let matched = items.len() as u32;
     let source_members: Vec<&SourceFunctionObservation> =
@@ -1701,19 +2084,21 @@ fn canonical_unit(
             .copied();
         let left_target_edge = canonical_edge(
             &unit.unit,
-            module,
-            section,
             left,
             "candidate starts at the beginning of the target section",
             all,
+            source_functions,
+            target_functions,
+            destructor_placement,
         );
         let right_target_edge = canonical_edge(
             &unit.unit,
-            module,
-            section,
             right,
             "candidate ends at the end of the target section",
             all,
+            source_functions,
+            target_functions,
+            destructor_placement,
         );
         candidates.push(CandidateSequence {
             module: module.to_string(),
@@ -2654,6 +3039,173 @@ mod tests {
     }
 
     #[test]
+    fn a_unique_destructor_identity_needs_an_ordinary_member_to_place_its_emitter() {
+        use crate::analysis::coverage_fixture::{anchor, unit};
+
+        let stranded = fixture_index(vec![
+            unit("Other.cpp", vec![anchor("ordinary_foreign", 0x1000, 0x1100)]),
+            unit("A.cpp", vec![anchor("__dt__1AFv", 0x1100, 0x1200)]),
+        ]);
+        let item = stranded.at_target("main", ".text", 0x1100).unwrap();
+        assert!(item.independent, "the unique body still identifies the function");
+        assert!(!stranded.ownership_independent(item));
+        let after = BTreeMap::from([(".text".into(), vec![(0x1100, 0x1200)])]);
+        assert_eq!(stranded.assess("A.cpp", "main", &BTreeMap::new(), &after).new_unresolved, 1);
+        let edge = crate::analysis::boundaries::judge(
+            &stranded,
+            "Other.cpp",
+            "main",
+            ".text",
+            crate::analysis::boundaries::Side::Right,
+            0x1100,
+            vec![],
+        );
+        assert!(!edge.supported, "an unplaced destructor is not a foreign boundary");
+
+        let placed = fixture_index(vec![unit("A.cpp", vec![
+            anchor("ordinary_member", 0x1000, 0x1100),
+            anchor("__dt__1AFv", 0x1100, 0x1200),
+        ])]);
+        let item = placed.at_target("main", ".text", 0x1100).unwrap();
+        assert!(placed.ownership_independent(item));
+        assert_eq!(placed.assess("A.cpp", "main", &BTreeMap::new(), &after).independent_members, 1);
+    }
+
+    #[test]
+    fn a_single_destructor_between_two_source_order_bounds_has_an_emitter() {
+        use crate::analysis::coverage_fixture::{anchor, report, unit};
+
+        let make = |source_address: &str| {
+            let mut destructor = anchor("__dt__1AFv", 0x1100, 0x1200);
+            destructor.source_address = source_address.into();
+            fixture_index(vec![
+                unit("Before.cpp", vec![anchor("ordinary_before", 0x1000, 0x1100)]),
+                unit("A.cpp", vec![destructor]),
+                unit("After.cpp", vec![anchor("ordinary_after", 0x1200, 0x1300)]),
+            ])
+        };
+        let bracketed = make("0x00001100");
+        assert!(
+            bracketed.ownership_independent(bracketed.at_target("main", ".text", 0x1100).unwrap())
+        );
+        assert!(bracketed.unit("Before.cpp").unwrap().candidates[0].right_target_edge.supported);
+        let displaced = make("0x00002100");
+        assert!(
+            !displaced.ownership_independent(displaced.at_target("main", ".text", 0x1100).unwrap())
+        );
+        let same_foreign_unit = fixture_index(vec![
+            unit("Other.cpp", vec![
+                anchor("ordinary_before", 0x1000, 0x1100),
+                anchor("ordinary_after", 0x1200, 0x1300),
+            ]),
+            unit("A.cpp", vec![anchor("__dt__1AFv", 0x1100, 0x1200)]),
+        ]);
+        assert!(
+            !same_foreign_unit.ownership_independent(
+                same_foreign_unit.at_target("main", ".text", 0x1100).unwrap()
+            )
+        );
+
+        let mut previous = report("source", "target", vec![
+            unit("Before.cpp", vec![anchor("ordinary_before", 0x1000, 0x1100)]),
+            unit("A.cpp", vec![anchor("__dt__1AFv", 0x1100, 0x1200)]),
+            unit("After.cpp", vec![anchor("ordinary_after", 0x1200, 0x1300)]),
+        ])
+        .identifications;
+        previous.schema = 16;
+        let expected = BTreeSet::from(["Before.cpp".into(), "A.cpp".into(), "After.cpp".into()]);
+        let previous = ObservationIndex::load(previous, "source", "target", &expected).unwrap();
+        assert!(
+            !previous.ownership_independent(previous.at_target("main", ".text", 0x1100).unwrap())
+        );
+        assert!(!previous.unit("Before.cpp").unwrap().candidates[0].right_target_edge.supported);
+
+        let mut unknown_extent = report("source", "target", vec![
+            unit("Before.cpp", vec![anchor("ordinary_before", 0x1000, 0x1100)]),
+            unit("A.cpp", vec![anchor("__dt__1AFv", 0x1100, 0x1200)]),
+            unit("After.cpp", vec![anchor("ordinary_after", 0x1200, 0x1300)]),
+        ])
+        .identifications;
+        unknown_extent.target_functions[1].extent_known = false;
+        let unknown_extent =
+            ObservationIndex::load(unknown_extent, "source", "target", &expected).unwrap();
+        assert!(
+            !unknown_extent
+                .ownership_independent(unknown_extent.at_target("main", ".text", 0x1100).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_weak_destructor_bridges_a_unique_destructor_to_an_ordinary_member() {
+        use crate::analysis::coverage_fixture::{anchor, report, unit};
+
+        let mut weak = anchor("__dt__WeakFv", 0x1100, 0x1200);
+        weak.source_weak = true;
+        let mut report = report("source", "target", vec![unit("A.cpp", vec![
+            anchor("__dt__StrongFv", 0x1000, 0x1100),
+            weak,
+            anchor("__ct__1AFv", 0x1200, 0x1300),
+        ])]);
+        let hash = "a".repeat(64);
+        report.identifications.source_functions[1].normalized_body_sha256 = Some(hash.clone());
+        report.identifications.target_functions[1].normalized_body_sha256 = Some(hash);
+        let expected = BTreeSet::from(["A.cpp".into()]);
+        let placed =
+            ObservationIndex::load(report.identifications.clone(), "source", "target", &expected)
+                .unwrap();
+        let item = placed.at_target("main", ".text", 0x1000).unwrap();
+        assert!(item.independent);
+        assert!(placed.ownership_independent(item));
+        let mut without_body = report.identifications;
+        without_body.target_functions[1].normalized_body_sha256 = None;
+        let stranded = ObservationIndex::load(without_body, "source", "target", &expected).unwrap();
+        assert!(
+            !stranded.ownership_independent(stranded.at_target("main", ".text", 0x1000).unwrap())
+        );
+    }
+
+    #[test]
+    fn schema_fifteen_keeps_its_saved_edge_diagnostics() {
+        use crate::analysis::coverage_fixture::{anchor, unit};
+
+        let report = crate::analysis::coverage_fixture::report("source", "target", vec![
+            unit("Other.cpp", vec![anchor("ordinary_foreign", 0x1000, 0x1100)]),
+            unit("A.cpp", vec![anchor("__dt__1AFv", 0x1100, 0x1200)]),
+        ]);
+        let expected = BTreeSet::from(["Other.cpp".into(), "A.cpp".into()]);
+        let mut old = report.identifications.clone();
+        old.schema = 15;
+        let old = ObservationIndex::load(old, "source", "target", &expected).unwrap();
+        let new =
+            ObservationIndex::load(report.identifications, "source", "target", &expected).unwrap();
+        let right_edge_supported = |index: &ObservationIndex| {
+            index.unit("Other.cpp").unwrap().candidates[0].right_target_edge.supported
+        };
+        assert!(right_edge_supported(&old));
+        assert!(!right_edge_supported(&new));
+        assert!(!new.ownership_independent(new.at_target("main", ".text", 0x1100).unwrap()));
+    }
+
+    #[test]
+    fn an_attribution_cannot_rename_a_destructor_to_bypass_owner_placement() {
+        use crate::analysis::coverage_fixture::{anchor, unit};
+
+        let mut report = crate::analysis::coverage_fixture::report("source", "target", vec![unit(
+            "A.cpp",
+            vec![anchor("__dt__1AFv", 0x1100, 0x1200)],
+        )]);
+        report.identifications.attributions[0].source.name = "ordinary_member".into();
+        let expected = BTreeSet::from(["A.cpp".into()]);
+        let mut legacy = report.identifications.clone();
+        legacy.schema = 15;
+        let legacy = ObservationIndex::load(legacy, "source", "target", &expected).unwrap();
+        assert!(!legacy.ownership_independent(legacy.at_target("main", ".text", 0x1100).unwrap()));
+        let error = ObservationIndex::load(report.identifications, "source", "target", &expected)
+            .unwrap_err();
+        assert!(error.to_string().contains("does not match the source function inventory"));
+    }
+
+    #[test]
     fn forged_aggregate_and_independent_flags_are_recomputed() {
         let unit = crate::analysis::coverage_fixture::unit("A.cpp", vec![
             crate::analysis::coverage_fixture::anchor("A", 0x8000_1000, 0x8000_1100),
@@ -3136,6 +3688,7 @@ mod tests {
             ObservationIndex::load(report.clone(), "source", "target", &expected).unwrap();
         assert!(previous.report().helper_families.is_empty());
         report.schema = IDENTIFICATION_SCHEMA;
+        report.attributions[0].source.name = report.source_functions[0].name.clone();
         let current = ObservationIndex::load(report, "source", "target", &expected).unwrap();
         assert_eq!(current.report().helper_families.len(), 1);
         assert_eq!(current.report().helper_families[0].signals, vec![

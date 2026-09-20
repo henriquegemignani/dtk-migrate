@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 17, evidence schema 11, identification schema 15. Every threshold
+Policy version 19, evidence schema 11, identification schema 17. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -154,6 +154,16 @@ an explicit symbol size and a complete normalized body at that extent. Older
 reports leave this fact unknown. An attached ownership claim requires it on
 both sides; an inferred end address cannot become a split boundary merely
 because the function identity is independently supported.
+Schema 16 changes canonical edge diagnostics for destructor placement. Schema
+15 reports retain their original canonical diagnostic values and hashes when
+read later; current ownership policy still rechecks every proposed change.
+Schema 16 also binds an attribution's source name to the source-function
+inventory, which prevents changing only that name to evade the destructor gate.
+Older reports retain their saved names, but current ownership checks classify
+the destructor from the source-function inventory.
+Schema 17 records two additional source-and-target-order placement routes for
+destructors. Schema-16 edge diagnostics retain their previous meaning when
+loaded; current ownership policy checks each proposed claim again.
 
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
@@ -201,6 +211,20 @@ The forms of evidence it accepts:
 layout are identical in both versions, unique on both sides, with known extents
 and no weak or template symbol involved. Adjacent anchors also offer their merged
 range, and each anchor offers its own range alone.
+
+A destructor-shaped `__dt__` match identifies the function, but its body alone
+does not prove which object emitted it. As independent *ownership* evidence it
+needs placement by one of three arrangements: an immediately adjacent ordinary
+member independently attributed to the same source unit; a second destructor
+with matching relocation-masked normalized bodies between it and such an
+ordinary member in both source and target order; or, for a source unit with
+only that function in the section, two distinct independently attributed
+foreign units bracketing it in both orders. Each gap is at most alignment
+padding and the functions have known extents. None of these uses target names
+or existing target splits. Without placement the
+destructor cannot be an exact-body anchor, an attached-function claim, or a
+supported independent boundary; a complete ordered sequence can still place
+it using its other members.
 
 **Attached independent functions.** A canonical independent binary attribution
 may extend an existing split by its target function's exact extent when that

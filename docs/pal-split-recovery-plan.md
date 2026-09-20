@@ -3,12 +3,111 @@
 Status: living implementation plan. A–F's safety and composition mechanisms,
 H's scoped code/data certificates and I's bounded retry and final-validation
 mechanisms are implemented. G's helper families, optional object evidence and
-unresolved clusters are diagnostic; emitted-owner and relocation-placement
-records do not yet drive ownership transactions. The two frozen, complete
-NTSC→PAL runs and held-out diagnostics are reported in
+unresolved clusters are diagnostic; a narrow destructor-emitter placement rule
+now participates in ownership decisions, while general emitted-owner and
+relocation-placement records do not yet drive ownership transactions. The
+full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 positive emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Policy 19: ordered destructor placement
+
+The policy-18 held-out GM8E01_00→GM8E01_02 `everything` scenario showed two
+correct claims withheld along with the intended wrong one. The single-function
+`CAnimTreeContinuousPhaseBlend.cpp` source section is a unique destructor between the last
+independently attributed function of `CAnimTreeBlend.cpp` and the first of
+`CAnimTreeDoubleChild.cpp`, in exactly that order in both binaries. Policy 18
+lost its 208-byte exact recovery. `CWeaponDescription.cpp` has a unique
+destructor, then a weak destructor with matching relocation-masked normalized
+bodies, then an independently attributed constructor, also adjacent in both
+orders. Policy 18 withheld the first 824 correct bytes of that unit.
+
+Policy 19 adds those two narrow placement routes. The one-function section bracket
+requires both foreign neighbours to be distinct, independently attributed
+ordinary functions, adjacent in source and target with known extents. The
+same-unit bridge permits one weak destructor only when its source and target
+normalized bodies agree, it is unambiguous, and an independent ordinary
+member follows the same two-function path in both versions. Every gap is at
+most the existing 31-byte padding allowance. Source and target names of the
+neighbouring functions and current split owners do not prove placement.
+
+Identification schema 17 records the changed canonical edges; schema-16
+reports retain the earlier adjacent-only meaning. Both positive routes still
+require the destructor's own function identity to be independent, and the
+existing transaction, extracted-input, build and regression gates remain.
+The `ScriptLoader.cpp` destructor has neither arrangement: it lies in another
+destructor cluster and its source neighbours do not flank it there.
+
+In the held-out `everything` calibration, policy 19 restores the 208-byte
+exact `CAnimTreeContinuousPhaseBlend.cpp` unit and the 824-byte partial
+`CWeaponDescription.cpp` claim. Relative to the earlier baseline, the only
+selected outcome changes are two partial-to-exact improvements in
+`CBSWallHang.cpp` and `CTweakGuiColors.cpp`. The same two pre-existing wrong
+unselected fallback/anchor hypotheses remain (`CDrone.cpp` and
+`CMetroid.cpp`); selected wrong bytes and revised-owner losses are zero.
+The policy-19 binary scores the saved policy-16 run with JSON-identical
+results across all 805 unit ledgers, including its legacy identification
+schema. The current source passes the full all-targets suite, clippy and
+nightly formatting.
+On the frozen `46bd33805` PAL baseline and saved oracle, all five policy-19
+calibration scenarios exit 0. Exact counts remain `345 / 174 / 212 / 252 /
+14`, with no per-unit selected-outcome change from policy 18, no incorrect
+alternatives or anchors, and zero selected wrong or revised-owner-lost bytes.
+The held-out `everything` result above is complete. The separate held-out
+all-scenario sweep was stopped during `isolated-unit` after a long match had
+not yet produced evidence; its later scenarios remain unmeasured. The five
+frozen PAL scenarios completed independently.
+
+### Policy 18: destructor identity versus emitted ownership
+
+The hidden-ownership calibration found a unique, byte-identical destructor for
+`ScriptLoader.cpp` at `0x800A8964` inside the target's destructor cluster near
+`TypesMatch.cpp`. The function identity was strong, but neither adjacent target
+function was independently attributed to `ScriptLoader.cpp`; its exact-body
+alternative and anchor were wrong about the emitting TU. A retail build cannot
+settle that ownership question.
+
+A `__dt__` attribution remains in the identification inventory. To use it as
+independent ownership evidence, policy 18 requires an immediately adjacent,
+independently attributed non-destructor from the same source unit, with known
+extents and at most alignment padding between them. This check uses neither
+target names nor target split ownership. It is shared by exact-body anchors,
+attached functions, edge composition, complete-sequence independence counts,
+full-body assessment and joint-run inference. A complete sequence may still
+place a destructor using independent ordinary members around the run. The
+rule does not infer an owner from a generated name or a unique body alone.
+
+The negative gate exposes a narrower positive-evidence gap:
+`CTweakAutoMapper`'s 188-byte destructor is followed by its source-adjacent
+`__dl__` function in both versions, the destructor calls it in the target, and
+an independently attributed foreign function follows the pair. The `__dl__`
+match is not independently decisive, so policy 18 withholds that otherwise
+oracle-correct partial claim. A later rule should test whether this whole
+source-order, call, and foreign-boundary configuration establishes the pair's
+emitter. It must be checked against hidden-name and held-out cases before it
+can restore the destructor; the function name alone is insufficient.
+
+Canonical edge diagnostics changed, so identification schema 16 records their
+new meaning. Loading schema-15 reports retains their old canonical diagnostics
+and digest; current policy independently checks any proposed ownership claim.
+For schema 16 the loader also checks each attribution's source name against
+its source-function inventory entry, so a saved report cannot evade the
+destructor classifier by renaming only the attribution. Older schemas retain
+their original alias and diagnostic semantics; current ownership checks
+classify destructors from the source-function inventory even when an old
+attribution carried a different alias.
+
+On the same `46bd33805` historical checkout and saved later oracle as policy
+17, all five calibration scenarios now exit successfully. Exact recoveries
+remain `345 / 174 / 212 / 252 / 14` in `everything / isolated-unit /
+consecutive-units / truncated-splits / misplaced-helper`; selected wrong bytes
+and revised-owner losses remain zero. The `ScriptLoader.cpp` incorrect fallback
+and anchor disappear. The only unit whose selected outcome or attributed bytes
+change is `CTweakAutoMapper.cpp`: it goes from a correct 188-byte partial claim
+to abstention in `everything` and `isolated-unit`. The other three scenarios
+are byte-for-byte equal in their outcome counts. Evidence is retained under
+`target/destructor-policy18-historical-calibration/` on F:.
 
 ### Policy 17: independently attributed functions attached to represented units
 
@@ -39,9 +138,12 @@ and one partial unit, with no known wrong bytes or revised-owner loss in any
 scenario. Nineteen of those gains were below 64 bytes; six had different
 source and target sizes. Calibration still exits 1 because the pre-existing
 `ScriptLoader.cpp` fallback/anchor hypothesis is wrong in `everything` and
-`consecutive-units`; no selected boundary for it is wrong. A full historical
-rerun with policy 17 remains separate; the policy-16 benchmark counts below
-are not silently updated by this focused run.
+`consecutive-units`; no selected boundary for it is wrong. The subsequent
+full policy-17 rerun (`20716-064439`) at that same frozen checkout published
+to the retail hash. Against policy 16 at this cutoff, changed-code exactness
+rose 2/15→4/15, full-body exactness 0/15→2/15 and correct code gained
+1,320→1,792 bytes, with no known wrong or lost bytes. Both 96-byte tails are
+exact and `CImageInstruction` gains a correct 280-byte partial claim.
 The read-only scorer still gives the saved policy-16 run `20716-030131`
 byte-identical population, regression and per-unit score records under the
 schema-15 binary; legacy reports do not acquire known extents on load.

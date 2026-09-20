@@ -113,7 +113,7 @@ pub fn joint_runs(
         for (index, function) in functions.iter().enumerate() {
             if let Some(item) = observations
                 .at_target(MODULE, section, parse_address(&function.address).unwrap_or(0))
-                .filter(|item| item.independent)
+                .filter(|item| observations.ownership_independent(item))
             {
                 by_unit.entry(item.source.unit.clone()).or_default().push(index);
             }
@@ -203,7 +203,7 @@ pub fn joint_runs(
                 let function = &functions[left - 1];
                 if observations
                     .at_target(MODULE, section, parse_address(&function.address).unwrap_or(0))
-                    .is_some_and(|item| item.independent)
+                    .is_some_and(|item| observations.ownership_independent(item))
                 {
                     break;
                 }
@@ -213,7 +213,7 @@ pub fn joint_runs(
                 let function = &functions[right];
                 if observations
                     .at_target(MODULE, section, parse_address(&function.address).unwrap_or(0))
-                    .is_some_and(|item| item.independent)
+                    .is_some_and(|item| observations.ownership_independent(item))
                 {
                     break;
                 }
@@ -225,7 +225,10 @@ pub fn joint_runs(
                 let function = &functions[index];
                 observations
                     .at_target(MODULE, section, parse_address(&function.address).unwrap_or(0))
-                    .is_some_and(|item| item.independent && !names.contains(&item.source.unit))
+                    .is_some_and(|item| {
+                        observations.ownership_independent(item)
+                            && !names.contains(&item.source.unit)
+                    })
             };
             if (left > 0 && !outside(left - 1)) || (right < functions.len() && !outside(right)) {
                 continue;
@@ -243,7 +246,7 @@ pub fn joint_runs(
                         end: parse_address(&function.end).unwrap_or(0),
                         independent: observations
                             .at_target(MODULE, section, start)
-                            .filter(|item| item.independent)
+                            .filter(|item| observations.ownership_independent(item))
                             .map(|item| item.source.unit.clone()),
                     }
                 })
@@ -279,7 +282,9 @@ pub fn joint_runs(
                     .iter()
                     .filter_map(|piece| {
                         let item = observations.at_target(MODULE, section, piece.start)?;
-                        item.independent.then_some((piece.start, item.source.unit.as_str()))
+                        observations
+                            .ownership_independent(item)
+                            .then_some((piece.start, item.source.unit.as_str()))
                     })
                     .all(|(address, unit)| {
                         target_blocks.get(unit).is_some_and(|body| {
@@ -387,7 +392,7 @@ pub fn joint_runs(
             let evidence: Vec<String> = pieces
                 .iter()
                 .filter_map(|piece| observations.at_target(MODULE, section, piece.start))
-                .filter(|item| item.independent)
+                .filter(|item| observations.ownership_independent(item))
                 .map(|item| item.id.clone())
                 .collect();
             let transaction =
@@ -463,7 +468,9 @@ pub fn joint_runs(
                 anchors: pieces
                     .iter()
                     .filter_map(|piece| observations.at_target(MODULE, section, piece.start))
-                    .filter(|item| item.independent && item.source.unit == *root)
+                    .filter(|item| {
+                        observations.ownership_independent(item) && item.source.unit == *root
+                    })
                     .map(|item| {
                         serde_json::json!({
                             "section": section,

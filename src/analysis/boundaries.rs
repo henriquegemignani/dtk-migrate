@@ -124,12 +124,16 @@ pub fn judge(
         Some(function) => {
             let start = parse(&function.address);
             match observations.at_target(module, section, start) {
-                Some(item) if item.source.unit == unit && item.independent => EdgeParty {
-                    party: Party::IndependentMember,
-                    function: Some(function.address.clone()),
-                    attribution_id: Some(item.id.clone()),
-                    unit: Some(item.source.unit.clone()),
-                },
+                Some(item)
+                    if item.source.unit == unit && observations.ownership_independent(item) =>
+                {
+                    EdgeParty {
+                        party: Party::IndependentMember,
+                        function: Some(function.address.clone()),
+                        attribution_id: Some(item.id.clone()),
+                        unit: Some(item.source.unit.clone()),
+                    }
+                }
                 Some(item) => EdgeParty {
                     party: Party::Unsupported,
                     function: Some(function.address.clone()),
@@ -147,12 +151,14 @@ pub fn judge(
         _ if straddles => party(Party::Unsupported, None),
         None => party(Party::SectionBoundary, None),
         Some(function) => match observations.at_target(module, section, parse(&function.address)) {
-            Some(item) if item.source.unit != unit && item.independent => EdgeParty {
-                party: Party::ForeignIndependent,
-                function: Some(function.address.clone()),
-                attribution_id: Some(item.id.clone()),
-                unit: Some(item.source.unit.clone()),
-            },
+            Some(item) if item.source.unit != unit && observations.ownership_independent(item) => {
+                EdgeParty {
+                    party: Party::ForeignIndependent,
+                    function: Some(function.address.clone()),
+                    attribution_id: Some(item.id.clone()),
+                    unit: Some(item.source.unit.clone()),
+                }
+            }
             Some(item) => EdgeParty {
                 party: Party::Unsupported,
                 function: Some(function.address.clone()),
