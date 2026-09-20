@@ -36,6 +36,18 @@ verified benchmark at `target/gui-policy25-final-verified-score/` credits 1,184 
 code bytes, no wrong or lost bytes, and all 424 verified controls unchanged.
 The full TU remains partial because its `.rodata` and `.data` ranges are not
 claimed. The saved historical split was restored to SHA-256 `a59a122d…`.
+The focused `coverage,discover` follow-up (`20716-164943`) accepted the same
+code transaction and offered no discovery candidate for this unit. The
+discovery data report has no `CGuiFactories` range: its function-pair matcher
+does not receive the contextual pairs established by the ordered-run rule.
+The source's eight-byte read-only string and 16-byte data split correspond in
+content to the target addresses `0x803C1D88` and `0x803D4608` (the latter
+after replacing the destructor pointer), but the source vtable is weak and the
+string is pooled. Matching references and bytes do not prove which target
+object emitted either allocation. A follow-on data rule needs an emitted-owner
+certificate or equally discriminating binary/linker evidence, as well as a
+proof for the string's alignment byte; simply feeding the contextual pairs to
+the ordinary data matcher would bypass those ownership questions.
 All five frozen PAL calibration scenarios and the held-out GM8E01_02
 `everything` scenario have zero incorrect boundaries, wrong bytes or neighbour
 losses. Their summaries and every material per-unit record match policy 24;

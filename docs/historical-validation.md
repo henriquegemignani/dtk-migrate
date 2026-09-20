@@ -165,6 +165,17 @@ and held-out GM8E01_02 `everything` have zero incorrect boundaries or
 neighbour losses; after excluding content-addressed IDs and the new zero
 field, all per-unit records match policy 24.
 
+A focused `coverage,discover` rerun (`20716-164943`) confirmed the same code
+claim and retail hash, but discovery offered zero candidates for this unit.
+Its data evidence contains no `CGuiFactories` range because the ordinary data
+matcher only trusts independently confident function pairs. The contextual
+run's matching references point to the expected eight-byte read-only string
+and 16-byte vtable allocation; the source vtable is weak and the string is
+pooled, so those references and equal bytes alone do not settle PAL emission
+ownership. The verified score at `target/gui-policy25-discover-score/` has the
+same 1,184 correct code bytes and all 424 verified controls unchanged. The
+historical split was restored to SHA-256 `a59a122d…` after the run.
+
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven
