@@ -276,6 +276,15 @@ impl Alternative {
 }
 
 /// What a generator proposes, before it is a transaction.
+#[derive(Debug, Clone, Serialize)]
+struct Expansion {
+    unit: String,
+    section: String,
+    start: u32,
+    end: u32,
+}
+
+/// What a generator proposes, before it is a transaction.
 #[derive(Debug, Clone)]
 struct Draft {
     evidence: String,
@@ -285,6 +294,10 @@ struct Draft {
     end: u32,
     anchors: Vec<serde_json::Value>,
     owner_revisions: Vec<OwnerRevision>,
+    /// Another unit whose represented range must grow in the same atomic
+    /// transaction for a cross-unit boundary to be justified.
+    other_expansions: Vec<Expansion>,
+    other_required_extracts: Vec<crate::analysis::coverage::RequiredExtract>,
     /// For a composed claim, the families behind its left and right edges.
     /// Any other draft's edges are both its own.
     edge_families: Option<(Vec<String>, Vec<String>)>,
@@ -334,6 +347,8 @@ fn alternative(
         end,
         anchors,
         owner_revisions,
+        other_expansions: Vec::new(),
+        other_required_extracts: Vec::new(),
         edge_families: None,
     }
 }
@@ -485,7 +500,95 @@ pub fn assess_member(
     let member = transaction.member(unit)?;
     let before = section_ranges(member.before.as_deref().unwrap_or_default());
     let after = section_ranges(&member.after);
-    Some(observations.assess(unit, MODULE, &before, &after))
+    let mut assessment = observations.assess(unit, MODULE, &before, &after);
+    let boundaries = observations
+        .report()
+        .object_evidence
+        .as_ref()
+        .map(|evidence| evidence.compiled_boundaries.as_slice())
+        .unwrap_or(&[]);
+    for boundary in boundaries {
+        if (unit != boundary.left_unit && unit != boundary.right_unit)
+            || transaction.members.len() != 2
+        {
+            continue;
+        }
+        let (Some(left), Some(right)) =
+            (transaction.member(&boundary.left_unit), transaction.member(&boundary.right_unit))
+        else {
+            continue;
+        };
+        let ranges =
+            |lines: &[String]| section_ranges(lines).remove(&boundary.section).unwrap_or_default();
+        let left_before = ranges(left.before.as_deref().unwrap_or_default());
+        let right_before = ranges(right.before.as_deref().unwrap_or_default());
+        let left_after = ranges(&left.after);
+        let right_after = ranges(&right.after);
+        let extents: Option<Vec<_>> = boundary
+            .target_addresses
+            .iter()
+            .map(|address| {
+                observations
+                    .section_functions(MODULE, &boundary.section)
+                    .iter()
+                    .find(|function| &function.address == address)
+                    .and_then(|function| {
+                        Some((parse_address(&function.address)?, parse_address(&function.end)?))
+                    })
+            })
+            .collect();
+        let Some(extents) = extents else { continue };
+        let holds = |ranges: &[(u32, u32)], index: usize| {
+            ranges.iter().any(|&(start, end)| start <= extents[index].0 && extents[index].1 <= end)
+        };
+        if !(holds(&left_before, 0)
+            && holds(&left_before, 1)
+            && holds(&right_before, 5)
+            && (2..5).all(|index| !holds(&left_before, index) && !holds(&right_before, index))
+            && holds(&left_after, 2)
+            && !holds(&left_after, 3)
+            && !holds(&right_after, 2)
+            && holds(&right_after, 3)
+            && holds(&right_after, 4)
+            && holds(&right_after, 5))
+        {
+            continue;
+        }
+        let promoted = if unit == boundary.left_unit { &[2][..] } else { &[3, 4][..] };
+        let locations: Option<Vec<_>> = promoted
+            .iter()
+            .map(|&index| {
+                assessment.records.iter().position(|record| {
+                    !record.retained
+                        && record.section == boundary.section
+                        && parse_address(&record.start) == Some(extents[index].0)
+                        && parse_address(&record.end) == Some(extents[index].1)
+                        && matches!(
+                            record.class,
+                            ClaimClass::SharedHelper | ClaimClass::UnresolvedFunction
+                        )
+                })
+            })
+            .collect();
+        let Some(locations) = locations else { continue };
+        for position in locations {
+            match assessment.records[position].class {
+                ClaimClass::SharedHelper => assessment.new_shared_helpers -= 1,
+                ClaimClass::UnresolvedFunction => assessment.new_unresolved -= 1,
+                _ => unreachable!(),
+            }
+            assessment.records[position].class = ClaimClass::CompiledBoundaryMember;
+            assessment.new_compiled_boundary_members += 1;
+        }
+        assessment.complete_membership = (assessment.independent_members > 0
+            || assessment.new_compiled_boundary_members > 0)
+            && assessment.retained_questionable == 0
+            && assessment.new_shared_helpers == 0
+            && assessment.new_conflicts == 0
+            && assessment.new_unresolved == 0;
+        break;
+    }
+    Some(assessment)
 }
 
 /// Turns a draft into an offered alternative, or explains nothing and drops
@@ -496,6 +599,13 @@ fn finish(draft: Draft, setting: &Setting) -> Option<Alternative> {
     let existing = setting.blocks.get(unit).map(Vec::as_slice).unwrap_or_default();
     let lines = complete_body(existing, &draft.section, draft.start, draft.end)?;
     let mut changes = vec![(unit.to_string(), lines.clone())];
+    for expansion in &draft.other_expansions {
+        let prior = setting.blocks.get(&expansion.unit).map(Vec::as_slice).unwrap_or_default();
+        changes.push((
+            expansion.unit.clone(),
+            complete_body(prior, &expansion.section, expansion.start, expansion.end)?,
+        ));
+    }
     for revision in &draft.owner_revisions {
         changes.push((revision.unit.clone(), revised_body(setting.blocks, revision)?));
     }
@@ -540,7 +650,12 @@ fn finish(draft: Draft, setting: &Setting) -> Option<Alternative> {
         policy: setting.policy.clone(),
         observation_sha256: setting.observations.digest().to_string(),
         evidence,
-        required_extracts: setting.required_extracts.to_vec(),
+        required_extracts: setting
+            .required_extracts
+            .iter()
+            .cloned()
+            .chain(draft.other_required_extracts.iter().cloned())
+            .collect(),
         releases: Vec::new(),
     })
     .ok()?;
@@ -940,6 +1055,80 @@ pub fn build(
         attached_independent_members(unit, target_blocks, source_blocks, observations);
     sort_drafts(&mut attached);
 
+    let compiled_boundaries: Vec<Draft> = observations
+        .report()
+        .object_evidence
+        .as_ref()
+        .into_iter()
+        .flat_map(|evidence| &evidence.compiled_boundaries)
+        .filter(|boundary| boundary.left_unit == unit.name)
+        .filter_map(|boundary| {
+            let right = source_units.get(&boundary.right_unit)?;
+            if unit.autogenerated
+                || right.autogenerated
+                || !source_blocks.contains_key(&boundary.left_unit)
+                || !source_blocks.contains_key(&boundary.right_unit)
+                || !target_blocks.contains_key(&boundary.left_unit)
+                || !target_blocks.contains_key(&boundary.right_unit)
+            {
+                return None;
+            }
+            for (position, address) in boundary.source_addresses.iter().enumerate() {
+                let owner = if position <= 2 { &boundary.left_unit } else { &boundary.right_unit };
+                let function = observations.report().source_functions.iter().find(|item| {
+                    item.unit == *owner
+                        && item.section == boundary.section
+                        && item.address == *address
+                })?;
+                let (start, end) = (parse_address(address)?, parse_address(&function.end)?);
+                if !source_blocks.get(owner)?.iter().filter_map(|line| parse_range(line)).any(
+                    |range| {
+                        range.section == boundary.section
+                            && range.start <= start
+                            && end <= range.end
+                    },
+                ) {
+                    return None;
+                }
+            }
+            let left_start = parse_address(&boundary.target_addresses[2])?;
+            let boundary_start = parse_address(&boundary.target_addresses[3])?;
+            let right_end = parse_address(&boundary.target_addresses[5])?;
+            if overlaps_other(
+                &boundary.left_unit,
+                &boundary.section,
+                left_start,
+                boundary_start,
+                target_blocks,
+            ) || overlaps_other(
+                &boundary.right_unit,
+                &boundary.section,
+                boundary_start,
+                right_end,
+                target_blocks,
+            ) {
+                return None;
+            }
+            let mut draft = alternative(
+                &boundary.section,
+                left_start,
+                boundary_start,
+                vec![serde_json::to_value(boundary).ok()?],
+                "compiled-boundary",
+                Some(format!("{}|{}", boundary.left_unit, boundary.right_unit)),
+                Vec::new(),
+            );
+            draft.other_expansions.push(Expansion {
+                unit: boundary.right_unit.clone(),
+                section: boundary.section.clone(),
+                start: boundary_start,
+                end: right_end,
+            });
+            draft.other_required_extracts.extend(right.required_extracts.iter().cloned());
+            Some(draft)
+        })
+        .collect();
+
     let mut adjacent: Vec<Draft> = unit
         .adjacent_owner_transitions
         .iter()
@@ -982,6 +1171,7 @@ pub fn build(
 
     for item in composed
         .into_iter()
+        .chain(compiled_boundaries)
         .chain(complete)
         .chain(adjacent)
         .chain(sequences)
@@ -994,7 +1184,8 @@ pub fn build(
             item.section.clone(),
             item.start,
             item.end,
-            serde_json::to_string(&item.owner_revisions).unwrap_or_default(),
+            serde_json::to_string(&(&item.owner_revisions, &item.other_expansions))
+                .unwrap_or_default(),
         );
         if seen.insert(key) {
             drafts.push(item);
@@ -1168,6 +1359,8 @@ fn compositions<'a>(
             end: right,
             anchors,
             owner_revisions: Vec::new(),
+            other_expansions: Vec::new(),
+            other_required_extracts: Vec::new(),
             edge_families: Some((families(&lefts[&left]), families(&rights[&right]))),
         });
     }

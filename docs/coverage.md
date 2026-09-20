@@ -169,8 +169,23 @@ object has the only observed copy of a target body, the target copy is unique,
 relocation-site layouts agree, and the compiled name identifies exactly one
 source-version function. The bridge records weak status, current split owner,
 and whether the object inventory is complete. It supplies a missing function
-identity candidate, not emitted-owner proof; no ownership rule consumes it.
+identity candidate, not emitted-owner proof; no ownership rule consumes it alone.
 Older reports retain their canonical bytes without these bridges.
+
+Identification schema 19 rederives an ordered two-unit compiled boundary from
+the raw function, object and bridge inventories. It requires six contiguous
+functions in the same source and target order; the first two are already owned
+by the left unit, the last is independently attributed and owned by the right,
+and the three disputed functions are unowned. Clean compiled objects must
+match the functions on both sides in order, including relocation-site layouts;
+the weak left tail and first right member have unique bodies in every observed
+inventory. A changed source-version body may participate only through the
+schema-18 source–compiled–retail bridge. The record is rederived on load and
+does not assert a linker emitter in isolation. Coverage policy 20 can offer
+one transaction that assigns the whole seam to both units, after confirming
+that their source splits own every corresponding source function. The normal
+transaction, ownership-assessment, build and retail-hash gates still apply.
+Schema-18 reports remain readable without a boundary record or this route.
 
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At

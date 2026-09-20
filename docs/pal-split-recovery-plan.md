@@ -3,9 +3,10 @@
 Status: living implementation plan. A–F's safety and composition mechanisms,
 H's scoped code/data certificates and I's bounded retry and final-validation
 mechanisms are implemented. G's helper families, optional object evidence,
-source–compiled–retail bridges and unresolved clusters are diagnostic; a narrow destructor-emitter placement rule
-now participates in ownership decisions, while general emitted-owner and
-relocation-placement records do not yet drive ownership transactions. The
+source–compiled–retail bridges and unresolved clusters are diagnostic; narrow
+destructor and two-unit compiled-boundary placement rules now participate in
+ownership decisions, while general emitted-owner and relocation-placement
+records do not yet drive ownership transactions. The
 full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 positive emitted-owner proof, additional recall rules and independently
@@ -488,9 +489,32 @@ their class-specific compiled definitions; one compiled function is not weak.
 That later split is a comparison, not independent linker-emission proof. Of the
 49 unowned cases, five have the proposed later owner and 44 have no later
 assigned owner. This is why neither a unique body nor a non-weak compiled
-definition is an emitted-owner rule. The `BuildLight` bridge can be
-used as a member-identity input to a future joint placement rule, which must
-still resolve the Head/Light boundary and all competing emitters.
+definition is an emitted-owner rule. The `BuildLight` bridge can instead be
+used inside a joint placement rule that also resolves the Head/Light boundary.
+
+### Ordered compiled boundary (identification schema 19, coverage policy 20)
+
+The next rule uses a bridge only inside a complete two-unit seam. Its six
+functions are contiguous and have the same order in both binaries. The left
+unit already owns two preceding functions; the right already owns an
+independent following function. Clean compiled objects reproduce the bodies,
+relocation sites and relative order of all six target functions, including the
+left weak tail, the first right member and the changed-source `BuildLight`
+bridge. The two small disputed bodies are unique in the source, target and
+scanned compiled inventories. The rule checks that the source splits really
+own each corresponding source function and offers both resulting target bodies
+in one atomic transaction. It never uses class names or oracle addresses as
+selection criteria. A single-unit claim remains unsupported.
+
+On the frozen `b65ad2a6` NTSC→PAL checkout, the full schema-19 scan produced
+exactly one such seam. Focused run `20716-101118` accepted it, published only
+the HeadWidget/LightWidget `.text` changes and rebuilt PAL to retail SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. Against the later verified
+oracle, HeadWidget's full body and LightWidget's code are exact: 464 correct
+code bytes gained, zero known wrong or lost bytes. LightWidget still misses
+eight data bytes. This is a focused coverage-only trial, not a full historical
+migration or proof that a clean compiled object alone establishes its retail
+emitter. The later oracle was used only after the trial to score the result.
 
 ## Implementation checkpoint after Change F (joint runs)
 

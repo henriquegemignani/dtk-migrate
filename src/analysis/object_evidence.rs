@@ -30,6 +30,7 @@ use crate::{
         callgraph::{CallGraph, FunctionRef},
         helpers::body_digest,
         matching::MatchTarget,
+        object_boundary::CompiledBoundary,
         ownership::{FunctionAttribution, SourceFunctionObservation, TargetFunctionObservation},
     },
     project::{
@@ -338,6 +339,10 @@ pub struct ObjectEvidence {
     /// Derived from raw inventories on load, beginning with schema 18.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_bridges: Vec<CompiledSourceBridge>,
+    /// Two-unit ordered seam backed by clean compiled objects. Diagnostic:
+    /// it does not by itself identify which object the linker emitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compiled_boundaries: Vec<CompiledBoundary>,
 }
 
 impl ObjectEvidence {
@@ -360,6 +365,7 @@ impl ObjectEvidence {
             emitted_owners: Vec::new(),
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
+            compiled_boundaries: Vec::new(),
         }
     }
 
@@ -391,7 +397,8 @@ impl ObjectEvidence {
                 || !self.relocation_matches.is_empty()
                 || !self.emitted_owners.is_empty()
                 || !self.relocation_placements.is_empty()
-                || !self.source_bridges.is_empty())
+                || !self.source_bridges.is_empty()
+                || !self.compiled_boundaries.is_empty())
         {
             bail!("Unavailable compiled-object channel contains observations");
         }
@@ -927,6 +934,7 @@ pub fn inspect(
         emitted_owners: Vec::new(),
         relocation_placements: Vec::new(),
         source_bridges: Vec::new(),
+        compiled_boundaries: Vec::new(),
     };
     let mut seen = BTreeSet::new();
     for entry in config.units {
@@ -2395,6 +2403,7 @@ mod tests {
             emitted_owners: Vec::new(),
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
+            compiled_boundaries: Vec::new(),
         };
         let units = BTreeSet::from(["A.cpp".into(), "B.cpp".into()]);
         let targets = BTreeSet::from([body_hash]);
@@ -2491,6 +2500,7 @@ mod tests {
             emitted_owners: Vec::new(),
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
+            compiled_boundaries: Vec::new(),
         };
         evidence
             .canonicalize(
@@ -2615,6 +2625,7 @@ mod tests {
             emitted_owners: Vec::new(),
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
+            compiled_boundaries: Vec::new(),
         };
         let target = |address: &str, end: &str| TargetFunctionObservation {
             name: "helper".into(),

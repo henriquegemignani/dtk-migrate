@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 18;
+pub const IDENTIFICATION_SCHEMA: u32 = 19;
 #[derive(Clone, Copy)]
 enum DestructorPlacement {
     Unchecked,
@@ -552,6 +552,9 @@ pub enum ClaimClass {
     /// bounded by the unit's source-order neighbours. Its ordinal position is
     /// the unit's; see [`ObservationIndex::complete_sequence`].
     CompleteSequenceMember,
+    /// A member of a two-unit compiled boundary whose whole transaction
+    /// preserves both flanks and claims every function at the seam together.
+    CompiledBoundaryMember,
 }
 
 /// Where position places an unattributed function relative to a unit.
@@ -640,11 +643,13 @@ pub struct OwnershipAssessment {
     pub new_caller_confined_helpers: u32,
     #[serde(default)]
     pub new_complete_sequence_members: u32,
+    #[serde(default)]
+    pub new_compiled_boundary_members: u32,
 }
 
 impl OwnershipAssessment {
     pub fn permits_automatic_claim(&self) -> bool {
-        self.independent_members > 0
+        (self.independent_members > 0 || self.new_compiled_boundary_members > 0)
             && self.new_shared_helpers == 0
             && self.new_conflicts == 0
             && self.new_unresolved == 0
@@ -792,6 +797,14 @@ impl ObservationIndex {
                 .is_some_and(|evidence| !evidence.source_bridges.is_empty())
         {
             bail!("Identification schema {} cannot carry compiled-source bridges", report.schema);
+        }
+        if report.schema < 19
+            && report
+                .object_evidence
+                .as_ref()
+                .is_some_and(|evidence| !evidence.compiled_boundaries.is_empty())
+        {
+            bail!("Identification schema {} cannot carry compiled boundaries", report.schema);
         }
         if report.schema < 15 {
             // Old reports never measured this fact. Clear even a supplied flag
@@ -1090,6 +1103,15 @@ impl ObservationIndex {
                     &report.target_functions,
                     &report.attributions,
                 );
+            }
+            if report.schema >= 19 {
+                evidence.compiled_boundaries =
+                    crate::analysis::object_boundary::compiled_boundaries(
+                        evidence,
+                        &report.source_functions,
+                        &report.target_functions,
+                        &report.attributions,
+                    );
             }
         }
         // Schema 4+ aggregates are regenerated from canonical function facts.
@@ -1748,6 +1770,7 @@ impl ObservationIndex {
                         (false, ClaimClass::CompleteSequenceMember) => {
                             result.new_complete_sequence_members += 1;
                         }
+                        (false, ClaimClass::CompiledBoundaryMember) => unreachable!(),
                         (false, ClaimClass::Padding) => unreachable!(),
                     }
                     result.records.push(ClaimRecord {
@@ -3817,6 +3840,7 @@ mod tests {
             emitted_owners: Vec::new(),
             relocation_placements: Vec::new(),
             source_bridges: Vec::new(),
+            compiled_boundaries: Vec::new(),
         });
         let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
         let matches = &index.report().object_evidence.as_ref().unwrap().order_matches;

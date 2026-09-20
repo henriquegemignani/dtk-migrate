@@ -14,6 +14,7 @@ pub mod fingerprint;
 pub mod helpers;
 pub mod mask;
 pub mod matching;
+pub mod object_boundary;
 pub mod object_evidence;
 pub mod ownership;
 pub mod ownership_score;

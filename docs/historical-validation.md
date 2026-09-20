@@ -151,3 +151,18 @@ emitted-owner proof with complete competitor inventory, typed data/vtable/BSS
 ownership transfers, and insertion/deletion-aware member matching. None should
 turn a diagnostic family or orphan cluster into an owner by name, unique body
 or sole caller alone.
+
+Policy 20 adds a narrowly ordered, compiled two-unit boundary. Focused
+coverage-only NTSC→PAL run `20716-101118` started from `b65ad2a6`, offered one
+HeadWidget/LightWidget transaction, and published only their `.text` split
+changes. The rebuilt PAL DOL has retail SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. The later, independently
+verified `ca286f45` oracle was used afterward for scoring: HeadWidget is exact
+in code and full ownership, LightWidget is exact in code and misses eight data
+bytes. Together they gain 464 correct code bytes and lose or wrongly assign
+none. The matching record is one of 824 identified units in the old report; a
+single-unit HeadWidget extension still fails the ownership gate. The new
+baseline-specific manifest and score are retained on F: at
+`target/b65-policy20-verified-manifest.json` and
+`target/b65-policy20-head-light-score/score.json`. This focused run does not
+replace the full policy-16 or policy-17 migration results above.
