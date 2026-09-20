@@ -196,6 +196,26 @@ fn coverage_history_projection(
     Ok(projected)
 }
 
+/// Check each read against the ownership that existed when its transaction
+/// landed. A later coverage transaction may legitimately change a read unit;
+/// undoing that later write restores the earlier transaction's read state.
+fn validate_coverage_history(
+    final_blocks: &IndexMap<String, Vec<String>>,
+    transactions: &[&OwnershipTransaction],
+) -> Result<()> {
+    let mut blocks = coverage_history_projection(final_blocks, transactions)?;
+    for transaction in transactions.iter().rev() {
+        validate_read_dependencies(transaction, &blocks)?;
+        transaction.undo(&mut blocks).map_err(|error| {
+            ValidationError(format!(
+                "Coverage split changed after transaction {}: {error:#}",
+                transaction.id
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_evidence(
     mut evidence: CoverageReport,
     expected_units: &BTreeSet<String>,
@@ -848,10 +868,6 @@ impl Coverage {
         let transactions: Vec<&OwnershipTransaction> =
             records.iter().map(|record| &record.alternative.transaction).collect();
         let final_blocks = Splits::read(&splits_path(ctx))?.blocks;
-        for transaction in &transactions {
-            validate_read_dependencies(transaction, &final_blocks)?;
-        }
-        let mut blocks = coverage_history_projection(&final_blocks, &transactions)?;
         for (entry, record) in applied.iter().zip(&records).rev() {
             let index = observations.load(&record.observation, ctx)?;
             let required_for_unit = record.unit_extracts.get(&entry.unit).ok_or_else(|| {
@@ -873,14 +889,8 @@ impl Coverage {
                 )));
             }
             validate_certificate(&entry.unit, &record.observation, &record.alternative, index)?;
-            validate_read_dependencies(&record.alternative.transaction, &blocks)?;
-            record.alternative.transaction.undo(&mut blocks).map_err(|error| {
-                ValidationError(format!(
-                    "Coverage split for {} changed after selection: {error:#}",
-                    entry.unit
-                ))
-            })?;
         }
+        validate_coverage_history(&final_blocks, &transactions)?;
 
         let report = ctx.build(None)?;
         let written: BTreeSet<&str> = applied
@@ -1729,21 +1739,40 @@ pub fn markdown(value: &Summary) -> String {
         ));
     }
     lines.push(String::new());
-    lines.push("## Selected ranges".to_string());
+    lines.push("## Applied ownership".to_string());
     lines.push(String::new());
     if value.selected.is_empty() {
         lines.push("No range passed the coverage gates.".to_string());
     } else {
-        lines.push("| TU | Evidence | Section | Range | Bytes |".to_string());
-        lines.push("|---|---|---|---:|---:|".to_string());
+        lines.push(
+            "| TU | Evidence | Supporting range | Applied ranges | Gained bytes |".to_string(),
+        );
+        lines.push("|---|---|---|---|---:|".to_string());
         for (name, alternative) in &value.selected {
+            let applied = alternative
+                .lines
+                .iter()
+                .map(|line| {
+                    parse_range(line).map_or_else(
+                        || format!("`{}`", markdown_cell(line.trim())),
+                        |range| {
+                            format!(
+                                "`{} 0x{:08X}..0x{:08X}`",
+                                range.section, range.start, range.end
+                            )
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("<br>");
             lines.push(format!(
-                "| `{name}` | `{}` | `{}` | `{}..{}` | {} |",
+                "| `{name}` | `{}` | `{} {}..{}` | {} | {} |",
                 alternative.evidence,
                 alternative.section,
                 alternative.start,
                 alternative.end,
-                alternative.covered_bytes
+                applied,
+                alternative.gained_bytes
             ));
         }
     }
@@ -1967,6 +1996,40 @@ mod tests {
         final_blocks.get_mut("b.cpp").unwrap()[0] =
             "\t.text       start:0x00000200 end:0x00000320".into();
         assert!(validate_read_dependencies(&transaction, &final_blocks).is_err());
+    }
+
+    #[test]
+    fn later_coverage_write_to_a_read_neighbour_is_replayed_at_the_right_time() {
+        let original =
+            blocks(&[("a.cpp", 0x100, 0x200), ("b.cpp", 0x300, 0x400), ("c.cpp", 0x420, 0x500)]);
+        let mut final_blocks = original.clone();
+        let first = OwnershipTransaction::build(
+            &final_blocks,
+            [("a.cpp".into(), blocks(&[("a.cpp", 0x100, 0x300)])["a.cpp"].clone())],
+            Provenance { evidence: vec!["first-boundary".into()], ..Default::default() },
+        )
+        .unwrap();
+        assert!(first.reads.iter().any(|read| read.unit == "b.cpp"));
+        first.apply(&mut final_blocks).unwrap();
+        let second = OwnershipTransaction::build(
+            &final_blocks,
+            [("b.cpp".into(), blocks(&[("b.cpp", 0x300, 0x420)])["b.cpp"].clone())],
+            Provenance { evidence: vec!["second-boundary".into()], ..Default::default() },
+        )
+        .unwrap();
+        assert!(second.reads.iter().any(|read| read.unit == "c.cpp"));
+        second.apply(&mut final_blocks).unwrap();
+
+        // The first transaction read b's old body, which the second one
+        // legitimately superseded. Reverse replay must see the old body.
+        assert!(validate_read_dependencies(&first, &final_blocks).is_err());
+        validate_coverage_history(&final_blocks, &[&first, &second]).unwrap();
+
+        // A later stage changing a read-only neighbour still invalidates the
+        // certificate; no coverage transaction can rewind that change.
+        final_blocks.get_mut("c.cpp").unwrap()[0] =
+            "\t.text       start:0x00000420 end:0x00000520".into();
+        assert!(validate_coverage_history(&final_blocks, &[&first, &second]).is_err());
     }
 
     #[test]
@@ -2281,6 +2344,21 @@ mod tests {
         assert!(rendered.contains("0x80000100: OtherFn (other.cpp)"));
         assert!(rendered.contains("AbsentFn at 0x80000200"));
         assert!(rendered.contains("no target function is attributed"));
+    }
+
+    #[test]
+    fn selected_range_report_shows_the_full_applied_body() {
+        let alternative =
+            body(".text", 0x8000_0100, 0x8000_0200, vec![line(".text", 0x8000_0100, 0x8000_0300)]);
+        let selections = Selections::from([("a.cpp".to_string(), alternative.id.clone())]);
+        let summary = summarize(
+            &prepared_with(inventory_with(&[])),
+            &stage_result(vec![candidate_for("a.cpp", &alternative)], selections),
+        )
+        .unwrap();
+        let rendered = markdown(&summary);
+        assert!(rendered.contains("`.text 0x80000100..0x80000200`"));
+        assert!(rendered.contains("`.text 0x80000100..0x80000300`"));
     }
 
     fn observation_reference() -> ObservationReference {

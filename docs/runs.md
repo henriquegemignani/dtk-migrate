@@ -123,9 +123,11 @@ stage gate then runs again *there*, because a worker proved something in a copy.
 For coverage, final validation first checks that every code section and every
 data section coverage changed still agrees with its last accepted transaction.
 Data added later to an untouched section may remain in the final body. The
-validator then replays coverage's `applied` history backwards, checks the
-transaction's read dependencies in the sections it changed, and rechecks its
-evidence. A refinement cannot hide an earlier transaction's effect on a
+validator rechecks the evidence, then replays coverage's `applied` history
+backwards and checks each transaction's read dependencies against the split map
+at the moment it was accepted. A later coverage transaction may change a read
+neighbour; reverse replay restores its earlier state before checking the older
+transaction. A refinement cannot hide an earlier transaction's effect on a
 neighbour. Verification proves final source link inputs first; only units it
 actually source-links may supersede coverage's earlier extracted-input trial
 condition.
