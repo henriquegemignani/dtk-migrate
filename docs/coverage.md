@@ -108,8 +108,11 @@ their earlier meaning and have no target relocation inventory.
 
 Schema 9 records each object's configured compiler and flags from
 `objdiff.json`, the flags digest, the current `build.ninja` digest, and a
-read-only `ninja -n` freshness result. A clean result says that Ninja had no
-pending work for that compiled object at scan time. It does not certify the
+read-only `ninja -n` freshness result. Under policy 27, a clean result also
+requires a non-phony producing edge in `ninja -t targets all`; an orphaned
+object file can otherwise make `ninja -n` report no work despite having no
+current build rule. A clean result says that Ninja had no pending work for
+that compiled object at scan time. It does not certify the
 source commit that produced it or prove linker selection. The analyzed target
 section-byte digest is recorded separately. An in-process, one-entry cache for
 derived relocation relations is keyed by object inventory, target image,

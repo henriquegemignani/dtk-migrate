@@ -14,6 +14,24 @@ ownership transactions. The full historical NTSC→PAL runs and held-out diagnos
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
 
+### Policy 27: require a producing rule for clean compiled objects
+
+The frozen PAL checkout contains a leftover `CGuiFactories.o`, but its
+`configure.py` declares that TU only for the two NTSC versions. The current
+`build.ninja`, `objdiff.json` and `compile_commands.json` have no PAL rule or
+mapping for it. `ninja -n` on the existing file nevertheless reports no work,
+so a dry run alone cannot certify it as a current compiled object. The object
+scanner now checks `ninja -t targets all` for a non-phony producing rule before
+marking a mapped object clean. A test covers an orphaned object and phony
+alias. All 803 mapped main-DOL objects in this frozen checkout have producing
+rules, so this guard changes no current historical proposal. It prevents a
+future stale mapped file from entering the optional evidence channel.
+
+The missing PAL GUI factory mapping therefore remains a real limit of the
+current build configuration, not a case for reading the leftover object as
+evidence. Recovering its weak vtable owner still needs independent target
+placement and emitter evidence; this policy change makes no such claim.
+
 ### Data evidence schema 5: complete singleton ordinary BSS allocations
 
 The old PAL split for `CScriptSound.cpp` omitted its 24-byte ordinary `.bss`

@@ -746,7 +746,24 @@ pub fn target_image_digest(target: &MatchTarget) -> String {
 
 fn ninja_freshness(root: &Path, paths: &[String]) -> BTreeMap<String, BuildFreshness> {
     let mut result = BTreeMap::new();
-    for chunk in paths.chunks(64) {
+    if paths.is_empty() {
+        return result;
+    }
+    // Ninja accepts an existing file with no producing edge as an input and
+    // reports "no work to do". Such a leftover object is not a fresh build.
+    let Some(generated) = ninja_generated_targets(root) else {
+        return paths.iter().cloned().map(|path| (path, BuildFreshness::Unavailable)).collect();
+    };
+    let eligible: Vec<String> =
+        paths.iter().filter(|path| generated.contains(&build_path(path))).cloned().collect();
+    result.extend(
+        paths
+            .iter()
+            .filter(|path| !generated.contains(&build_path(path)))
+            .cloned()
+            .map(|path| (path, BuildFreshness::Unavailable)),
+    );
+    for chunk in eligible.chunks(64) {
         if dry_run(root, chunk) == BuildFreshness::Clean {
             result.extend(chunk.iter().cloned().map(|path| (path, BuildFreshness::Clean)));
         } else {
@@ -759,6 +776,22 @@ fn ninja_freshness(root: &Path, paths: &[String]) -> BTreeMap<String, BuildFresh
         }
     }
     result
+}
+
+fn ninja_generated_targets(root: &Path) -> Option<BTreeSet<String>> {
+    let output =
+        Command::new("ninja").args(["-t", "targets", "all"]).current_dir(root).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.rsplit_once(": "))
+            .filter(|(_, rule)| *rule != "phony")
+            .map(|(path, _)| build_path(path))
+            .collect(),
+    )
 }
 
 fn dry_run(root: &Path, paths: &[String]) -> BuildFreshness {
@@ -2431,7 +2464,7 @@ mod tests {
         let root = tempfile::tempdir_in(std::env::current_dir().unwrap().join("target")).unwrap();
         std::fs::write(
             root.path().join("build.ninja"),
-            "rule write\n  command = python -c \"open('$out','w').write('ok')\"\nbuild clean.o: write clean.in\nbuild dirty.o: write dirty.in\nbuild build/PAL/main.elf: write clean.o dirty.o external.a\n",
+            "rule write\n  command = python -c \"open('$out','w').write('ok')\"\nbuild clean.o: write clean.in\nbuild dirty.o: write dirty.in\nbuild alias.o: phony clean.o\nbuild all_source: phony orphan.o\nbuild build/PAL/main.elf: write clean.o dirty.o external.a\n",
         )
         .unwrap();
         std::fs::write(root.path().join("clean.in"), b"input").unwrap();
@@ -2444,9 +2477,18 @@ mod tests {
         assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
         assert!(root.path().join("dirty.o").exists(), "{}", String::from_utf8_lossy(&built.stdout));
         std::fs::remove_file(root.path().join("dirty.o")).unwrap();
-        let statuses = ninja_freshness(root.path(), &["clean.o".into(), "dirty.o".into()]);
+        std::fs::write(root.path().join("orphan.o"), b"old object").unwrap();
+        let statuses = ninja_freshness(root.path(), &[
+            "clean.o".into(),
+            "dirty.o".into(),
+            "orphan.o".into(),
+            "alias.o".into(),
+        ]);
         assert_eq!(statuses["clean.o"], BuildFreshness::Clean);
         assert_eq!(statuses["dirty.o"], BuildFreshness::Dirty);
+        assert_eq!(statuses["orphan.o"], BuildFreshness::Unavailable);
+        assert_eq!(statuses["alias.o"], BuildFreshness::Unavailable);
+        assert_eq!(dry_run(root.path(), &["orphan.o".into()]), BuildFreshness::Clean);
         assert_eq!(dry_run(root.path(), &["missing.o".into()]), BuildFreshness::Unavailable);
         assert_eq!(
             linked_object_inputs(root.path(), "PAL"),
