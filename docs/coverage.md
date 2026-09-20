@@ -565,6 +565,16 @@ Two things happen before a build is spent:
   a separately owned ordinary symbol. This supports the whole interval only;
   individual retail symbol sizes remain inferred. An unavailable or dirty
   object, incomplete inventory, or disputed boundary withholds the range.
+  Data evidence schema 4 also admits one narrow `.data` case: a held, nonweak
+  member followed immediately by a compiler-generated pointer table. Source
+  and target must have the same sequence of function-relative table entries,
+  each table must be referenced by the same unit's function, and a Ninja-clean
+  target-version object must contain exactly those two data members and one
+  relocation per entry to that function. A separately paired, nonweak next
+  data symbol fixes the right edge even if its unit has no split yet. Trials
+  and publication recheck any subsequently represented neighbour at that edge.
+  The certificate supports the complete allocation, not the inferred size of
+  either retail symbol in isolation.
 
 ## verify — whole source files
 

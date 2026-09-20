@@ -55,6 +55,7 @@ fn data_range(start: u32, end: u32, index: u32) -> DataRangeEvidence {
             target_common: None,
         }],
         compiled_ordinary_bss: None,
+        compiled_jump_table: None,
     }
 }
 

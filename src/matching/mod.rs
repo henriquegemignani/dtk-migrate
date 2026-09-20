@@ -270,9 +270,10 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
             &version(&request.source_config),
             &version(&request.target_config),
         );
-        evidence.add_compiled_bss(
+        evidence.add_compiled_allocations(
             source,
             target,
+            data_matches,
             identifications.object_evidence.as_ref(),
             object_root.as_ref().map(|(root, _)| root.as_path()),
         );

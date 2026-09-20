@@ -6,12 +6,37 @@ mechanisms are implemented. G's helper families, optional object evidence,
 source–compiled–retail bridges and unresolved clusters are diagnostic; narrow
 destructor, two-unit compiled-boundary, clean-object terminal-suffix,
 call-linked changed-tail, reference-placed head-prefix, bounded
-vtable-destructor and relocation-linked insertion rules now participate in ownership decisions,
-while general emitted-owner and relocation-placement records do not yet drive
+vtable-destructor and relocation-linked insertion rules now participate in
+ownership decisions, as does a clean-object jump-table allocation certificate.
+General emitted-owner and relocation-placement records do not yet drive
 ownership transactions. The full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Data evidence schema 4: a compiler-generated jump table after a held member
+
+The old PAL `CScriptSound.cpp` split held the first 108 bytes of its `.data`
+allocation and stopped before the 140-byte jump table used by `AcceptScriptMsg`.
+The source and retail tables each contain 35 pointers into that function with
+the same relative offsets. A Ninja-clean PAL object has exactly the held
+vtable and the table in `.data`, with 35 absolute relocations to its own
+`AcceptScriptMsg`. The source table ends where the next source unit begins;
+the target table ends at a separately paired nonweak symbol of that same next
+unit. This places the right edge without requiring the later PAL split or
+that next unit to be represented already. The matcher requires the complete
+source and compiled data inventories, exact function-relative entries, and
+the independent next-symbol pair before certifying the allocation.
+
+Focused discover run `20716-181506` on the F-drive historical checkout
+published `.data 0x803C9738–0x803C9830` and rebuilt to the retail SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. The verified score at
+`target/cscript-jumptable-schema4-verified-score/` records 156 correct data
+bytes gained, comprising the 140-byte jump table and a separate 16-byte
+`.sdata2` claim. It records zero wrong or lost bytes and leaves all 424
+verified controls unchanged. The unit remains full-body partial because its
+code tail was not accepted by discovery's matched-code-gain gate. The old
+checkout's split was restored to SHA-256 `a59a122d…` after the trial.
 
 ### Policy 26: a changed function at a call-linked terminal seam
 

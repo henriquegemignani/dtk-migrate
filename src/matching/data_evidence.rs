@@ -12,7 +12,8 @@ use std::{
 use anyhow::{Result, bail};
 use decomp_toolkit::{
     obj::{
-        ObjDataKind, ObjInfo, ObjSection, ObjSectionKind, ObjSymbol, ObjSymbolKind, SymbolIndex,
+        ObjDataKind, ObjInfo, ObjRelocKind, ObjSection, ObjSectionKind, ObjSymbol, ObjSymbolKind,
+        SymbolIndex,
     },
     util::elf::process_elf,
 };
@@ -32,7 +33,7 @@ use crate::{
     project::analyze::with_working_directory,
 };
 
-pub const SCHEMA: u32 = 3;
+pub const SCHEMA: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,6 +93,10 @@ pub struct DataRangeEvidence {
     /// object. It never makes an individual inferred symbol size exact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compiled_ordinary_bss: Option<CompiledOrdinaryBss>,
+    /// A compiler-generated pointer table placed after a held data member by
+    /// the same function in source, a clean target-version object and retail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiled_jump_table: Option<CompiledJumpTable>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +115,18 @@ pub struct CompiledDataSymbol {
     pub name: String,
     pub start: u32,
     pub end: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompiledJumpTable {
+    pub object_sha256: String,
+    pub compiled_size: u32,
+    pub table_offset: u32,
+    pub function_name: String,
+    pub entry_offsets: Vec<u32>,
+    pub next_unit: String,
+    pub next_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +230,10 @@ impl DataRangeEvidence {
         self.compiled_ordinary_bss.as_ref().is_some_and(|proof| proof.valid(self))
     }
 
+    pub fn jump_table_proven(&self) -> bool {
+        self.compiled_jump_table.as_ref().is_some_and(|proof| proof.valid(self))
+    }
+
     /// Linker mode when every member agrees or an entire ordinary allocation
     /// has a compiled-layout certificate. A missing `common` flag alone never
     /// establishes ordinary BSS.
@@ -294,7 +315,8 @@ impl DataRangeEvidence {
                 || !member.source_extent_known
                 || !member.target_extent_known
                 || (member.target_size_basis == DataSizeBasis::Inferred
-                    && !self.ordinary_bss_proven())
+                    && !self.ordinary_bss_proven()
+                    && !self.jump_table_proven())
                 || !member.source_wholly_owned
                 || member.source_weak
                 || member.target_weak
@@ -383,6 +405,39 @@ impl CompiledOrdinaryBss {
             }
         }
         named_anchors.len() >= 2
+    }
+}
+
+impl CompiledJumpTable {
+    fn valid(&self, range: &DataRangeEvidence) -> bool {
+        let [held, table] = range.members.as_slice() else { return false };
+        range.section == ".data"
+            && range.start < range.end
+            && self.object_sha256.len() == 64
+            && self.object_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && self.compiled_size == range.end - range.start
+            && held.target_end.checked_sub(range.start) == Some(self.table_offset)
+            && held.target_start == range.start
+            && held.target_owner.as_deref() == Some(range.unit.as_str())
+            && held.target_size_basis == DataSizeBasis::ExistingSplit
+            && table.target_start == held.target_end
+            && table.target_end == range.end
+            && table.target_owner.is_none()
+            && table.target_size_basis == DataSizeBasis::Inferred
+            && !held.source_weak
+            && !held.target_weak
+            && !table.source_weak
+            && !table.target_weak
+            && held.source_wholly_owned
+            && table.source_wholly_owned
+            && self.entry_offsets.len() >= 8
+            && self.entry_offsets.iter().collect::<BTreeSet<_>>().len() >= 3
+            && self.entry_offsets.len().checked_mul(4)
+                == table.target_end.checked_sub(table.target_start).map(|size| size as usize)
+            && !self.function_name.is_empty()
+            && !self.next_unit.is_empty()
+            && self.next_unit != range.unit
+            && !self.next_name.is_empty()
     }
 }
 
@@ -494,14 +549,257 @@ fn compiled_bss_witness(
     witness.valid(range).then_some(witness)
 }
 
+fn table_function_and_offsets(
+    image: &MatchTarget,
+    table_index: SymbolIndex,
+    unit: &str,
+) -> Option<(String, Vec<u32>)> {
+    let table = &image.obj.symbols[table_index];
+    let section = image.obj.sections.get(table.section?)?;
+    let bytes = section.symbol_data(table).ok()?;
+    if bytes.len() < 32 || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let referring: Vec<_> = image
+        .graph
+        .nodes
+        .iter()
+        .filter(|node| node.data_refs().any(|reference| reference.target_symbol == table_index))
+        .collect();
+    let [node] = referring.as_slice() else { return None };
+    let function = &image.obj.symbols[node.symbol];
+    let code = image.obj.sections.get(node.section)?;
+    let start = u32::try_from(function.address).ok()?;
+    let end = function.address.checked_add(function.size)?;
+    let (_, split) = code.splits.for_address(start)?;
+    if code.kind != ObjSectionKind::Code
+        || function.kind != ObjSymbolKind::Function
+        || !function.size_known
+        || function.flags.is_weak()
+        || split.unit != unit
+        || split.autogenerated
+        || end > u64::from(split.end)
+    {
+        return None;
+    }
+    let offsets = bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let pointer = u32::from_be_bytes(chunk.try_into().ok()?);
+            let offset = pointer.checked_sub(start)?;
+            (offset % 4 == 0 && u64::from(pointer) < end).then_some(offset)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((function.name.clone(), offsets))
+}
+
+fn compiled_jump_table_witness(
+    source: &MatchTarget,
+    target: &MatchTarget,
+    range: &DataRangeEvidence,
+    data_matches: &[DataMatch],
+    object: &ObjInfo,
+    object_sha256: &str,
+) -> Option<CompiledJumpTable> {
+    let [held, table] = range.members.as_slice() else { return None };
+    if range.section != ".data"
+        || held.target_owner.as_deref() != Some(range.unit.as_str())
+        || table.target_owner.is_some()
+        || table.target_size_basis != DataSizeBasis::Inferred
+        || held.target_end != table.target_start
+        || held.target_start != range.start
+        || table.target_end != range.end
+    {
+        return None;
+    }
+    let source_first = &source.obj.symbols[held.source_index];
+    let source_table = &source.obj.symbols[table.source_index];
+    let source_section_index = source_first.section?;
+    let source_section = source.obj.sections.get(source_section_index)?;
+    let source_start = u32::try_from(source_first.address).ok()?;
+    let (source_split_start, source_split) = source_section.splits.for_address(source_start)?;
+    if source_section.name != ".data"
+        || source_section.kind != ObjSectionKind::Data
+        || source_first.kind != ObjSymbolKind::Object
+        || source_table.kind != ObjSymbolKind::Object
+        || source_table.section != Some(source_section_index)
+        || source_split_start != source_start
+        || source_split.unit != range.unit
+        || source_split.common
+        || source_first.address.checked_add(source_first.size)? != source_table.address
+        || source_table.address.checked_add(source_table.size)? != u64::from(source_split.end)
+        || source.obj.symbols.iter().any(|(index, symbol)| {
+            symbol.section == Some(source_section_index)
+                && symbol.kind == ObjSymbolKind::Object
+                && symbol.address >= source_first.address
+                && symbol.address < u64::from(source_split.end)
+                && index != held.source_index
+                && index != table.source_index
+        })
+    {
+        return None;
+    }
+    let target_section_index = target.obj.symbols[held.target_index].section?;
+    let target_section = target.obj.sections.get(target_section_index)?;
+    let (held_start, held_split) = target_section.splits.for_address(range.start)?;
+    let (next_source_start, next_source_split) =
+        source_section.splits.for_address(source_split.end)?;
+    let next_source_symbols: Vec<_> = source
+        .obj
+        .symbols
+        .iter()
+        .filter(|(_, symbol)| {
+            symbol.section == Some(source_section_index)
+                && symbol.kind == ObjSymbolKind::Object
+                && symbol.address == u64::from(source_split.end)
+                && symbol.size_known
+                && symbol.size > 0
+                && !symbol.flags.is_weak()
+        })
+        .collect();
+    let next_target_symbols: Vec<_> = target
+        .obj
+        .symbols
+        .iter()
+        .filter(|(_, symbol)| {
+            symbol.section == Some(target_section_index)
+                && symbol.kind == ObjSymbolKind::Object
+                && symbol.address == u64::from(range.end)
+                && symbol.size_known
+                && symbol.size > 0
+                && !symbol.flags.is_weak()
+        })
+        .collect();
+    let ([(next_source_index, next_source)], [(next_target_index, next_target)]) =
+        (next_source_symbols.as_slice(), next_target_symbols.as_slice())
+    else {
+        return None;
+    };
+    if target_section.name != ".data"
+        || target_section.kind != ObjSectionKind::Data
+        || target.obj.symbols[table.target_index].section != Some(target_section_index)
+        || held_start != range.start
+        || held_split.end != held.target_end
+        || held_split.unit != range.unit
+        || held_split.common
+        || next_source_start != source_split.end
+        || next_source_split.unit == range.unit
+        || next_source_split.autogenerated
+        || next_source.name != next_target.name
+        || !data_matches.iter().any(|pair| {
+            pair.source == *next_source_index
+                && pair.target == *next_target_index
+                && pair.evidence >= 2
+        })
+        || target_section
+            .splits
+            .for_address(range.end)
+            .is_some_and(|(_, split)| split.unit == range.unit)
+        || target.obj.symbols.iter().any(|(index, symbol)| {
+            symbol.section == Some(target_section_index)
+                && symbol.kind == ObjSymbolKind::Object
+                && symbol.address >= u64::from(range.start)
+                && symbol.address < u64::from(range.end)
+                && index != held.target_index
+                && index != table.target_index
+        })
+    {
+        return None;
+    }
+    let (source_function, source_offsets) =
+        table_function_and_offsets(source, table.source_index, &range.unit)?;
+    let (target_function, target_offsets) =
+        table_function_and_offsets(target, table.target_index, &range.unit)?;
+    if source_function != target_function
+        || source_offsets != target_offsets
+        || source_offsets.iter().collect::<BTreeSet<_>>().len() < 3
+    {
+        return None;
+    }
+    let mut sections = object
+        .sections
+        .iter()
+        .filter(|(_, section)| section.name == ".data" && section.kind == ObjSectionKind::Data);
+    let (section_index, section) = sections.next()?;
+    if sections.next().is_some() || section.size != u64::from(range.end - range.start) {
+        return None;
+    }
+    let mut symbols: Vec<_> = object
+        .symbols
+        .iter()
+        .filter(|(_, symbol)| {
+            symbol.section == Some(section_index) && symbol.kind == ObjSymbolKind::Object
+        })
+        .collect();
+    symbols.sort_by_key(|(_, symbol)| symbol.address);
+    let [(_, compiled_held), (_, compiled_table)] = symbols.as_slice() else { return None };
+    let table_start = compiled_table.address.checked_sub(section.address)?;
+    if compiled_held.name != source_first.name
+        || compiled_held.name != target.obj.symbols[held.target_index].name
+        || compiled_held.address != section.address
+        || compiled_held.size != u64::from(held.target_end - held.target_start)
+        || table_start != compiled_held.size
+        || compiled_table.size != u64::from(table.target_end - table.target_start)
+        || compiled_table.address.checked_add(compiled_table.size)?
+            != section.address.checked_add(section.size)?
+        || [compiled_held, compiled_table]
+            .iter()
+            .any(|symbol| !symbol.size_known || symbol.flags.is_weak() || symbol.flags.is_common())
+    {
+        return None;
+    }
+    let compiled_functions: Vec<_> = object
+        .symbols
+        .iter()
+        .filter(|(_, symbol)| {
+            symbol.kind == ObjSymbolKind::Function
+                && symbol.name == source_function
+                && !symbol.flags.is_weak()
+                && symbol.size_known
+        })
+        .collect();
+    let [(function_index, compiled_function)] = compiled_functions.as_slice() else {
+        return None;
+    };
+    let compiled_start = u32::try_from(compiled_table.address).ok()?;
+    let compiled_end =
+        u32::try_from(compiled_table.address.checked_add(compiled_table.size)?).ok()?;
+    if section.relocations.range(compiled_start..compiled_end).count() != source_offsets.len() {
+        return None;
+    }
+    for (index, &offset) in source_offsets.iter().enumerate() {
+        let address = compiled_start.checked_add(u32::try_from(index.checked_mul(4)?).ok()?)?;
+        let relocation = section.relocations.at(address)?;
+        if relocation.kind != ObjRelocKind::Absolute
+            || relocation.target_symbol != *function_index
+            || relocation.module.is_some()
+            || relocation.addend != i64::from(offset)
+            || u64::from(offset) >= compiled_function.size
+        {
+            return None;
+        }
+    }
+    let witness = CompiledJumpTable {
+        object_sha256: object_sha256.to_string(),
+        compiled_size: u32::try_from(section.size).ok()?,
+        table_offset: u32::try_from(table_start).ok()?,
+        function_name: source_function,
+        entry_offsets: source_offsets,
+        next_unit: next_source_split.unit.clone(),
+        next_name: next_source.name.clone(),
+    };
+    witness.valid(range).then_some(witness)
+}
+
 impl DataEvidenceReport {
-    /// Corroborate an entire ordinary BSS allocation with the current,
+    /// Corroborate complete BSS or jump-table allocations with the current,
     /// Ninja-clean target-version object. A guessed retail member size never
     /// becomes a size witness: only the complete section layout can qualify.
-    pub fn add_compiled_bss(
+    pub fn add_compiled_allocations(
         &mut self,
         source: &MatchTarget,
         target: &MatchTarget,
+        data_matches: &[DataMatch],
         objects: Option<&ObjectEvidence>,
         root: Option<&Path>,
     ) {
@@ -512,14 +810,15 @@ impl DataEvidenceReport {
             return;
         }
         for range in &mut self.ranges {
-            if range.section != ".bss"
-                || range.members.len() < 2
-                || range.members.iter().any(|member| {
-                    member.target_common.is_some()
-                        || member.target_symbol_common
-                        || member.target_owner.is_some()
-                })
-            {
+            let ordinary_bss = range.section == ".bss"
+                && range.members.len() >= 2
+                && range.members.iter().all(|member| {
+                    member.target_common.is_none()
+                        && !member.target_symbol_common
+                        && member.target_owner.is_none()
+                });
+            let jump_table = range.section == ".data" && range.members.len() == 2;
+            if !ordinary_bss && !jump_table {
                 continue;
             }
             let mut records = objects.objects.iter().filter(|record| record.unit == range.unit);
@@ -546,13 +845,24 @@ impl DataEvidenceReport {
             if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
                 continue;
             }
-            range.compiled_ordinary_bss = compiled_bss_witness(
-                source,
-                target,
-                range,
-                &object,
-                record.sha256.as_deref().unwrap(),
-            );
+            if ordinary_bss {
+                range.compiled_ordinary_bss = compiled_bss_witness(
+                    source,
+                    target,
+                    range,
+                    &object,
+                    record.sha256.as_deref().unwrap(),
+                );
+            } else {
+                range.compiled_jump_table = compiled_jump_table_witness(
+                    source,
+                    target,
+                    range,
+                    data_matches,
+                    &object,
+                    record.sha256.as_deref().unwrap(),
+                );
+            }
         }
     }
 
@@ -676,6 +986,7 @@ impl DataEvidenceReport {
                 .unwrap_or(0),
                 members,
                 compiled_ordinary_bss: None,
+                compiled_jump_table: None,
             });
         }
         Self {
@@ -704,6 +1015,9 @@ impl DataEvidenceReport {
             }
             if range.compiled_ordinary_bss.is_some() && !range.ordinary_bss_proven() {
                 bail!("Data evidence contains an invalid compiled BSS certificate");
+            }
+            if range.compiled_jump_table.is_some() && !range.jump_table_proven() {
+                bail!("Data evidence contains an invalid compiled jump-table certificate");
             }
         }
         Ok(())
@@ -755,6 +1069,7 @@ mod tests {
                 member(2, "s_QueuedPlayers", 0x2094, 0x20f0),
             ],
             compiled_ordinary_bss: None,
+            compiled_jump_table: None,
         };
         assert!(!range.eligible());
         range.compiled_ordinary_bss = Some(CompiledOrdinaryBss {
@@ -792,6 +1107,67 @@ mod tests {
         let mut weak_anchor = range;
         weak_anchor.members[1].target_weak = true;
         assert!(!weak_anchor.eligible());
+    }
+
+    #[test]
+    fn an_inferred_jump_table_needs_the_complete_compiled_allocation() {
+        let member =
+            |index, name: &str, start, end, owner: Option<&str>, basis| DataMemberEvidence {
+                source_index: index,
+                target_index: index,
+                source_name: name.into(),
+                target_name: name.into(),
+                target_start: start,
+                target_end: end,
+                source_extent_known: true,
+                target_extent_known: true,
+                target_size_basis: basis,
+                source_wholly_owned: true,
+                source_weak: false,
+                target_weak: false,
+                target_symbol_common: false,
+                target_common_align: None,
+                target_common_align_basis: None,
+                reference_positions: 2,
+                target_owner: owner.map(str::to_owned),
+                target_common: None,
+            };
+        let mut range = DataRangeEvidence {
+            unit: "owner.cpp".into(),
+            section: ".data".into(),
+            start: 0x1000,
+            end: 0x10f8,
+            tier: UnitTier::Candidate,
+            reasons: vec![],
+            required_alignment: 4,
+            members: vec![
+                member(0, "vt", 0x1000, 0x106c, Some("owner.cpp"), DataSizeBasis::ExistingSplit),
+                member(1, "table", 0x106c, 0x10f8, None, DataSizeBasis::Inferred),
+            ],
+            compiled_ordinary_bss: None,
+            compiled_jump_table: None,
+        };
+        assert!(!range.eligible());
+        range.compiled_jump_table = Some(CompiledJumpTable {
+            object_sha256: "a".repeat(64),
+            compiled_size: 0xf8,
+            table_offset: 0x6c,
+            function_name: "dispatch".into(),
+            entry_offsets: (0..35).map(|index| (index % 7) * 4).collect(),
+            next_unit: "next.cpp".into(),
+            next_name: "next_vt".into(),
+        });
+        assert!(range.eligible());
+
+        let mut incomplete = range.clone();
+        incomplete.compiled_jump_table.as_mut().unwrap().entry_offsets.pop();
+        assert!(!incomplete.eligible());
+        let mut lost_prefix = range.clone();
+        lost_prefix.members[0].target_owner = None;
+        assert!(!lost_prefix.eligible());
+        let mut same_next_owner = range;
+        same_next_owner.compiled_jump_table.as_mut().unwrap().next_unit = "owner.cpp".into();
+        assert!(!same_next_owner.eligible());
     }
 
     fn target(name: &str, address: u32, owner: Option<&str>) -> MatchTarget {
