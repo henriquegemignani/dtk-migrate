@@ -270,6 +270,7 @@ pub fn report(source: &str, target: &str, units: Vec<CoverageUnit>) -> CoverageR
                 extent_known: true,
                 normalized_body_sha256: None,
                 weak: item.source_weak,
+                callers: Vec::new(),
             })
             .collect(),
         target_functions: layout

@@ -5,13 +5,46 @@ H's scoped code/data certificates and I's bounded retry and final-validation
 mechanisms are implemented. G's helper families, optional object evidence,
 source–compiled–retail bridges and unresolved clusters are diagnostic; narrow
 destructor, two-unit compiled-boundary, clean-object terminal-suffix,
-reference-placed head-prefix, bounded vtable-destructor and relocation-linked
-insertion rules now participate in ownership decisions,
+call-linked changed-tail, reference-placed head-prefix, bounded
+vtable-destructor and relocation-linked insertion rules now participate in ownership decisions,
 while general emitted-owner and relocation-placement records do not yet drive
 ownership transactions. The full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Policy 26: a changed function at a call-linked terminal seam
+
+The historical `Kyoto/Text/CImageInstruction.cpp` split stopped before
+`Invoke`, leaving its final `CalculateHeight` function unowned in PAL. The
+first two of the source unit's final three functions are independently paired;
+the first is held by the old split. The source binary calls the final function
+only from `Invoke`, and PAL has the same sole-caller relation between adjacent
+functions. A Ninja-clean PAL object contains the same named caller and final
+function with the source-version bodies and a direct call between them. The
+final source function ends exactly where the next source unit begins; the
+retail function ends before the next target function. The proposal requires
+all three source members in the source split and rechecks the full resulting
+ownership. Identification schema 23 records source callers; policy 26 places
+this complete claim ahead of its supported but shorter caller-only fallback.
+
+Focused F-drive run `20716-173913` offered the full claim first, extended
+`.text` from `0x80342F60` to `0x803430D4`, and published. The PAL DOL rebuilt
+to retail SHA-1 `4d3780c77842ae7fddbdd5732b70bed100df5c65`. Scored against
+the later verified oracle at `target/cimage-policy26-verified-score/`, the
+unit is exact in code and full body: 372 correct bytes gained, zero known
+wrong or lost bytes, and 424 verified controls unchanged. The old checkout's
+split was restored to its pretrial SHA-256 `a59a122d…`. This is a focused
+coverage result, not a new full historical migration.
+All five frozen PAL calibration scenarios completed with zero incorrect
+boundaries, wrong bytes or neighbour losses. Their `result.md` is byte-identical
+to policy 25, and all 2,257 per-unit records agree on the selected body,
+offer state, outcome and measured ownership; only evidence IDs and the new
+zero-valued field differ. These scenarios lack the clean historical compiled
+object, so they check collateral decisions rather than this rule's recall.
+The held-out GM8E01_00→GM8E01_02 `everything` scenario likewise has a
+byte-identical summary and all 816 material per-unit records unchanged, with
+zero incorrect boundaries, wrong bytes or neighbour losses.
 
 ### Policy 25: an inserted PAL function inside a vtable-linked source run
 

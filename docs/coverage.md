@@ -245,6 +245,22 @@ is built. The certificate applies only to the complete code range; a partial
 claim cannot borrow its proof. This rule needs identification schema 22 and
 does not infer ownership from a repeated helper body or vtable name alone.
 
+Identification schema 23 records source-binary callers. Coverage policy 26
+may extend a represented unit by one changed terminal function when its last
+three source functions are contiguous, the last has exactly the preceding
+member as caller, and the first two are independently attributed in order.
+The first target member must already be held; the unowned retail tail must
+immediately follow the paired caller, have that caller alone, and end before
+the next target function. A clean target-version object must contain one
+matching named caller and a globally unique named tail with the source-version
+normalized bodies and extents, plus a direct caller-to-tail relocation. The tail body must
+be unique in the retail inventory, and the following source function must
+belong to another unit. The source split must own all three source members.
+The complete resulting body is re-assessed and applied as one transaction;
+neither a source call nor an object symbol name alone grants ownership.
+Earlier identification schemas lack the source-caller observation and cannot
+use this route.
+
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At
 least one endpoint must be unique in both the observed objects and target.

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 25;
+pub const POLICY_VERSION: u32 = 26;
 pub const MIN_COMPILED_TERMINAL_MEMBERS: usize = 3;
 pub const MAX_COMPILED_TERMINAL_MEMBERS: usize = 8;
 pub const MIN_REFERENCE_PLACED_DATA_PAIRS: usize = 2;
@@ -214,6 +214,10 @@ pub struct CoveragePolicy {
     /// and retail order agree between a held predecessor and foreign bound.
     #[serde(default)]
     pub infer_compiled_terminal_suffixes: bool,
+    /// Admit a changed one-function tail only when source order, a clean
+    /// compiled internal call and the retail sole-caller relation agree.
+    #[serde(default)]
+    pub infer_compiled_call_linked_tails: bool,
     #[serde(default)]
     pub minimum_compiled_terminal_members: u32,
     #[serde(default)]
@@ -334,6 +338,7 @@ pub fn current_policy() -> CoveragePolicy {
         maximum_joint_search_states: MAX_JOINT_SEARCH_STATES as u32,
         infer_compiled_boundaries: true,
         infer_compiled_terminal_suffixes: true,
+        infer_compiled_call_linked_tails: true,
         minimum_compiled_terminal_members: MIN_COMPILED_TERMINAL_MEMBERS as u32,
         maximum_compiled_terminal_members: MAX_COMPILED_TERMINAL_MEMBERS as u32,
         veto_competing_source_slots: true,

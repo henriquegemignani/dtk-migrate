@@ -194,6 +194,7 @@ fn fixture() -> (
                 .unwrap()
                 .normalized_body_sha256
                 .clone(),
+            callers: Vec::new(),
             weak: false,
         })
         .collect();
@@ -246,6 +247,7 @@ fn a_compiled_body_bridges_a_changed_source_function_without_proving_its_emitter
         extent_known: true,
         normalized_body_sha256: Some("9".repeat(64)),
         weak: true,
+        callers: Vec::new(),
     });
     evidence.objects[1].functions[1].normalized_body_sha256 = Some("b".repeat(64));
     targets[4].normalized_body_sha256 = Some("b".repeat(64));

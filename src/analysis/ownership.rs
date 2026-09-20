@@ -23,6 +23,7 @@ use crate::analysis::{
     matching::{
         CONTESTED_MARGIN, Match, MatchMethod, MatchResult, MatchTarget, MatchTier, classify_tier,
     },
+    object_boundary::CompiledCallLinkedTail,
     object_evidence::{self, ObjectEvidence, TargetFunctionReferences},
     policy::{
         MAX_COMPOSED_PADDING_GAP, MAX_NEW_CALLER_CONFINED_HELPERS,
@@ -31,7 +32,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 22;
+pub const IDENTIFICATION_SCHEMA: u32 = 23;
 mod relocation_run;
 pub use relocation_run::RelocationLinkedRun;
 #[derive(Clone, Copy)]
@@ -541,6 +542,7 @@ pub struct ObservationIndex {
     reference_prefixes: Vec<ReferencePlacedPrefix>,
     vtable_heads: Vec<VtablePlacedHead>,
     relocation_runs: Vec<RelocationLinkedRun>,
+    compiled_call_tails: Vec<CompiledCallLinkedTail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -609,6 +611,11 @@ pub struct SourceFunctionObservation {
     pub normalized_body_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub weak: bool,
+    /// Source-binary callers, captured before matching. A clean compiled
+    /// object may corroborate this relation, but cannot substitute for it.
+    /// Introduced in schema 23.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub callers: Vec<CallerReference>,
 }
 
 fn is_false(value: &bool) -> bool { !*value }
@@ -651,6 +658,10 @@ pub enum ClaimClass {
     /// An ordered run with one target-only insertion, placed by both foreign
     /// seams and two corresponding references to its class vtable.
     RelocationLinkedRunMember,
+    /// A changed last function placed by corresponding internal calls in a
+    /// clean compiled object and the retail binary, bounded by a held and an
+    /// independently attributed predecessor.
+    CompiledCallLinkedTailMember,
 }
 
 /// Where position places an unattributed function relative to a unit.
@@ -749,6 +760,8 @@ pub struct OwnershipAssessment {
     pub new_vtable_placed_head_members: u32,
     #[serde(default)]
     pub new_relocation_linked_run_members: u32,
+    #[serde(default)]
+    pub new_compiled_call_linked_tail_members: u32,
 }
 
 impl OwnershipAssessment {
@@ -756,6 +769,7 @@ impl OwnershipAssessment {
         (self.independent_members > 0
             || self.new_compiled_boundary_members > 0
             || self.new_compiled_terminal_suffix_members > 0
+            || self.new_compiled_call_linked_tail_members > 0
             || self.new_reference_placed_prefix_members > 0
             || self.new_vtable_placed_head_members > 0)
             && self.new_shared_helpers == 0
@@ -983,6 +997,29 @@ impl ObservationIndex {
             if left.0 == right.0 && left.1 == right.1 && left.3 > right.2 {
                 bail!("Identification contains overlapping source function extents");
             }
+        }
+        let source_starts: BTreeSet<_> = source_functions
+            .iter()
+            .map(|(module, section, start, _, _)| (module.clone(), section.clone(), *start))
+            .collect();
+        for function in &mut report.source_functions {
+            if report.schema < 23 && !function.callers.is_empty() {
+                bail!("Identification schema {} cannot carry source callers", report.schema);
+            }
+            for caller in &mut function.callers {
+                let address =
+                    parse_address_checked(&caller.address, "source caller", &function.name)?;
+                if !source_starts.contains(&(
+                    function.module.clone(),
+                    caller.section.clone(),
+                    address,
+                )) {
+                    bail!("Source function {} has a caller outside the inventory", function.name);
+                }
+                caller.address = hex(address);
+            }
+            function.callers.sort();
+            function.callers.dedup();
         }
         let mut target_functions = BTreeSet::new();
         let mut target_owners = BTreeMap::new();
@@ -1433,10 +1470,22 @@ impl ObservationIndex {
             reference_prefixes: Vec::new(),
             vtable_heads: Vec::new(),
             relocation_runs: Vec::new(),
+            compiled_call_tails: Vec::new(),
         };
         index.reference_prefixes = index.derive_reference_placed_prefixes();
         index.vtable_heads = index.derive_vtable_placed_heads();
         index.relocation_runs = index.derive_relocation_linked_runs();
+        if index.report.schema >= 23
+            && let Some(evidence) = &index.report.object_evidence
+        {
+            index.compiled_call_tails =
+                crate::analysis::object_boundary::compiled_call_linked_tails(
+                    evidence,
+                    &index.report.source_functions,
+                    &index.report.target_functions,
+                    &index.report.attributions,
+                );
+        }
         Ok(index)
     }
 
@@ -1447,6 +1496,10 @@ impl ObservationIndex {
     pub fn vtable_placed_heads(&self) -> &[VtablePlacedHead] { &self.vtable_heads }
 
     pub fn relocation_linked_runs(&self) -> &[RelocationLinkedRun] { &self.relocation_runs }
+
+    pub fn compiled_call_linked_tails(&self) -> &[CompiledCallLinkedTail] {
+        &self.compiled_call_tails
+    }
 
     fn derive_reference_placed_prefixes(&self) -> Vec<ReferencePlacedPrefix> {
         if self.report.schema < 21 {
@@ -2409,6 +2462,7 @@ impl ObservationIndex {
                         }
                         (false, ClaimClass::CompiledBoundaryMember) => unreachable!(),
                         (false, ClaimClass::CompiledTerminalSuffixMember) => unreachable!(),
+                        (false, ClaimClass::CompiledCallLinkedTailMember) => unreachable!(),
                         (false, ClaimClass::ReferencePlacedPrefix) => unreachable!(),
                         (false, ClaimClass::VtablePlacedHeadMember) => unreachable!(),
                         (false, ClaimClass::Padding) => unreachable!(),
@@ -3146,6 +3200,18 @@ pub fn identify_units(
                     extent_known,
                     normalized_body_sha256: body_digest,
                     weak: source.obj.symbols[function.symbol].flags.is_weak(),
+                    callers: function
+                        .callers
+                        .iter()
+                        .filter_map(|&caller_index| {
+                            source.unit_of(caller_index)?;
+                            let caller = source.graph.node(caller_index);
+                            Some(CallerReference {
+                                section: source.obj.sections[caller.section].name.clone(),
+                                address: hex(caller.address),
+                            })
+                        })
+                        .collect(),
                 })
             })
             .collect(),
@@ -5203,6 +5269,7 @@ mod tests {
             extent_known: true,
             normalized_body_sha256: None,
             weak: false,
+            callers: Vec::new(),
         });
         for (start, end, callers) in [
             (0x2020, 0x2080, Vec::new()),

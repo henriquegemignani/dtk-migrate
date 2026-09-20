@@ -47,6 +47,23 @@ pub struct CompiledTerminalSuffix {
     pub object_sha256: String,
 }
 
+/// One changed terminal function placed by a clean compiled caller/callee
+/// relation and the same sole-caller relation in the retail binary. The
+/// independently identified predecessor and its held neighbour pin the run;
+/// neither a function name nor a sole caller on its own places the tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompiledCallLinkedTail {
+    pub unit: String,
+    pub section: String,
+    pub source_caller: String,
+    pub source_tail: String,
+    pub target_caller: String,
+    pub target_tail: String,
+    pub predecessor_attribution_id: String,
+    pub caller_attribution_id: String,
+    pub object_sha256: String,
+}
+
 fn address(text: &str) -> Option<u32> { u32::from_str_radix(text.strip_prefix("0x")?, 16).ok() }
 
 fn extent(start: &str, end: &str) -> Option<u32> { address(end)?.checked_sub(address(start)?) }
@@ -96,6 +113,210 @@ fn compiled_member<'a>(
         .collect();
     let [member] = matches.as_slice() else { return None };
     Some(member)
+}
+
+/// Recover a changed last function only when the source-version order, a
+/// clean target-version object's internal call, and the retail call topology
+/// independently select the same one-function tail. The compiled body need
+/// not match the retail body: this rule is for a version-changed function.
+pub fn compiled_call_linked_tails(
+    evidence: &ObjectEvidence,
+    source_functions: &[SourceFunctionObservation],
+    target_functions: &[TargetFunctionObservation],
+    attributions: &[FunctionAttribution],
+) -> Vec<CompiledCallLinkedTail> {
+    if evidence.status != super::object_evidence::ScanStatus::Scanned {
+        return Vec::new();
+    }
+    let mut source_by_unit: BTreeMap<(&str, &str), Vec<&SourceFunctionObservation>> =
+        BTreeMap::new();
+    for function in source_functions.iter().filter(|item| item.module == "main") {
+        source_by_unit.entry((&function.unit, &function.section)).or_default().push(function);
+    }
+    let mut target_by_section: BTreeMap<&str, Vec<&TargetFunctionObservation>> = BTreeMap::new();
+    for function in target_functions.iter().filter(|item| item.module == "main") {
+        target_by_section.entry(&function.section).or_default().push(function);
+    }
+    for functions in source_by_unit.values_mut() {
+        functions.sort_by_key(|item| address(&item.address));
+    }
+    for functions in target_by_section.values_mut() {
+        functions.sort_by_key(|item| address(&item.address));
+    }
+    let mut all_source_by_section: BTreeMap<&str, Vec<&SourceFunctionObservation>> =
+        BTreeMap::new();
+    for function in source_functions.iter().filter(|item| item.module == "main") {
+        all_source_by_section.entry(&function.section).or_default().push(function);
+    }
+    for functions in all_source_by_section.values_mut() {
+        functions.sort_by_key(|item| address(&item.address));
+    }
+    let mut result = Vec::new();
+    for ((unit, section), source) in source_by_unit {
+        if source.len() < 3 || source.iter().any(|item| !item.extent_known) {
+            continue;
+        }
+        let (before, caller, tail) =
+            (source[source.len() - 3], source[source.len() - 2], source[source.len() - 1]);
+        if !adjacent(&before.end, &caller.address)
+            || !adjacent(&caller.end, &tail.address)
+            || caller.weak
+            || tail.weak
+            || tail.callers.len() != 1
+            || tail.callers[0].section != section
+            || tail.callers[0].address != caller.address
+            || source_functions.iter().filter(|item| item.name == tail.name).count() != 1
+            || attributions.iter().any(|item| {
+                item.source.unit == unit
+                    && item.source.section == section
+                    && item.source.address == tail.address
+            })
+        {
+            continue;
+        }
+        let Some(source_next) = all_source_by_section
+            .get(section)
+            .and_then(|functions| functions.iter().find(|item| item.address == tail.end))
+        else {
+            continue;
+        };
+        if source_next.unit == unit {
+            continue;
+        }
+        let (Some(before_attr), Some(caller_attr)) = (
+            attributions
+                .iter()
+                .find(|item| item.source.unit == unit && item.source.address == before.address),
+            attributions
+                .iter()
+                .find(|item| item.source.unit == unit && item.source.address == caller.address),
+        ) else {
+            continue;
+        };
+        if [before_attr, caller_attr].iter().any(|item| {
+            item.source.module != "main"
+                || item.target.module != "main"
+                || !item.independent
+                || !item.binary_supported
+                || item.ambiguous
+                || item.source_weak
+                || item.target_weak
+                || item.target.section != section
+        }) {
+            continue;
+        }
+        let Some(target) = target_by_section.get(section) else { continue };
+        let Some(position) =
+            target.iter().position(|item| item.address == caller_attr.target.address)
+        else {
+            continue;
+        };
+        let (Some(previous), Some(target_caller), Some(target_tail), Some(next)) = (
+            position.checked_sub(1).and_then(|index| target.get(index)),
+            target.get(position),
+            target.get(position + 1),
+            target.get(position + 2),
+        ) else {
+            continue;
+        };
+        if previous.address != before_attr.target.address
+            || previous.current_owner.as_deref() != Some(unit)
+            || previous.owner_autogenerated
+            || !previous.extent_known
+            || !target_caller.extent_known
+            || target_caller.current_owner.as_deref().is_some_and(|owner| owner != unit)
+            || !target_tail.extent_known
+            || target_tail.weak
+            || target_tail.current_owner.is_some()
+            || target_tail.owner_autogenerated
+            || target_tail.callers.len() != 1
+            || target_tail.callers[0].section != section
+            || target_tail.callers[0].address != target_caller.address
+            || target_tail.normalized_body_sha256.as_deref().is_none_or(|hash| {
+                target_functions
+                    .iter()
+                    .filter(|item| item.normalized_body_sha256.as_deref() == Some(hash))
+                    .count()
+                    != 1
+            })
+            || !adjacent(&previous.end, &target_caller.address)
+            || !adjacent(&target_caller.end, &target_tail.address)
+            || !adjacent(&target_tail.end, &next.address)
+            || next.current_owner.as_deref() == Some(unit)
+            || attributions.iter().any(|item| {
+                item.target.section == section && item.target.address == target_tail.address
+            })
+        {
+            continue;
+        }
+        let records: Vec<_> = evidence.objects.iter().filter(|item| item.unit == unit).collect();
+        let [record] = records.as_slice() else { continue };
+        if record.status != ObjectStatus::Available
+            || record.build_freshness != BuildFreshness::Clean
+        {
+            continue;
+        }
+        let Some(object_sha256) = record.sha256.as_deref() else { continue };
+        let compiled_named: Vec<_> = evidence
+            .objects
+            .iter()
+            .flat_map(|item| &item.functions)
+            .filter(|item| item.name == tail.name)
+            .collect();
+        if compiled_named.len() != 1 {
+            continue;
+        }
+        let compiled_caller: Vec<_> = record
+            .functions
+            .iter()
+            .filter(|item| {
+                item.name == caller.name
+                    && item.section == section
+                    && caller.normalized_body_sha256.is_some()
+                    && item.normalized_body_sha256 == caller.normalized_body_sha256
+                    && extent(&item.address, &item.end) == extent(&caller.address, &caller.end)
+            })
+            .collect();
+        let compiled_tail: Vec<_> = record
+            .functions
+            .iter()
+            .filter(|item| {
+                item.name == tail.name
+                    && item.section == section
+                    && !item.weak
+                    && tail.normalized_body_sha256.is_some()
+                    && item.normalized_body_sha256 == tail.normalized_body_sha256
+                    && extent(&item.address, &item.end) == extent(&tail.address, &tail.end)
+            })
+            .collect();
+        let ([compiled_caller], [compiled_tail]) =
+            (compiled_caller.as_slice(), compiled_tail.as_slice())
+        else {
+            continue;
+        };
+        let Some(tail_address) = address(&compiled_tail.address) else { continue };
+        if !compiled_caller.references.iter().any(|reference| {
+            reference.kind == "PpcRel24"
+                && reference.target == tail.name
+                && reference.target_section.as_deref() == Some(section)
+                && reference.target_address == u64::from(tail_address)
+                && reference.addend == 0
+        }) {
+            continue;
+        }
+        result.push(CompiledCallLinkedTail {
+            unit: unit.into(),
+            section: section.into(),
+            source_caller: caller.address.clone(),
+            source_tail: tail.address.clone(),
+            target_caller: target_caller.address.clone(),
+            target_tail: target_tail.address.clone(),
+            predecessor_attribution_id: before_attr.id.clone(),
+            caller_attribution_id: caller_attr.id.clone(),
+            object_sha256: object_sha256.into(),
+        });
+    }
+    result
 }
 
 /// Derive a bounded suffix without using an oracle split or unit-specific
@@ -565,6 +786,7 @@ mod tests {
                 extent_known: true,
                 normalized_body_sha256: Some(if index == 4 { "f".repeat(64) } else { body(index) }),
                 weak: index == 2,
+                callers: Vec::new(),
             });
             targets.push(TargetFunctionObservation {
                 name: name.clone(),

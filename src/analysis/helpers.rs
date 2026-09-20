@@ -682,6 +682,7 @@ mod tests {
             extent_known: true,
             normalized_body_sha256: Some(hash.into()),
             weak: true,
+            callers: Vec::new(),
         }
     }
 

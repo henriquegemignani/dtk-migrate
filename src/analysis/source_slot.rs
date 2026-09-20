@@ -233,6 +233,7 @@ mod tests {
                     extent_known: true,
                     normalized_body_sha256: None,
                     weak: false,
+                    callers: Vec::new(),
                 })
                 .collect(),
             target_functions: [0x1000, 0x1010, 0x1020]
