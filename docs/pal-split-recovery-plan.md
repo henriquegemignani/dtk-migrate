@@ -7,12 +7,42 @@ source–compiled–retail bridges and unresolved clusters are diagnostic; narro
 destructor, two-unit compiled-boundary, clean-object terminal-suffix,
 call-linked changed-tail, reference-placed head-prefix, bounded
 vtable-destructor and relocation-linked insertion rules now participate in
-ownership decisions, as does a clean-object jump-table allocation certificate.
+ownership decisions, as do clean-object jump-table and singleton-BSS certificates.
 General emitted-owner and relocation-placement records do not yet drive
 ownership transactions. The full historical NTSC→PAL runs and held-out diagnostics are reported in
 [`historical-validation.md`](historical-validation.md). The remaining work is
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
+
+### Data evidence schema 5: complete singleton ordinary BSS allocations
+
+The old PAL split for `CScriptSound.cpp` omitted its 24-byte ordinary `.bss`
+allocation. A clean target-version object has exactly one explicitly sized
+24-byte BSS symbol; the source split owns that same complete allocation, and
+four confidently paired reference positions identify its retail counterpart.
+The source and target both place the same nonweak symbol of the same next unit
+at the right edge. A singleton lacks the two named anchors required by the
+older multi-symbol certificate, so this route additionally requires an exact
+compiled-section size and the corresponding named next-owner seam. It never
+changes a separate `common` allocation.
+
+Focused discover run `20716-183850` published `.bss 0x803F4390–0x803F43A8`
+together with the earlier jump-table and `.sdata2`
+claims, and rebuilt to the retail SHA-1. The verified score at
+`target/cscript-singleton-bss-schema5-verified-score/` records 180 correct
+data bytes gained, 24 more than schema 4, zero known wrong or lost bytes, and
+all 424 verified controls unchanged. The code tail remains unresolved.
+
+The same rule also identified `CTryclops.cpp`'s separate 24-byte ordinary BSS
+allocation. Focused run `20716-184842` published it while preserving that
+TU's existing 128-byte `common` BSS split, and passed the retail check. An
+independent `.sdata` claim added 16 more bytes. The later oracle leaves all
+40 bytes unassigned, so its benchmark at
+`target/ctryclops-singleton-bss-schema5-verified-score/` reports them as
+unknown, not proved correct: zero known wrong or lost bytes, with 424 verified
+controls unchanged. Both focused trials restored the old checkout's split to
+its saved SHA-256 `a59a122d…`. No full historical migration was rerun for
+this rule.
 
 ### Data evidence schema 4: a compiler-generated jump table after a held member
 

@@ -565,6 +565,12 @@ Two things happen before a build is spent:
   a separately owned ordinary symbol. This supports the whole interval only;
   individual retail symbol sizes remain inferred. An unavailable or dirty
   object, incomplete inventory, or disputed boundary withholds the range.
+  Data evidence schema 5 extends this complete-allocation route to a single
+  `.bss` member only when two or more confidently paired reference positions
+  place it, the clean object contains exactly one explicitly sized ordinary
+  BSS symbol whose allocation equals the proposed interval, and the source
+  and target each have the same separately owned, nonweak next symbol at the
+  right edge. Its unrelated `common` allocations remain separate.
   Data evidence schema 4 also admits one narrow `.data` case: a held, nonweak
   member followed immediately by a compiler-generated pointer table. Source
   and target must have the same sequence of function-relative table entries,
