@@ -10,15 +10,18 @@
 //!
 //! The four questions the tool keeps separate, weakest evidence first:
 //!
-//! 1. **Split coverage** — a target address range is assigned to a source file.
-//!    This says nothing about whether that file compiles or matches.
-//! 2. **Objdiff matched code** — bytes in functions a comparison calls matching.
-//!    A partly finished file still contributes.
-//! 3. **Configured source linkage** — the file is enabled in `configure.py`.
-//!    That is a build setting, not a measurement.
+//! 1. **Binary TU identification** — target functions are attributed to a
+//!    source translation unit, with competing explanations retained.
+//! 2. **Boundary recovery** — evidence supports both ends of a target range.
+//!    This alone does not make it safe to apply.
+//! 3. **Applied ownership** — a target range is assigned to a source file and
+//!    survives a build. This says nothing about whether that file compiles.
 //! 4. **Verified source linkage** — the compiled object is an actual input to
 //!    the linker and the resulting executable equals retail. This is the only
 //!    whole-file proof.
+//!
+//! Objdiff matched-code percentage is a separate function comparison;
+//! `configure.py` linkage is a build setting, not a measurement.
 
 pub mod analysis;
 pub mod build;

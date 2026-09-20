@@ -162,9 +162,10 @@ A worker failure stops the other lanes but keeps what they finished, so a resume
 run picks up from there.
 
 Resuming a run that already published does nothing and says so. A run written
-by a tool with a different run schema (currently 8, which also records typed
-trial refusals, their command-local evidence and retry counts) is refused rather
-than reinterpreted.
+by a tool with a different run schema (currently 9) is refused rather than
+reinterpreted. Schema 9 requires coverage's extract inventories and the stage's
+selection and applied-transaction history; missing safety data cannot silently
+be read as empty. The read-only benchmark retains a separate legacy adapter.
 
 ## Resource settings
 

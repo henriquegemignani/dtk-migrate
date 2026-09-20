@@ -272,7 +272,10 @@ fn resume(root: &Path, id: &str) -> Result<(RunDir, RunRecord)> {
     let record: RunRecord = crate::run::read_json(&dir.path.join("run.json"))
         .with_context(|| format!("No run {id} under {}", publish::runs_root(root).display()))?;
     if record.schema != SCHEMA {
-        bail!("Run {id} was written by a different version of this tool");
+        bail!(
+            "Run {id} uses schema {}, but this build requires schema {SCHEMA}; start a new run",
+            record.schema
+        );
     }
     Ok((dir, record))
 }

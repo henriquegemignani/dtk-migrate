@@ -467,7 +467,7 @@ struct OracleVerification {
     units: BTreeSet<String>,
 }
 
-fn supported_run_schema(schema: u32) -> bool { matches!(schema, 1..=8) }
+fn supported_run_schema(schema: u32) -> bool { matches!(schema, 1..=9) }
 
 const REVISION_BOUND_RUN_SCHEMA: u32 = 3;
 
@@ -576,7 +576,7 @@ fn validate_run_schemas(summary: u32, record: u32) -> Result<()> {
         bail!("Run schema differs between result.json ({summary}) and run.json ({record})")
     }
     if !supported_run_schema(summary) {
-        bail!("Run schema {summary} is unsupported; this scorer accepts only schemas 1 to 8")
+        bail!("Run schema {summary} is unsupported; this scorer accepts only schemas 1 to 9")
     }
     Ok(())
 }
@@ -3042,9 +3042,9 @@ mod tests {
 
     #[test]
     fn an_unknown_run_schema_is_not_read_as_a_known_one() {
-        let error = validate_run_schemas(9, 9).unwrap_err();
+        let error = validate_run_schemas(10, 10).unwrap_err();
         assert!(format!("{error:#}").contains("unsupported"));
-        for schema in 1..=8 {
+        for schema in 1..=9 {
             assert!(validate_run_schemas(schema, schema).is_ok(), "{schema}");
         }
         // The scorer has to follow the tool: a run this build writes must be

@@ -40,7 +40,7 @@ pub mod publish;
 
 /// Bumped when a run directory's layout changes, so an old one is not resumed
 /// by a tool that would misread it.
-pub const SCHEMA: u32 = 8;
+pub const SCHEMA: u32 = 9;
 
 /// The stages, in the only order they may run in.
 ///
@@ -175,12 +175,10 @@ pub struct StageResult {
     /// workers and coordinator rediscovery rounds. `accepted` deliberately
     /// keeps only the final candidate per unit; this history is what lets an
     /// audit answer whether an earlier proposal was already correct.
-    #[serde(default)]
     pub offered: Vec<Candidate>,
     pub accepted: Vec<Candidate>,
     pub deferred: Vec<Candidate>,
     /// Which alternative each accepted candidate was proved with.
-    #[serde(default)]
     pub selections: Selections,
     pub events: Vec<Event>,
     pub validation: String,
@@ -193,7 +191,6 @@ pub struct StageResult {
     pub eligible_excluded_by_only: Vec<String>,
     /// Every change integration applied, in order, including ones a later
     /// round superseded. What publication replays.
-    #[serde(default)]
     pub applied: Vec<crate::stages::Applied>,
     /// Coverage retry accounting across workers and coordinator rounds.
     #[serde(default)]
@@ -705,7 +702,6 @@ pub struct StoredPreparation {
     /// The `--only` names this stage accounted for: its candidate roots, the
     /// units their changes write, and names an earlier stage already changed.
     /// Stored so a resumed run checks the same thing the original did.
-    #[serde(default)]
     pub only_resolved: Vec<String>,
 }
 
@@ -894,5 +890,32 @@ mod tests {
         let derive_for_b = focus(&Derive, &[symbol_for_b], &only(&["B.cpp"]), &none()).unwrap();
         assert_eq!(derive_for_b.roots.len(), 1);
         assert_eq!(derive_for_b.resolved, BTreeSet::from(["B.cpp".into()]));
+    }
+
+    #[test]
+    fn current_stage_results_require_selection_and_application_history() {
+        let result = StageResult {
+            stage: "coverage".into(),
+            offered: Vec::new(),
+            accepted: Vec::new(),
+            deferred: Vec::new(),
+            selections: Selections::new(),
+            events: Vec::new(),
+            validation: String::new(),
+            dol_sha1: String::new(),
+            baseline: Default::default(),
+            final_measures: Default::default(),
+            reserved_by_earlier_stage: Vec::new(),
+            eligible_excluded_by_only: Vec::new(),
+            applied: Vec::new(),
+            retry: RetryCounts::default(),
+            seconds: 0.0,
+        };
+        let serialized = serde_json::to_value(result).unwrap();
+        for field in ["offered", "selections", "applied"] {
+            let mut missing = serialized.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<StageResult>(missing).is_err(), "{field}");
+        }
     }
 }

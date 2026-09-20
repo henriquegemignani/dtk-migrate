@@ -1139,6 +1139,17 @@ Separate schema versions from policy versions. Bump policy whenever acceptance s
 
 Update the stale policy-8 documentation, statements that represented units cannot be candidates, and wording implying a retail build settles ownership. Document the four distinct results: identification, boundary recovery, applied ownership and verified source linkage. Reports should link every identified but unresolved TU to its concrete blockers and competing hypotheses.
 
+**Step 9 checkpoint (run schema 9, policy 16):** current runs require the
+coverage proposal and applied-record extract inventories, stage selection and
+applied histories, the baseline ownership inventory, and the permission limits
+stored with preparation. Missing fields fail deserialization instead of
+defaulting to empty or unrestricted values. Resumption names the incompatible
+schema and asks for a new run; the benchmark's read-only legacy adapter still
+scores historical runs. Ownership transactions and address keys retain module
+and section identity. The coverage Markdown now prints competing explanations,
+missing members and unresolved helpers alongside boundary and application
+blockers. README and library guidance use the four results named above.
+
 ## Delivery order and review boundaries
 
 Each change should be reviewable and tested locally. The plan does not require one large rewrite before measuring progress.

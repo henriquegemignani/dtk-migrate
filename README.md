@@ -17,10 +17,13 @@ percentage would be read as the strongest of them.
 | | what it says | what it does not say |
 |---|---|---|
 | **Binary TU identification** | target functions are attributed to a source translation unit, with competing explanations retained | that both split edges are known or safe to apply |
-| **Split coverage** | a target range is assigned to a source file | that the file compiles, or matches |
-| **Objdiff matched code** | bytes in functions a comparison calls matching | that the file is finished |
-| **Configured source linkage** | the file is enabled in `configure.py` | anything measured; it is a build setting |
+| **Boundary recovery** | the evidence supports both ends of a target range | that the range can safely be applied |
+| **Applied ownership** | a target range is assigned to a source file and survives the build | that the file compiles, or matches |
 | **Verified source linkage** | the compiled object is a real linker input **and** the result equals retail | — this is the only whole-file proof |
+
+Objdiff matched-code percentage is a separate function comparison, and
+`configure.py` linkage is a build setting. Neither by itself proves source
+linkage.
 
 A retail hash with a candidate still linked from its extracted original does
 **not** prove that candidate's source is right. See

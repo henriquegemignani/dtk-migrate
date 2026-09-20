@@ -152,7 +152,6 @@ pub struct Prepared {
     #[serde(default)]
     pub extra: serde_json::Map<String, serde_json::Value>,
     /// What the run will let this stage touch, filled in after preparation.
-    #[serde(default)]
     pub permitted: Permitted,
 }
 
@@ -166,16 +165,12 @@ pub struct Prepared {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Permitted {
     /// Code owners reserved by an earlier stage.
-    #[serde(default)]
     pub reserved: BTreeSet<String>,
     /// Data owners reserved by an earlier stage.
-    #[serde(default)]
     pub reserved_data: BTreeSet<String>,
     /// Final source-link proofs cannot be changed without re-verification.
-    #[serde(default)]
     pub reserved_link: BTreeSet<String>,
     /// When a run was narrowed, the only names it may touch.
-    #[serde(default)]
     pub only: BTreeSet<String>,
 }
 
@@ -505,6 +500,31 @@ mod tests {
 
     fn candidates(names: &[&str]) -> Vec<Candidate> {
         names.iter().map(|n| Candidate::new(*n)).collect()
+    }
+
+    #[test]
+    fn stored_preparation_cannot_lose_permission_limits() {
+        let prepared = Prepared {
+            candidates: Vec::new(),
+            baseline: crate::project::report::Report {
+                measures: Default::default(),
+                units: Vec::new(),
+                rest: Default::default(),
+            },
+            events: Vec::new(),
+            extra: Default::default(),
+            permitted: Permitted { only: BTreeSet::from(["a.cpp".into()]), ..Default::default() },
+        };
+        let mut value = serde_json::to_value(prepared).unwrap();
+        value.as_object_mut().unwrap().remove("permitted");
+        assert!(serde_json::from_value::<Prepared>(value).is_err());
+
+        let value = serde_json::to_value(Permitted::default()).unwrap();
+        for field in ["reserved", "reserved_data", "reserved_link", "only"] {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Permitted>(missing).is_err(), "{field}");
+        }
     }
 
     fn names(candidates: &[Candidate]) -> Vec<&str> {

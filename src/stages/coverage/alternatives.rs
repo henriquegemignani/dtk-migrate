@@ -7,7 +7,8 @@
 //!
 //! This decides that. Each *alternative* is one complete way a unit could claim
 //! a target range, with the evidence behind it. A unit may have several, tried
-//! strongest first, and the build settles which — if any — is right.
+//! strongest first. The build tests whether a claim can be applied without
+//! changing retail bytes; the evidence, not the build, supports ownership.
 //!
 //! Everything here re-derives what the evidence asserts rather than trusting
 //! it. That looks redundant when both sides are the same program, and it is not

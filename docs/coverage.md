@@ -34,12 +34,15 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 15, evidence schema 11, identification schema 14. Every threshold
+Policy version 16, evidence schema 11, identification schema 14. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
 strongest first until one survives a build. Every alternative is one
 [ownership transaction](#ownership-transactions) over all the units it changes.
+Policy 16 requires an extract inventory for every unit a transaction writes;
+missing inventory data stops a current run rather than meaning that no extract
+is required.
 
 The evidence also carries the complete `match --identifications` inventory.
 Function attribution and TU identification are observations made before byte
