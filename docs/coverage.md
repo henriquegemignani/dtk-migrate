@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 19, evidence schema 11, identification schema 17. Every threshold
+Policy version 19, evidence schema 11, identification schema 18. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -164,6 +164,13 @@ the destructor from the source-function inventory.
 Schema 17 records two additional source-and-target-order placement routes for
 destructors. Schema-16 edge diagnostics retain their previous meaning when
 loaded; current ownership policy checks each proposed claim again.
+Schema 18 records source–compiled–retail function bridges when a clean compiled
+object has the only observed copy of a target body, the target copy is unique,
+relocation-site layouts agree, and the compiled name identifies exactly one
+source-version function. The bridge records weak status, current split owner,
+and whether the object inventory is complete. It supplies a missing function
+identity candidate, not emitted-owner proof; no ownership rule consumes it.
+Older reports retain their canonical bytes without these bridges.
 
 Relocation placements compare every reference site in each identical body:
 offset, kind, addend and the normalized body of the referenced function. At

@@ -191,6 +191,13 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
             &identifications.target_functions,
             &identifications.attributions,
         );
+        evidence.source_bridges = object_evidence::compiled_source_bridges(
+            &evidence,
+            &units,
+            &identifications.source_functions,
+            &identifications.target_functions,
+            &identifications.attributions,
+        );
         identifications.object_evidence = Some(evidence);
         let compiled = &identifications.object_evidence.as_ref().unwrap().definitions;
         identifications.helper_families = crate::analysis::helpers::families_with_inventory(

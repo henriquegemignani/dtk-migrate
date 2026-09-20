@@ -28,7 +28,7 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 17;
+pub const IDENTIFICATION_SCHEMA: u32 = 18;
 #[derive(Clone, Copy)]
 enum DestructorPlacement {
     Unchecked,
@@ -785,6 +785,14 @@ impl ObservationIndex {
         {
             bail!("Identification schema {} cannot carry external compiled objects", report.schema);
         }
+        if report.schema < 18
+            && report
+                .object_evidence
+                .as_ref()
+                .is_some_and(|evidence| !evidence.source_bridges.is_empty())
+        {
+            bail!("Identification schema {} cannot carry compiled-source bridges", report.schema);
+        }
         if report.schema < 15 {
             // Old reports never measured this fact. Clear even a supplied flag
             // so an old-schema artifact cannot certify a new split edge.
@@ -1073,6 +1081,15 @@ impl ObservationIndex {
                         &report.target_functions,
                         &report.attributions,
                     );
+            }
+            if report.schema >= 18 {
+                evidence.source_bridges = crate::analysis::object_evidence::compiled_source_bridges(
+                    evidence,
+                    expected_units,
+                    &report.source_functions,
+                    &report.target_functions,
+                    &report.attributions,
+                );
             }
         }
         // Schema 4+ aggregates are regenerated from canonical function facts.
@@ -3799,6 +3816,7 @@ mod tests {
             relocation_matches: Vec::new(),
             emitted_owners: Vec::new(),
             relocation_placements: Vec::new(),
+            source_bridges: Vec::new(),
         });
         let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
         let matches = &index.report().object_evidence.as_ref().unwrap().order_matches;

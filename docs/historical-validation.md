@@ -82,12 +82,23 @@ the other held-out scenarios are not scored here.
 The first score has 805 unit ledgers: zero lost bytes and zero newly wrong
 known bytes in complete ownership. It also records **26,608 bytes accepted
 where the later oracle assigns no owner**. Those bytes are unknown, not proven
-correct. Every oracle unit has `trust=unverified`: no independent verify run
-proved the oracle revision, and the benchmark's proven-control and
-source-linked populations are both empty. The no-regression result therefore
-means no damage against *known later split ownership*, not build-verified
-ownership correctness. The full score's changed-code remainder is 7,540
-missed bytes; changed-full remainder is 8,699.
+correct. Its original manifest marked every unit `trust=unverified`, since no
+independent verify run had yet proved the oracle revision. The full score's
+changed-code remainder is 7,540 missed bytes; changed-full remainder is 8,699.
+
+A later verify-only run at the clean `ca286f45` checkout (`20716-090512`)
+rebuilt PAL to the retail hash and checked actual compiled linker inputs for
+the already declared source-linked units. Its one new candidate failed the
+hash and was deferred; the run published no file changes. The benchmark now
+accepts Git's deterministic LF↔CRLF checkout conversion and the verify stage's
+deterministic legacy-status rendering when binding that run to the oracle Git
+blobs. The resulting manifest at `target/midcut-policy19-verified-manifest.json`
+marks 452 of 805 units source-linked and leaves 353 unverified. Rescoring the
+full policy-17 migration at `target/attached-policy17-verified-score/` preserves
+all 805 non-trust unit results byte-for-byte: 4/15 changed-code exact, 1,792
+correct code bytes gained, zero lost or newly wrong bytes, and no verified
+control regression. The remaining unverified splits and unassigned bytes are
+still unknown rather than proven correct.
 
 ## Named gaps at the older cutoff
 

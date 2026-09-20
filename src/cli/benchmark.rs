@@ -522,13 +522,33 @@ fn oracle_verification(run: &Path, oracle: &OracleInputs<'_>) -> Result<OracleVe
         bail!("Oracle verification run was not published")
     }
 
+    // Git may check an LF blob out with CRLF, and Verify::prepare may fold a
+    // legacy override block into ordinary Object statuses. Both transforms
+    // are deterministic from the oracle blob. Permit only their byte-exact
+    // outputs, never a free-form changed configure.py from the checkout.
+    let lf_configure = oracle.configure.replace("\r\n", "\n");
+    let mut permitted_configure = BTreeSet::new();
+    for checkout_text in
+        [oracle.configure.to_string(), lf_configure.clone(), lf_configure.replace('\n', "\r\n")]
+    {
+        permitted_configure.insert(digest(checkout_text.as_bytes()));
+        if let Ok(rendered) = Configure::parse(&checkout_text)
+            .and_then(|configure| configure.render(oracle.target, &BTreeSet::new()))
+        {
+            permitted_configure.insert(digest(rendered.as_bytes()));
+        }
+    }
+    let observed_configure = record.owner.manifest.get("configure.py");
+    if !observed_configure.is_some_and(|digest| permitted_configure.contains(digest)) {
+        bail!("Oracle verification run did not freeze the manifest's exact configure.py")
+    }
     let expected_inputs = [
-        ("configure.py".to_string(), digest(oracle.configure.as_bytes())),
-        (format!("config/{}/splits.txt", oracle.target), digest(oracle.splits.as_bytes())),
-        (format!("config/{}/config.yml", oracle.target), digest(oracle.config.as_bytes())),
+        (format!("config/{}/splits.txt", oracle.target), oracle.splits),
+        (format!("config/{}/config.yml", oracle.target), oracle.config),
     ];
-    for (path, expected) in expected_inputs {
-        if record.owner.manifest.get(&path) != Some(&expected) {
+    for (path, blob) in expected_inputs {
+        let permitted = checkout_digests(blob);
+        if !record.owner.manifest.get(&path).is_some_and(|digest| permitted.contains(digest)) {
             bail!("Oracle verification run did not freeze the manifest's exact {path}")
         }
     }
@@ -556,6 +576,17 @@ fn oracle_verification(run: &Path, oracle: &OracleInputs<'_>) -> Result<OracleVe
     let units =
         oracle.declared.iter().filter(|name| !unlinked.contains(name.as_str())).cloned().collect();
     Ok(OracleVerification { dol_sha1: stage.dol_sha1.clone(), units })
+}
+
+/// Git's checkout can translate text blobs between LF and CRLF without making
+/// the repository dirty. These are the only byte forms allowed for a frozen
+/// project input; content edits still change every permitted digest.
+fn checkout_digests(blob: &str) -> BTreeSet<String> {
+    let lf = blob.replace("\r\n", "\n");
+    [blob.to_string(), lf.clone(), lf.replace('\n', "\r\n")]
+        .into_iter()
+        .map(|text| digest(text.as_bytes()))
+        .collect()
 }
 
 fn resolve_revision(root: &Path, revision: &str) -> Result<String> {
@@ -2973,8 +3004,86 @@ mod tests {
         .unwrap();
         assert_eq!(proof.units, declared);
 
-        let result_path = directory.path().join("result.json");
+        let legacy_configure = concat!(
+            "VERSIONS = [\"NTSC\", \"PAL\"]\n",
+            "objects = [Object(NonMatching, \"a.cpp\")]\n",
+            "# BEGIN AUTOMATED SOURCE VERIFICATION\n",
+            "# Version: PAL\n",
+            "if config.version == \"PAL\":\n",
+            "    _verified_source_units = {\"a.cpp\"}\n",
+            "    for _verified_lib in config.libs:\n",
+            "        for _verified_obj in _verified_lib['objects']:\n",
+            "            if _verified_obj.name in _verified_source_units:\n",
+            "                _verified_obj.completed = True\n",
+            "# END AUTOMATED SOURCE VERIFICATION\n",
+        );
+        let migrated =
+            Configure::parse(legacy_configure).unwrap().render("PAL", &BTreeSet::new()).unwrap();
         let run_path = directory.path().join("run.json");
+        let mut migrated_record: serde_json::Value = read_json(&run_path).unwrap();
+        migrated_record["owner"]["manifest"]["configure.py"] =
+            serde_json::json!(digest(migrated.as_bytes()));
+        std::fs::write(&run_path, serde_json::to_vec(&migrated_record).unwrap()).unwrap();
+        let migrated_proof = oracle_verification(directory.path(), &OracleInputs {
+            target: "PAL",
+            configure: legacy_configure,
+            splits,
+            config,
+            expected_dol_sha1: TEST_RETAIL,
+            declared: &declared,
+            commit: "oracle-commit",
+        })
+        .unwrap();
+        assert_eq!(migrated_proof.units, declared);
+        let checked_out = legacy_configure.replace('\n', "\r\n");
+        let migrated_crlf =
+            Configure::parse(&checked_out).unwrap().render("PAL", &BTreeSet::new()).unwrap();
+        migrated_record["owner"]["manifest"]["configure.py"] =
+            serde_json::json!(digest(migrated_crlf.as_bytes()));
+        std::fs::write(&run_path, serde_json::to_vec(&migrated_record).unwrap()).unwrap();
+        assert!(
+            oracle_verification(directory.path(), &OracleInputs {
+                target: "PAL",
+                configure: legacy_configure,
+                splits,
+                config,
+                expected_dol_sha1: TEST_RETAIL,
+                declared: &declared,
+                commit: "oracle-commit",
+            })
+            .is_ok()
+        );
+        migrated_record["owner"]["manifest"]["config/PAL/config.yml"] =
+            serde_json::json!(digest(config.replace('\n', "\r\n").as_bytes()));
+        std::fs::write(&run_path, serde_json::to_vec(&migrated_record).unwrap()).unwrap();
+        assert!(
+            oracle_verification(directory.path(), &OracleInputs {
+                target: "PAL",
+                configure: legacy_configure,
+                splits,
+                config,
+                expected_dol_sha1: TEST_RETAIL,
+                declared: &declared,
+                commit: "oracle-commit",
+            })
+            .is_ok()
+        );
+        std::fs::write(
+            &run_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 3,
+                "id": "proof",
+                "source": "NTSC",
+                "target": "PAL",
+                "stages": ["verify"],
+                "repository": { "head": "oracle-commit", "clean": true },
+                "owner": { "manifest": manifest },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let result_path = directory.path().join("result.json");
         let mut result: serde_json::Value = read_json(&result_path).unwrap();
         let mut record: serde_json::Value = read_json(&run_path).unwrap();
         result["schema"] = serde_json::json!(2);

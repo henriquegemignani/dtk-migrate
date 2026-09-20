@@ -18,6 +18,35 @@ use dtk_migrate::{
 use typed_path::Utf8NativePath;
 
 #[test]
+fn historical_pal_compiled_bridges_keep_emitted_ownership_separate() {
+    let Some(path) = std::env::var_os("DTK_MIGRATE_SCHEMA18_REPORT") else {
+        eprintln!("skipped: set DTK_MIGRATE_SCHEMA18_REPORT");
+        return;
+    };
+    let report: IdentificationReport =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(report.schema, 18);
+    let canonical =
+        ObservationIndex::load_self_contained(report.clone(), &report.source, &report.target)
+            .unwrap();
+    let saved = report.object_evidence.as_ref().unwrap();
+    let rebuilt = canonical.report().object_evidence.as_ref().unwrap();
+    assert_eq!(rebuilt.source_bridges, saved.source_bridges);
+    assert!(rebuilt.source_bridges.iter().any(|item| {
+        item.unit == "GuiSys/CGuiLight.cpp"
+            && item.source_name == "BuildLight__9CGuiLightCFv"
+            && item.target_address == "0x802AF85C"
+            && !item.compiled_weak
+    }));
+    assert!(rebuilt.source_bridges.iter().any(|item| {
+        item.unit != "MetroidPrime/TypesMatch.cpp"
+            && item.current_owner.as_deref() == Some("MetroidPrime/TypesMatch.cpp")
+            && !item.compiled_weak
+    }));
+    assert!(rebuilt.emitted_owners.is_empty());
+}
+
+#[test]
 fn historical_pal_report_identifies_collider_tail_from_caller() {
     let Some(path) = std::env::var_os("DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT") else {
         eprintln!("skipped: set DTK_MIGRATE_HISTORICAL_COMPLETE_REPORT");

@@ -2,8 +2,8 @@
 
 Status: living implementation plan. A–F's safety and composition mechanisms,
 H's scoped code/data certificates and I's bounded retry and final-validation
-mechanisms are implemented. G's helper families, optional object evidence and
-unresolved clusters are diagnostic; a narrow destructor-emitter placement rule
+mechanisms are implemented. G's helper families, optional object evidence,
+source–compiled–retail bridges and unresolved clusters are diagnostic; a narrow destructor-emitter placement rule
 now participates in ownership decisions, while general emitted-owner and
 relocation-placement records do not yet drive ownership transactions. The
 full historical NTSC→PAL runs and held-out diagnostics are reported in
@@ -459,6 +459,38 @@ objects omitted from the split inventory, then require a decisive owner before
 turning any tail hypothesis into a transaction. This diagnostic does not make
 the existing incomplete linker inventory complete. H's data-range and
 cross-stage certificate work remains separate.
+
+### Source–compiled–retail bridges (identification schema 18)
+
+The old `b65ad2a6` PAL split ends `CGuiHeadWidget` at `0x802AF844`, before its
+12-byte type-ID function. Its source binary and the clean PAL compiled object
+each have one matching body; the compiled function follows the destructor in
+the same order as the target. That still does not prove which object emitted a
+weak function. The next `CGuiLight` function, `BuildLight` at `0x802AF85C`,
+has the opposite problem: its source-version body changed, but its clean PAL
+compiled body matches the target exactly and its symbol name joins it to the
+source-version function. Binary-only identification missed that member.
+The frozen scan is saved at
+`target/b65-policy19-schema18-full-objects-identification.json`; the opt-in
+`historical_pal_compiled_bridges_keep_emitted_ownership_separate` test reloads
+and rederives its bridge inventory.
+
+Schema 18 records that three-way bridge only when the source name is unique,
+the compiled and target bodies are unique among observed functions, extents
+and relocation-site layouts agree, the object is Ninja-clean, and neither
+function is already paired elsewhere. It records weak status, current owner
+and inventory completeness separately. It does **not** grant emitted
+ownership or alter coverage policy 19. On the frozen F-drive `b65ad2a6`
+checkout, the full scan reports 268 bridges: 212 already held by their
+candidate unit, 49 currently unowned and seven held by `TypesMatch`. The later
+PAL split also assigns all seven foreign-owner cases to `TypesMatch`, despite
+their class-specific compiled definitions; one compiled function is not weak.
+That later split is a comparison, not independent linker-emission proof. Of the
+49 unowned cases, five have the proposed later owner and 44 have no later
+assigned owner. This is why neither a unique body nor a non-weak compiled
+definition is an emitted-owner rule. The `BuildLight` bridge can be
+used as a member-identity input to a future joint placement rule, which must
+still resolve the Head/Light boundary and all competing emitters.
 
 ## Implementation checkpoint after Change F (joint runs)
 
