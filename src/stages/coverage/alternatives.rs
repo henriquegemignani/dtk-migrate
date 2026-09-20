@@ -195,6 +195,28 @@ pub struct Alternative {
 }
 
 impl Alternative {
+    /// The work and local certificate a trial saw. A refreshed report may
+    /// change its global digest because another unit landed; that alone does
+    /// not justify repeating this build. A changed assessment for this unit or
+    /// a receiving neighbour does, even if the proposed split body is equal.
+    pub fn retry_key(&self) -> String {
+        let mut ownership = self.ownership.clone();
+        ownership.observation_sha256.clear();
+        let mut receivers = self.receiver_ownership.clone();
+        for assessment in receivers.values_mut() {
+            assessment.observation_sha256.clear();
+        }
+        let bytes = serde_json::to_vec(&(
+            self.transaction.retry_key(),
+            ownership,
+            receivers,
+            &self.boundaries,
+            &self.anchors,
+        ))
+        .expect("coverage retry certificate is serializable");
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
     /// An alternative for a hand-written complete body, derived against
     /// `blocks` but neither previewed nor certified. For tools and tests that
     /// need to apply a specific change the way a trial would.

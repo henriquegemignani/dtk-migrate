@@ -601,7 +601,7 @@ impl Stage for Coverage {
             let seen = tried.entry(candidate.name.clone()).or_default();
             let mut chosen: Option<&Alternative> = None;
             for alternative in ordered {
-                seen.insert(alternative.transaction.retry_key());
+                seen.insert(alternative.retry_key());
                 let restore = splits.clone();
                 let required = transaction_extracts(
                     &candidate.name,
@@ -1140,7 +1140,7 @@ fn untried(
 ) -> (Vec<Alternative>, usize) {
     let before = alternatives.len();
     if let Some(tried) = tried {
-        alternatives.retain(|alternative| !tried.contains(&alternative.transaction.retry_key()));
+        alternatives.retain(|alternative| !tried.contains(&alternative.retry_key()));
     }
     let skipped = before - alternatives.len();
     (alternatives, skipped)
@@ -2419,13 +2419,27 @@ mod tests {
             unit: "neighbour.cpp".into(),
             body: Some(vec![line(".text", 0x8000_0200, 0x8000_0300)]),
         });
-        let tried = BTreeSet::from([old.transaction.retry_key()]);
+        unrelated.ownership.observation_sha256 = "different-global-observation".into();
+        let tried = BTreeSet::from([old.retry_key()]);
         let (offered, skipped) =
             untried(vec![old.clone(), unrelated, repaired.clone()], Some(&tried));
         assert_eq!(offered.len(), 1);
         assert_eq!(skipped, 2);
         assert_eq!(offered[0].id, repaired.id);
         assert!(untried(vec![old], Some(&tried)).0.is_empty());
+    }
+
+    #[test]
+    fn rediscovery_retries_when_the_local_ownership_certificate_changes() {
+        let old =
+            body(".text", 0x8000_0100, 0x8000_0200, vec![line(".text", 0x8000_0100, 0x8000_0200)]);
+        let mut revised = old.clone();
+        revised.transaction.observation_sha256 = "new-report".into();
+        revised.ownership.observation_sha256 = "new-report".into();
+        revised.ownership.independent_members += 1;
+        let tried = BTreeSet::from([old.retry_key()]);
+        assert_ne!(old.retry_key(), revised.retry_key());
+        assert_eq!(untried(vec![revised], Some(&tried)).0.len(), 1);
     }
 
     #[test]

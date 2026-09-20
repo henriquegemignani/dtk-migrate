@@ -495,8 +495,14 @@ impl Stage for Discover {
         let reason = if ctx.only.is_empty() {
             match apply_renames(ctx, &mut symbols, &renames_path, &starting) {
                 Ok(None) => None,
-                Ok(Some(reason)) => Some(reason),
-                Err(error) if is_trial_failure(&error) => Some(format!("{error:#}")),
+                Ok(Some(reason)) => Some((reason, Refusal {
+                    kind: RefusalKind::MeasuredRegression,
+                    affected: Vec::new(),
+                    command: None,
+                })),
+                Err(error) if is_trial_failure(&error) => {
+                    Some((format!("{error:#}"), Refusal::from_error(&error)))
+                }
                 Err(error) => return Err(error),
             }
         } else {
@@ -504,7 +510,8 @@ impl Stage for Discover {
             // TU. The matcher's split proposals were generated before this
             // batch, so a focused run can still evaluate its requested unit
             // without publishing unrelated symbol changes.
-            let renames = std::fs::read_to_string(&renames_path).unwrap_or_default();
+            let renames = std::fs::read_to_string(&renames_path)
+                .with_context(|| format!("Failed to read {}", renames_path.display()))?;
             if renames
                 .lines()
                 .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
@@ -513,9 +520,9 @@ impl Stage for Discover {
             }
             None
         };
-        if let Some(reason) = reason {
+        if let Some((reason, refusal)) = reason {
             symbols.restore()?;
-            events.push(Event::new("", "rename-batch-reverted").because(reason));
+            events.push(Event::new("", "rename-batch-reverted").because(reason).refused(refusal));
         }
         symbols.commit();
 
@@ -728,7 +735,8 @@ fn apply_renames(
     renames: &std::path::Path,
     starting: &Report,
 ) -> Result<Option<String>> {
-    let text = std::fs::read_to_string(renames).unwrap_or_default();
+    let text = std::fs::read_to_string(renames)
+        .with_context(|| format!("Failed to read {}", renames.display()))?;
     if text.lines().all(|line| line.trim().is_empty() || line.trim_start().starts_with('#')) {
         return Ok(None);
     }

@@ -104,9 +104,11 @@ result.json             the whole run
 Rejected trial events record a typed `refusal`: its kind, affected symbol or unit
 names when recognizable, and the failed command's executable, arguments, log
 byte range, and bounded stdout/stderr excerpts. The full output remains in the
-job or integration `build.log`. Classification uses that command's output, so a
-later failure cannot inherit diagnostic text from an earlier trial in the same
-log. Unknown failures retain the command evidence without inventing a cause.
+job or integration `build.log`. Classification reads that command's full log
+byte range when available, including diagnostics between the bounded excerpts;
+if the log is unavailable it uses the excerpts. A later failure cannot inherit
+diagnostic text from an earlier trial in the same log. Unknown failures retain
+the command evidence without inventing a cause.
 
 ## Publication
 
@@ -203,4 +205,5 @@ compiled-object evidence names that unit, regardless of the old symbol's
 spelling; a same-spelling symbol in another unit does not satisfy the request.
 Discover skips its whole-executable matcher rename batch under `--only`; its
 split candidates were generated before that batch, and a focused run must not
-publish symbol changes outside the requested unit.
+publish symbol changes outside the requested unit. A missing matcher rename
+file is an error in both focused and unfocused runs.

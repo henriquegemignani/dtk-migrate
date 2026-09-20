@@ -1083,12 +1083,14 @@ program, arguments, log byte span and bounded head/tail output. Trial refusals
 store a typed kind, affected names when extractable, and that command evidence;
 coverage, discovery, derivation and shared bisection carry it to run events.
 Coverage rediscovery offers only untried transaction states. Its retry key
-includes the write and read sets, evidence and policy, but excludes the digest
-of the whole observation report; the coordinator treats this refreshed set as
-authoritative instead of appending old refusals. The coverage result separately
+includes the write and read sets, evidence, policy and local ownership
+certificates, but excludes the digest of the whole observation report; the
+coordinator treats this refreshed set as authoritative instead of appending
+old refusals. The coverage result separately
 counts attempted alternative trials, states skipped as unchanged, units
-regenerated, and exhausted rediscovery budgets. Tests cover adjacent command
-failures, relevant versus unrelated state changes, and the cascade. The
+regenerated, and exhausted rediscovery budgets. A final acceptance only counts
+as budget exhaustion when a last rediscovery still finds work. Tests cover
+adjacent command failures, relevant versus unrelated state changes, and the
 immutable matching cache remains for the rest of this step.
 
 **Pane check on the untouched historical Prime revision.** An isolated F-drive

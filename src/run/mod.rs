@@ -541,17 +541,6 @@ pub fn run_stage(
         if added.is_empty() {
             break;
         }
-        if round == MAX_REDISCOVERY_ROUNDS {
-            // Said out loud: stopping on a budget and stopping because there is
-            // nothing left look identical in a result and mean the opposite.
-            events.push(Event::new("", "rediscovery-limit-reached").because(format!(
-                "stopped after {MAX_REDISCOVERY_ROUNDS} rounds with acceptances still arriving; \
-                 the cascade was not followed to the end"
-            )));
-            retry.budget_exhausted += 1;
-            break;
-        }
-
         // Something landed, so ask the stage what that made possible. This is
         // the only place it happens: one workspace holding every batch's result.
         let rediscovered = stage.rediscover(&ctx, &prepared.prepared, &tried)?;
@@ -571,6 +560,19 @@ pub fn run_stage(
         queue = rediscovered
             .map(|r| r.candidates)
             .unwrap_or_else(|| unresolved.values().cloned().collect());
+        if round == MAX_REDISCOVERY_ROUNDS {
+            // An acceptance in the last allowed round is not itself proof of
+            // unfinished work. Regenerate once to distinguish a settled
+            // cascade from one actually stopped by the budget.
+            if !queue.is_empty() {
+                events.push(Event::new("", "rediscovery-limit-reached").because(format!(
+                    "stopped after {MAX_REDISCOVERY_ROUNDS} rounds with {} units still offered",
+                    queue.len()
+                )));
+                retry.budget_exhausted += 1;
+            }
+            break;
+        }
     }
 
     // Round 0 always evaluates, so this holds however the loop left; it is

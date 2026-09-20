@@ -1,6 +1,9 @@
 //! A refusal is classified from the failing command, never from a shared log.
 
-use std::sync::LazyLock;
+use std::{
+    io::{Read, Seek, SeekFrom},
+    sync::LazyLock,
+};
 
 use anyhow::Error;
 use regex::Regex;
@@ -73,7 +76,9 @@ impl Refusal {
                 CommandError::TimedOut { .. } => (Kind::Timeout, Vec::new()),
                 CommandError::Failed { .. } => {
                     evidence.as_ref().map_or((Kind::Unknown, Vec::new()), |e| {
-                        classify(&format!("{}\n{}", e.stdout_excerpt, e.stderr_excerpt))
+                        classify(&command_output(e).unwrap_or_else(|| {
+                            format!("{}\n{}", e.stdout_excerpt, e.stderr_excerpt)
+                        }))
                     })
                 }
                 // Cancellation and I/O errors must stop the run; callers must
@@ -90,6 +95,24 @@ impl Refusal {
         let (kind, affected) = classify(&text);
         Self { kind, affected, command: None }
     }
+}
+
+/// Read just this invocation's span. Excerpts are for persisted diagnostics;
+/// a linker error in the middle of a long command must still be classified.
+fn command_output(evidence: &CommandEvidence) -> Option<String> {
+    let length = evidence.log_end.checked_sub(evidence.log_start)?;
+    let mut log = std::fs::File::open(&evidence.log).ok()?;
+    log.seek(SeekFrom::Start(evidence.log_start)).ok()?;
+    let mut bytes = Vec::new();
+    log.take(length).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 != length {
+        return None;
+    }
+    // The first line is the command invocation, not its diagnostics. Its
+    // arguments may themselves contain words such as "undefined symbol".
+    let first_newline = bytes.iter().position(|byte| *byte == b'\n')?;
+    let output = &bytes[first_newline + 1..];
+    Some(String::from_utf8_lossy(output).into_owned())
 }
 
 static SYMBOL: LazyLock<Regex> = LazyLock::new(|| {
@@ -212,5 +235,34 @@ mod tests {
         let (kind, affected) = classify("checksum.cpp:34: error: unknown type name");
         assert_eq!(kind, Kind::SourceCompileError);
         assert_eq!(affected, ["checksum.cpp"]);
+    }
+
+    #[test]
+    fn a_middle_diagnostic_is_found_without_reading_an_adjacent_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("build.log");
+        let first = "+ ninja old\nundefined symbol: Old\n! exit status 1\n";
+        let second = format!(
+            "+ ninja new\n{}undefined symbol: MissingAnim in Pane.cpp\n{}! exit status 1\n",
+            "filler\n".repeat(700),
+            "filler\n".repeat(700)
+        );
+        std::fs::write(&log, format!("{first}{second}")).unwrap();
+        let evidence = CommandEvidence {
+            program: "ninja".into(),
+            args: vec!["new".into()],
+            log,
+            log_start: first.len() as u64,
+            log_end: (first.len() + second.len()) as u64,
+            stdout_excerpt: "filler\n".into(),
+            stderr_excerpt: String::new(),
+        };
+        let error = Error::new(CommandError::Failed {
+            status: Some(1),
+            evidence: Some(Box::new(evidence)),
+        });
+        let refusal = Refusal::from_error(&error);
+        assert_eq!(refusal.kind, Kind::UndefinedSymbol);
+        assert_eq!(refusal.affected, ["MissingAnim", "Pane.cpp"]);
     }
 }
