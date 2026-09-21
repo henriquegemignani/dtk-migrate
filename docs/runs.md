@@ -236,7 +236,12 @@ and whole-executable matching is CPU-bound enough that an unoptimized binary
 can dominate a migration even while the linker workers are idle. On the same
 Prime NTSC-to-PAL read-only match, the previously frozen unoptimized binary took
 44.47 seconds and the optimized development build took 2.65 seconds (16.8x);
-their renames outputs were byte-identical.
+their renames outputs were byte-identical. This is a benchmark of the matcher
+and report generation only, not of a migration pipeline. It excludes workspace
+setup, object-evidence collection, candidate compilation, executable linking,
+integration, rediscovery, verification and publication. Treat it as evidence
+for the optimized Rust analysis path, not as an estimate of end-to-end migration
+speedup.
 
 `--only UNIT` evaluates an exact unit and nothing else. Every other eligible
 candidate is still reported under `eligible_excluded_by_only`, so a focused run
