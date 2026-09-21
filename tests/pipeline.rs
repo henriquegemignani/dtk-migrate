@@ -28,7 +28,7 @@ if sys.argv[1] == "object":
     output = Path(sys.argv[2])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(b"compiled fixture")
-else:
+elif sys.argv[1] == "link":
     enabled = {"A.cpp": sys.argv[2] == "1", "B.cpp": sys.argv[3] == "1"}
     out = Path("build/PAL")
     out.mkdir(parents=True, exist_ok=True)
@@ -37,6 +37,12 @@ else:
     (out / "main.dol").write_bytes(b"not retail at all" if enabled["B.cpp"] else retail)
     (out / "main.elf").write_bytes(b"fixture elf")
     (out / "ok").write_text("ok")
+    with (out / "fixture-builds.log").open("a") as stream:
+        stream.write(json.dumps(enabled) + "\n")
+elif sys.argv[1] == "report":
+    enabled = {"A.cpp": sys.argv[2] == "1", "B.cpp": sys.argv[3] == "1"}
+    out = Path("build/PAL")
+    out.mkdir(parents=True, exist_ok=True)
     report = {
         "measures": {"matched_code": "32", "complete_code": str(16 * sum(enabled.values()))},
         "units": [
@@ -50,7 +56,7 @@ else:
         ],
     }
     (out / "report.json").write_text(json.dumps(report))
-    with (out / "fixture-builds.log").open("a") as stream:
+    with (out / "fixture-reports.log").open("a") as stream:
         stream.write(json.dumps(enabled) + "\n")
 "#;
 
@@ -99,6 +105,8 @@ lines = [
     f'  command = "{python}" fixture_build.py object $out',
     "rule link",
     f'  command = "{python}" fixture_build.py link {int(enabled["A.cpp"])} {int(enabled["B.cpp"])}',
+    "rule report",
+    f'  command = "{python}" fixture_build.py report {int(enabled["A.cpp"])} {int(enabled["B.cpp"])}',
     "",
 ]
 inputs = []
@@ -107,8 +115,9 @@ for name, on in objects:
     output = f"build/PAL/{'src' if on else 'orig'}/{stem}.o"
     lines.append(f"build {output}: object src/{name}")
     inputs.append(output)
-outputs = "build/PAL/main.elf build/PAL/main.dol build/PAL/report.json build/PAL/ok"
+outputs = "build/PAL/main.elf build/PAL/main.dol build/PAL/ok"
 lines.append(f"build {outputs}: link {' '.join(inputs)}")
+lines.append("build build/PAL/report.json: report | build/PAL/main.elf")
 lines.append("build build.ninja objdiff.json: configure | configure.py")
 lines.append("")
 Path("build.ninja").write_text("\n".join(lines), encoding="utf-8")
@@ -215,6 +224,25 @@ impl Fixture {
             }
         }
     }
+
+    /// Every coordinator/worker command log written by the migration runner.
+    fn command_logs(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        collect(&self.root.join("build/dtk-migrate/runs"), &mut found);
+        return found;
+
+        fn collect(directory: &Path, into: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(directory) else { return };
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect(&path, into);
+                } else if path.file_name().is_some_and(|n| n == "build.log") {
+                    into.push(std::fs::read_to_string(path).unwrap_or_default());
+                }
+            }
+        }
+    }
 }
 
 fn report(output: &std::process::Output) -> String {
@@ -302,6 +330,48 @@ fn a_run_publishes_only_the_candidate_that_builds_to_retail() {
 
     // Several workspaces each ran real builds.
     assert!(fixture.build_logs().len() >= 3, "{:?}", fixture.build_logs());
+
+    // A trial never asks Ninja to generate the expensive report before it has
+    // proved the link and retail bytes. Each invocation names one phase; a
+    // successful state reaches both phases, while a rejected link stops after
+    // `ok`.
+    let logs = fixture.command_logs();
+    let mut invocations = Vec::new();
+    for log in &logs {
+        let mut linked = false;
+        for line in log.lines().filter(|line| {
+            line.starts_with("+ ") && line.contains("ninja") && line.contains(" -j ")
+        }) {
+            if line.ends_with("build/PAL/ok") {
+                linked = true;
+            } else if line.ends_with("build/PAL/report.json") {
+                assert!(linked, "report requested before link/hash: {log}");
+                linked = false;
+            }
+            invocations.push(line);
+        }
+    }
+    assert!(invocations.iter().any(|line| line.ends_with("build/PAL/ok")));
+    assert!(invocations.iter().any(|line| line.ends_with("build/PAL/report.json")));
+    assert!(
+        invocations.iter().all(|line| !(line.contains("report.json") && line.contains("/ok"))),
+        "{invocations:#?}"
+    );
+    let rejected = std::fs::read_dir(run.join("verify/jobs"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            let job: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(entry.path().join("job.json")).unwrap())
+                    .unwrap();
+            job["candidates"][0]["name"] == "B.cpp"
+        })
+        .unwrap();
+    let worker = rejected.path().join("process/build.log");
+    let commands = std::fs::read_to_string(&worker).unwrap();
+    let rejected_link = commands.lines().filter(|line| line.ends_with("build/PAL/ok")).count();
+    let reports = commands.lines().filter(|line| line.ends_with("build/PAL/report.json")).count();
+    assert_eq!(rejected_link, reports + 1, "{commands}");
 }
 
 #[test]

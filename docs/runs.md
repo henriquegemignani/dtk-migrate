@@ -235,6 +235,11 @@ at a time. The in-process matcher returns its typed coverage report directly;
 only the durable observation record is serialized, instead of writing and
 immediately reparsing a second full JSON report during every rediscovery round.
 
+Candidate builds run the retail link/hash target before generating
+`report.json`, under one shared timeout budget. A state the linker or checksum
+rejects therefore never spends time in objdiff report generation. Baseline and
+final builds use the same ordering without a timeout.
+
 The development Cargo profile is optimized while retaining debug assertions
 and symbols. `cargo build` is the normal installation path for this local tool,
 and whole-executable matching is CPU-bound enough that an unoptimized binary

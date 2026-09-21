@@ -45,7 +45,7 @@ pub const SCHEMA: u32 = 9;
 /// Stored preparations and worker results that may be interpreted by the same
 /// coordinator compatibility level. Bump this when a same-schema executable
 /// would prepare, evaluate or integrate an existing artifact differently.
-pub const RESUME_COMPATIBILITY: u32 = 2;
+pub const RESUME_COMPATIBILITY: u32 = 3;
 
 /// Fresh runs keep more work available than there are worker lanes, so a slow
 /// batch cannot leave the rest of the machine idle. Runs created before this

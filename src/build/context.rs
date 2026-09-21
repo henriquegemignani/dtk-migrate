@@ -8,7 +8,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -166,19 +166,21 @@ impl BuildContext {
         ]
     }
 
-    /// Configures, builds, checks the result against retail, and reads the
-    /// report.
+    /// Configures, links and checks retail bytes before generating the report.
+    ///
+    /// Link/hash failures are common candidate outcomes and need no objdiff
+    /// report. Asking Ninja for both targets together lets it run the report
+    /// first, which can spend the whole trial timeout measuring a state the
+    /// linker would reject in seconds. The two invocations share one timeout
+    /// budget so this ordering cannot make a bounded trial run twice as long.
     pub fn build(&self, timeout: Option<Duration>) -> Result<Report> {
         self.configure()?;
-        let args: Vec<String> = vec![
-            "-j".into(),
-            self.build_jobs.to_string(),
-            format!("build/{}/report.json", self.target),
-            format!("build/{}/ok", self.target),
-        ];
-        self.run(&self.tools.ninja.clone(), &args, false, timeout)
+        let started = Instant::now();
+        let link_args: Vec<String> =
+            vec!["-j".into(), self.build_jobs.to_string(), format!("build/{}/ok", self.target)];
+        self.run(&self.tools.ninja.clone(), &link_args, false, timeout)
             .map_err(|e| anyhow::anyhow!(e))
-            .context("ninja failed")?;
+            .context("ninja link/hash check failed")?;
 
         // The `ok` target is a checksum comparison the project performs itself.
         // Reading the bytes as well costs nothing and catches a stale or
@@ -191,6 +193,15 @@ impl BuildContext {
                 "Retail DOL bytes differ despite passing the checksum target".into()
             ));
         }
+
+        let report_args: Vec<String> = vec![
+            "-j".into(),
+            self.build_jobs.to_string(),
+            format!("build/{}/report.json", self.target),
+        ];
+        self.run(&self.tools.ninja.clone(), &report_args, false, remaining(timeout, started)?)
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("ninja report generation failed")?;
         Report::read(&self.root.join("build").join(&self.target).join("report.json"))
     }
 
@@ -205,6 +216,18 @@ impl BuildContext {
         let bytes = std::fs::read(self.built_dol())?;
         Ok(format!("{:x}", Sha1::digest(&bytes)))
     }
+}
+
+fn remaining(limit: Option<Duration>, started: Instant) -> Result<Option<Duration>> {
+    let Some(limit) = limit else { return Ok(None) };
+    let elapsed = started.elapsed();
+    if let Some(remaining) = limit.checked_sub(elapsed)
+        && !remaining.is_zero()
+    {
+        return Ok(Some(remaining));
+    }
+    Err(anyhow::Error::new(CommandError::TimedOut { after: elapsed, evidence: None })
+        .context("candidate timeout expired before report generation"))
 }
 
 /// Whether an error is a candidate's fault rather than the run's.
@@ -266,6 +289,15 @@ mod tests {
     fn an_unreadable_report_stops_the_run_instead() {
         let error = anyhow::anyhow!("Failed to parse report.json");
         assert!(!is_trial_failure(&error));
+    }
+
+    #[test]
+    fn two_build_phases_share_one_timeout_budget() {
+        let started = Instant::now();
+        let left = remaining(Some(Duration::from_secs(1)), started).unwrap().unwrap();
+        assert!(left <= Duration::from_secs(1));
+        assert!(is_trial_failure(&remaining(Some(Duration::ZERO), started).unwrap_err()));
+        assert_eq!(remaining(None, started).unwrap(), None);
     }
 
     fn error_with_context(error: CommandError) -> anyhow::Error {
