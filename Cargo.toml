@@ -53,3 +53,11 @@ libc = "0.2"
 
 [profile.release]
 codegen-units = 1
+
+# `cargo build` is the normal way this local tool is installed and invoked.
+# Matching and ownership analysis dominate whole-project migrations; leaving
+# that binary at Cargo's default opt-level 0 turns those CPU-bound passes into
+# multi-minute idle-machine tails. Keep debug assertions and symbols, but
+# optimize the code users actually run.
+[profile.dev]
+opt-level = 2

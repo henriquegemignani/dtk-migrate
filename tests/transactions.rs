@@ -130,6 +130,14 @@ fn a_candidate_and_the_neighbour_it_narrows_are_published_as_one_transaction() {
     // later one for A.cpp alone that supersedes it for A.cpp. The selection is
     // the last of them, and the whole chain is what publication replayed.
     let result = fixture.json(&format!("{stage}/result.json"));
+    assert!(
+        result["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["status"] == "worker-union-validated"),
+        "worker selections were needlessly relinked one at a time: {result:#}"
+    );
     let applied = result["applied"].as_array().unwrap();
     let for_a: Vec<&serde_json::Value> =
         applied.iter().filter(|entry| entry["unit"] == "A.cpp").collect();

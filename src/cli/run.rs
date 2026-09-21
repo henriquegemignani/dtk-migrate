@@ -266,6 +266,7 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
         workers: args.workers,
         build_jobs: args.build_jobs,
         batch_size: args.batch_size,
+        batching_version: crate::run::BATCHING_VERSION,
         limit: args.limit,
         only: args.only.clone(),
         build_timeout_seconds: Some(args.build_timeout),
@@ -539,6 +540,7 @@ mod tests {
             workers: 1,
             build_jobs: 1,
             batch_size: 1,
+            batching_version: crate::run::BATCHING_VERSION,
             limit: None,
             only: Vec::new(),
             build_timeout_seconds: Some(120.0),
@@ -584,6 +586,17 @@ mod tests {
         let id = timestamp_id();
         assert!(id.len() >= 12, "{id}");
         assert!(id.chars().all(|c| c.is_ascii_digit() || c == '-'), "{id}");
+    }
+
+    #[test]
+    fn a_legacy_run_keeps_the_batch_partition_it_started_with() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original");
+        std::fs::write(&original, b"coordinator").unwrap();
+        let mut value = serde_json::to_value(upgrade_record(directory.path(), &original)).unwrap();
+        value.as_object_mut().unwrap().remove("batching_version");
+        let record: RunRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(record.batching_version, 1);
     }
 
     #[test]

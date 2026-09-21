@@ -378,6 +378,20 @@ pub trait Stage {
         preferred: &Selections,
     ) -> Result<Outcome>;
 
+    /// Re-proves worker selections in the coordinator workspace. Most stages
+    /// use the ordinary evaluator. A stage may provide a union fast path when
+    /// it can apply already-proved independent changes atomically and retain
+    /// the ordinary evaluator as its failure fallback.
+    fn integrate(
+        &self,
+        ctx: &BuildContext,
+        prepared: &Prepared,
+        candidates: &[Candidate],
+        preferred: &Selections,
+    ) -> Result<Outcome> {
+        self.evaluate(ctx, prepared, candidates, preferred)
+    }
+
     /// Rechecks an accepted set in the project that is about to keep it.
     ///
     /// A worker proved something in its own copy. Publication applies the same

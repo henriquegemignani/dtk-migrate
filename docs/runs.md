@@ -198,7 +198,10 @@ The defaults are three workers and four Ninja jobs each, measured on a 24-core
 host. Native thread pools inside dtk and the compilers are bounded to the same
 per-worker limit; Ninja's `-j` only limits the processes it starts, and without
 that bound a three-worker run oversubscribes the machine by a factor of its core
-count.
+count. Fresh runs keep up to two batches ready per worker and workers pull from
+one shared queue. This keeps linkers occupied when a failed batch takes longer
+to bisect than its neighbours. Conflict components still remain in one batch,
+even when that prevents full occupancy.
 
 Disk is checked before starting, for every copy plus headroom. Both the baselines
 and the job artifacts are kept for inspection and resume, so a long run consumes
@@ -213,7 +216,27 @@ path.
 `--batch-size` defaults to 40. A larger batch costs less when it passes and more
 when it does not, since a failure is bisected. Keep the default for full runs;
 `--batch-size 1` is for narrow diagnostics and was responsible for hundreds of
-avoidable full-link cycles in one measured run.
+avoidable full-link cycles in one measured run. The value is an upper bound:
+the scheduler may make smaller batches to supply the worker queue. A run records
+the batching algorithm version, so a compatible coordinator upgrade preserves
+an older run's exact job partition and can reuse its completed batches.
+
+Each stage result records preparation, worker and integration wall time, and
+each worker result records its own wall time. Coverage integration applies
+worker-proved, nonconflicting selections in coordinator order and validates
+their union with one build. If that union fails, it restores the baseline and
+uses the ordinary per-alternative evaluator to isolate the interaction. The
+in-process matcher returns its typed coverage report directly; only the durable
+observation record is serialized, instead of writing and immediately reparsing
+a second full JSON report during every rediscovery round.
+
+The development Cargo profile is optimized while retaining debug assertions
+and symbols. `cargo build` is the normal installation path for this local tool,
+and whole-executable matching is CPU-bound enough that an unoptimized binary
+can dominate a migration even while the linker workers are idle. On the same
+Prime NTSC-to-PAL read-only match, the previously frozen unoptimized binary took
+44.47 seconds and the optimized development build took 2.65 seconds (16.8x);
+their renames outputs were byte-identical.
 
 `--only UNIT` evaluates an exact unit and nothing else. Every other eligible
 candidate is still reported under `eligible_excluded_by_only`, so a focused run

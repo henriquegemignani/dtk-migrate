@@ -45,9 +45,11 @@ dtk-migrate run --project-root ../prime --source GM8E01_00 --target GM8P01_00 --
 
 Stages run in a fixed order — `derive`, `coverage`, `discover`, `verify` — and
 `--stages` selects which of them to run. `--workers` sets how many candidate
-batches are evaluated at once, each in its own copy of the project. Evidence
-lands in `build/dtk-migrate/runs/<id>/`, and `--resume <id>` continues an
-interrupted run without redoing finished work.
+batches are evaluated at once, each in its own copy of the project. Workers pull
+from a shared queue, and fresh runs keep enough independent batches available to
+avoid waiting behind one slow linker. Evidence lands in
+`build/dtk-migrate/runs/<id>/`, and `--resume <id>` continues an interrupted run
+without redoing finished work.
 
 See [runs](docs/runs.md) for the run directory, isolation and resource guidance,
 and [coverage](docs/coverage.md) for what each stage will and will not accept.

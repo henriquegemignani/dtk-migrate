@@ -18,7 +18,7 @@ use typed_path::{Utf8NativePath, Utf8NativePathBuf};
 
 use crate::{
     analysis::{
-        coverage::{ExtractCatalogs, build_report as build_coverage_report},
+        coverage::{CoverageReport, ExtractCatalogs, build_report as build_coverage_report},
         mask::{self, Scenario},
         matching::{MatchOptions, MatchTier},
         object_evidence,
@@ -38,7 +38,7 @@ pub mod data_evidence;
 pub mod proposals;
 pub mod report;
 
-pub(crate) use cache::{CacheUse, MatchingCache};
+pub(crate) use cache::MatchingCache;
 
 /// Which files a run should write. Everything is optional; the matching itself
 /// happens either way.
@@ -72,6 +72,9 @@ pub struct Request {
     /// calibration can ask for boundaries the project already has. A migration
     /// leaves this at [`Scenario::Nothing`]: it has nothing to hide.
     pub mask: Scenario,
+    /// Return coverage to an in-process caller instead of forcing it through a
+    /// potentially hundreds-of-megabytes JSON round trip.
+    pub capture_coverage: bool,
     pub outputs: Outputs,
 }
 
@@ -87,6 +90,7 @@ impl Request {
             max_rounds: 100,
             validate: false,
             mask: Scenario::Nothing,
+            capture_coverage: false,
             outputs: Outputs::default(),
         }
     }
@@ -97,7 +101,11 @@ pub fn run(request: &Request) -> Result<()> {
     run_with_cache(request, &mut cache).map(|_| ())
 }
 
-pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Result<CacheUse> {
+pub(crate) struct RunOutput {
+    pub coverage: Option<CoverageReport>,
+}
+
+pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Result<RunOutput> {
     let object_root = request
         .object_root
         .as_ref()
@@ -287,7 +295,8 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
             info!("Wrote data range evidence to {}", path);
         }
     }
-    if let Some(path) = native(outputs.coverage.as_ref()) {
+    let mut captured_coverage = None;
+    if outputs.coverage.is_some() || request.capture_coverage {
         let source_extracts = extract_specs(&source_config);
         let target_extracts = extract_specs(&target_config);
         let coverage = build_coverage_report(
@@ -299,10 +308,15 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
             &masked,
             ExtractCatalogs { source: &source_extracts, target: &target_extracts },
         );
-        let mut file = buf_writer(&path)?;
-        serde_json::to_writer_pretty(&mut file, &coverage)?;
-        file.flush()?;
-        info!("Wrote coverage evidence to {}", path);
+        if let Some(path) = native(outputs.coverage.as_ref()) {
+            let mut file = buf_writer(&path)?;
+            serde_json::to_writer_pretty(&mut file, &coverage)?;
+            file.flush()?;
+            info!("Wrote coverage evidence to {}", path);
+        }
+        if request.capture_coverage {
+            captured_coverage = Some(coverage);
+        }
     }
     if let Some(path) = native(outputs.identifications.as_ref()) {
         let mut file = buf_writer(&path)?;
@@ -310,7 +324,7 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
         file.flush()?;
         info!("Wrote TU identifications to {}", path);
     }
-    Ok(prepared.cache_use)
+    Ok(RunOutput { coverage: captured_coverage })
 }
 
 fn check_object_root(object_root: &Path, target_config: &Utf8NativePath) -> Result<String> {

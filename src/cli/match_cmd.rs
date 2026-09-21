@@ -77,6 +77,7 @@ pub fn run(args: Args) -> Result<()> {
         max_rounds: args.max_rounds,
         validate: args.validate,
         mask: Default::default(),
+        capture_coverage: false,
         outputs: Outputs {
             report: args.output,
             renames: args.renames,

@@ -14,8 +14,9 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -45,11 +46,28 @@ pub fn batches(
     candidates: &[Candidate],
     size: usize,
     footprints: &[Footprint],
-) -> Vec<Vec<Candidate>> {
+    workers: usize,
+    version: u32,
+) -> Result<Vec<Vec<Candidate>>> {
     assert_eq!(candidates.len(), footprints.len(), "one footprint per candidate");
-    if size == 0 || candidates.is_empty() {
-        return vec![candidates.to_vec()];
+    if !matches!(version, 1 | 2) {
+        bail!("Unsupported batching version {version}");
     }
+    if size == 0 || candidates.is_empty() {
+        return Ok(vec![candidates.to_vec()]);
+    }
+    let size = match version {
+        1 => size,
+        2 => {
+            // Keep two jobs ready per lane. One per lane still leaves the
+            // machine waiting for the slowest batch. Two supplies a replacement
+            // as each lane finishes without turning every candidate into its
+            // own expensive full-link trial.
+            let target = workers.max(1).saturating_mul(2).min(candidates.len());
+            size.min(candidates.len().div_ceil(target).max(1))
+        }
+        _ => unreachable!("batching version was checked above"),
+    };
     let components = conflict_components(footprints);
     let mut result: Vec<Vec<Candidate>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
@@ -65,7 +83,7 @@ pub fn batches(
         current.sort_unstable();
         result.push(current.iter().map(|&index| candidates[index].clone()).collect());
     }
-    result
+    Ok(result)
 }
 
 /// Candidate indices grouped by conflict, each group ascending, groups ordered
@@ -162,6 +180,10 @@ pub struct JobResult {
     /// build putting the same question a second time.
     #[serde(default)]
     pub tried: crate::stages::Tried,
+    /// Wall time spent resetting and evaluating this job. Older stored jobs
+    /// deserialize as zero and remain reusable.
+    #[serde(default)]
+    pub seconds: f64,
 }
 
 fn job_fingerprint(
@@ -241,6 +263,7 @@ pub fn execute(
     let results: Mutex<Vec<Option<JobResult>>> = Mutex::new(vec![None; specs.len()]);
     let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
     let lanes = run.workers.max(1).min(specs.len().max(1));
+    let next = AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
@@ -250,10 +273,17 @@ pub fn execute(
             let failures = &failures;
             let cancel = cancel.clone();
             let stage_dir = stage_dir.as_path();
+            let next = &next;
             handles.push(scope.spawn(move || {
-                // Round-robin rather than contiguous chunks: batches are
-                // ordered by expected size, so striping keeps the lanes even.
-                for index in (lane..specs.len()).step_by(lanes) {
+                // Pull work only after finishing the current batch. Trial cost
+                // is dominated by how far a failure bisects, which candidate
+                // count cannot predict; a static stripe left lanes idle behind
+                // one unexpectedly expensive batch.
+                loop {
+                    let index = next.fetch_add(1, Ordering::SeqCst);
+                    if index >= specs.len() {
+                        return;
+                    }
                     if cancel.load(Ordering::SeqCst) {
                         return;
                     }
@@ -322,6 +352,7 @@ fn run_one(
     output: &Path,
     cancel: Cancel,
 ) -> Result<JobResult> {
+    let started = Instant::now();
     let result_path = output.join("result.json");
     if let Ok(stored) = read_json::<JobResult>(&result_path)
         && accept_stored(&stored, spec).is_ok()
@@ -347,6 +378,7 @@ fn run_one(
         validation: outcome.validation,
         selections: outcome.selections,
         tried: outcome.tried,
+        seconds: started.elapsed().as_secs_f64(),
     };
     accept_stored(&result, spec).context("The stage returned candidates it was not given")?;
     write_json(&result_path, &result)?;
@@ -389,13 +421,14 @@ mod tests {
             events: Vec::new(),
             validation: "fixture".into(),
             selections: Selections::new(),
+            seconds: 0.0,
         }
     }
 
     #[test]
     fn candidates_are_batched_in_order() {
         let all = candidates(5);
-        let split = batches(&all, 2, &alone(&all));
+        let split = batches(&all, 2, &alone(&all), 1, 1).unwrap();
         assert_eq!(split.len(), 3);
         assert_eq!(split[0][0].name, "u0");
         assert_eq!(split[2][0].name, "u4");
@@ -404,7 +437,7 @@ mod tests {
     #[test]
     fn a_batch_size_of_zero_means_one_batch() {
         let all = candidates(5);
-        assert_eq!(batches(&all, 0, &alone(&all)).len(), 1);
+        assert_eq!(batches(&all, 0, &alone(&all), 3, 2).unwrap().len(), 1);
     }
 
     #[test]
@@ -415,7 +448,7 @@ mod tests {
         let mut footprints = alone(&all);
         footprints[0].units.insert("shared.cpp".into());
         footprints[3].units.insert("shared.cpp".into());
-        let split = batches(&all, 2, &footprints);
+        let split = batches(&all, 2, &footprints, 1, 1).unwrap();
         assert_eq!(split.iter().map(|b| names(b)).collect::<Vec<_>>(), [vec!["u0", "u3"], vec![
             "u1", "u2"
         ]]);
@@ -428,7 +461,7 @@ mod tests {
         footprints[0].intervals.push((".text".into(), 0x100, 0x200));
         footprints[1].intervals.push((".data".into(), 0x100, 0x200));
         footprints[2].intervals.push((".text".into(), 0x200, 0x280));
-        let split = batches(&all, 1, &footprints);
+        let split = batches(&all, 1, &footprints, 1, 1).unwrap();
         assert_eq!(split.iter().map(|b| names(b)).collect::<Vec<_>>(), [vec!["u0", "u2"], vec![
             "u1"
         ]]);
@@ -441,7 +474,7 @@ mod tests {
         for footprint in &mut footprints {
             footprint.units.insert("hub.cpp".into());
         }
-        let split = batches(&all, 1, &footprints);
+        let split = batches(&all, 1, &footprints, 1, 1).unwrap();
         assert_eq!(split.len(), 1);
         assert_eq!(names(&split[0]), ["u0", "u1", "u2"]);
     }
@@ -453,9 +486,38 @@ mod tests {
         footprints[1].units.insert("x.cpp".into());
         footprints[4].units.insert("x.cpp".into());
         assert_eq!(
-            batches(&all, 2, &footprints).iter().map(|b| names(b)).collect::<Vec<_>>(),
-            batches(&all, 2, &footprints).iter().map(|b| names(b)).collect::<Vec<_>>()
+            batches(&all, 2, &footprints, 1, 1)
+                .unwrap()
+                .iter()
+                .map(|b| names(b))
+                .collect::<Vec<_>>(),
+            batches(&all, 2, &footprints, 1, 1)
+                .unwrap()
+                .iter()
+                .map(|b| names(b))
+                .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn fresh_runs_keep_two_batches_ready_per_worker() {
+        let all = candidates(55);
+        let split = batches(&all, 40, &alone(&all), 3, 2).unwrap();
+        assert_eq!(split.len(), 6);
+        assert!(split.iter().all(|batch| batch.len() <= 10));
+    }
+
+    #[test]
+    fn resumed_legacy_runs_keep_their_original_partition() {
+        let all = candidates(55);
+        let split = batches(&all, 40, &alone(&all), 3, 1).unwrap();
+        assert_eq!(split.iter().map(Vec::len).collect::<Vec<_>>(), [40, 15]);
+    }
+
+    #[test]
+    fn an_unknown_batching_version_is_refused() {
+        let all = candidates(1);
+        assert!(batches(&all, 40, &alone(&all), 3, 99).is_err());
     }
 
     #[test]

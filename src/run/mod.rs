@@ -47,7 +47,15 @@ pub const SCHEMA: u32 = 9;
 /// would prepare, evaluate or integrate an existing artifact differently.
 pub const RESUME_COMPATIBILITY: u32 = 1;
 
+/// Fresh runs keep more work available than there are worker lanes, so a slow
+/// batch cannot leave the rest of the machine idle. Runs created before this
+/// was introduced retain version 1 and therefore their exact stored job
+/// partition when resumed with a newer coordinator.
+pub const BATCHING_VERSION: u32 = 2;
+
 fn legacy_resume_compatibility() -> u32 { 0 }
+
+fn legacy_batching_version() -> u32 { 1 }
 
 /// The stages, in the only order they may run in.
 ///
@@ -94,6 +102,11 @@ pub struct RunRecord {
     pub workers: usize,
     pub build_jobs: usize,
     pub batch_size: usize,
+    /// The batching algorithm is part of a run's frozen execution plan. It is
+    /// deliberately independent of schema compatibility so an upgraded
+    /// coordinator can reuse already completed worker jobs.
+    #[serde(default = "legacy_batching_version")]
+    pub batching_version: u32,
     pub limit: Option<usize>,
     /// Evaluate only these units, if given. Everything else eligible is still
     /// reported, so a focused run does not make an untested proposal look
@@ -228,7 +241,19 @@ pub struct StageResult {
     /// Coverage retry accounting across workers and coordinator rounds.
     #[serde(default)]
     pub retry: RetryCounts,
+    /// Wall-clock phase timings. Together with each job's own duration these
+    /// show whether a run is waiting on preparation, parallel workers, or the
+    /// ordered coordinator rather than requiring an external profiler.
+    #[serde(default)]
+    pub timing: StageTiming,
     pub seconds: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StageTiming {
+    pub preparation_seconds: f64,
+    pub worker_seconds: f64,
+    pub integration_seconds: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -449,9 +474,11 @@ pub fn run_stage(
         .iter()
         .map(|candidate| stage.footprint(candidate))
         .collect::<Result<Vec<_>>>()?;
-    let batches = jobs::batches(&candidates, run.batch_size, &footprints);
+    let batches =
+        jobs::batches(&candidates, run.batch_size, &footprints, run.workers, run.batching_version)?;
     tracing::info!("{stage_name}: {} candidates in {} batches", candidates.len(), batches.len());
 
+    let worker_started = Instant::now();
     let outcomes = jobs::execute(
         dir,
         run,
@@ -463,11 +490,13 @@ pub fn run_stage(
         &batches,
         cancel.clone(),
     )?;
+    let worker_seconds = worker_started.elapsed().as_secs_f64();
 
     // Integration proves the union in one workspace, then retries what the
     // workers deferred — but only after something was accepted, since a
     // deferred candidate saw this very baseline and nothing has changed for it
     // until then.
+    let integration_started = Instant::now();
     let integrated = dir.integration();
     crate::workspace::reset_workspace(&baseline_dir, &integrated, &manifest)?;
     crate::workspace::seed_objdiff(&baseline_dir, &integrated)?;
@@ -547,7 +576,7 @@ pub fn run_stage(
         for candidate in &queue {
             remember(candidate);
         }
-        let result = stage.evaluate(&ctx, &prepared.prepared, &queue, &preferred)?;
+        let result = stage.integrate(&ctx, &prepared.prepared, &queue, &preferred)?;
         events.extend(result.events.clone());
         for (unit, ids) in &result.tried {
             tried.entry(unit.clone()).or_default().extend(ids.iter().cloned());
@@ -633,6 +662,11 @@ pub fn run_stage(
         eligible_excluded_by_only: prepared.eligible_excluded_by_only.clone(),
         applied,
         retry,
+        timing: StageTiming {
+            preparation_seconds: worker_started.duration_since(started).as_secs_f64(),
+            worker_seconds,
+            integration_seconds: integration_started.elapsed().as_secs_f64(),
+        },
         seconds: started.elapsed().as_secs_f64(),
     };
     write_json(&stage_dir.join("result.json"), &result)?;
@@ -904,6 +938,7 @@ mod tests {
             eligible_excluded_by_only: Vec::new(),
             applied: Vec::new(),
             retry: RetryCounts::default(),
+            timing: StageTiming::default(),
             seconds: 0.0,
         };
         let reserved = result.changed_scopes(&Derive).unwrap();
@@ -942,6 +977,7 @@ mod tests {
             eligible_excluded_by_only: Vec::new(),
             applied: Vec::new(),
             retry: RetryCounts::default(),
+            timing: StageTiming::default(),
             seconds: 0.0,
         };
         let serialized = serde_json::to_value(result).unwrap();

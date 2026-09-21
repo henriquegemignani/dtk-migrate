@@ -722,6 +722,32 @@ impl Stage for Coverage {
         })
     }
 
+    fn integrate(
+        &self,
+        ctx: &BuildContext,
+        prepared: &Prepared,
+        candidates: &[Candidate],
+        preferred: &Selections,
+    ) -> Result<Outcome> {
+        // Only worker-proved selections qualify. Rediscovered candidates have
+        // no worker result and continue through the ordinary per-alternative
+        // evaluator. If the union exposes an interaction footprints failed to
+        // predict, discard it and let that evaluator isolate the failure.
+        if candidates.is_empty() || candidates.iter().any(|c| !preferred.contains_key(&c.name)) {
+            return self.evaluate(ctx, prepared, candidates, preferred);
+        }
+        match self.integrate_proven(ctx, prepared, candidates, preferred) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if is_trial_failure(&error) => {
+                tracing::info!(
+                    "coverage: proved worker union did not hold; falling back to ordered trials: {error:#}"
+                );
+                self.evaluate(ctx, prepared, candidates, preferred)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn rediscover(
         &self,
         ctx: &BuildContext,
@@ -803,6 +829,131 @@ impl Observations {
 fn short(id: &str) -> &str { &id[..id.len().min(16)] }
 
 impl Coverage {
+    /// Applies worker-proved selections in coordinator order, then proves
+    /// their union once. Conflict components were kept in one worker and were
+    /// already evaluated in this order; components assigned to other workers
+    /// have disjoint read/write footprints. The final build remains the
+    /// authority. A failure returns to the ordinary ordered evaluator.
+    fn integrate_proven(
+        &self,
+        ctx: &BuildContext,
+        prepared: &Prepared,
+        candidates: &[Candidate],
+        preferred: &Selections,
+    ) -> Result<Outcome> {
+        let names: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
+        if names.len() != candidates.len() {
+            bail!("Duplicate coverage candidate names");
+        }
+
+        let mut splits_owned = Owned::take(&splits_path(ctx))?;
+        let mut config_owned = Owned::take(&config_path(ctx))?;
+        let mut splits = Splits::parse(&String::from_utf8(splits_owned.original().to_vec())?)?;
+        let baseline = ctx.build(None)?;
+        let starting_complete = baseline.measures.complete_code;
+        let mut observations = Observations::default();
+        let mut selections = Selections::new();
+        let mut applied = Vec::new();
+        let mut events = Vec::new();
+        let mut tried = Tried::new();
+
+        for candidate in candidates {
+            let proposal = proposal_of(candidate)?;
+            let selected = preferred.get(&candidate.name).ok_or_else(|| {
+                ValidationError(format!(
+                    "Worker did not select an alternative for {}",
+                    candidate.name
+                ))
+            })?;
+            let alternative = proposal
+                .alternatives
+                .iter()
+                .find(|alternative| &alternative.id == selected)
+                .ok_or_else(|| {
+                    ValidationError(format!(
+                        "Worker selected an unknown alternative for {}",
+                        candidate.name
+                    ))
+                })?;
+            tried.entry(candidate.name.clone()).or_default().insert(alternative.retry_key());
+
+            let index = observations.load(&proposal.observation, ctx)?;
+            let required = transaction_extracts(
+                &candidate.name,
+                &proposal.required_extracts,
+                &proposal.unit_extracts,
+                &alternative.transaction,
+            )?;
+            let current = String::from_utf8(config_owned.current().to_vec())?;
+            let rendered = extracts::render(&current, &required)?;
+            config_owned.write(rendered.as_bytes())?;
+            Trial {
+                candidate,
+                alternative,
+                proposal: &proposal,
+                observations: index,
+                permitted: &prepared.permitted,
+            }
+            .apply(&mut splits_owned, &mut splits)?;
+
+            let units: Vec<String> = alternative.transaction.writes().map(str::to_string).collect();
+            selections.insert(candidate.name.clone(), alternative.id.clone());
+            applied.push(Applied {
+                unit: candidate.name.clone(),
+                id: alternative.id.clone(),
+                units: units.clone(),
+                record: serde_json::to_value(AppliedRecord {
+                    observation: proposal.observation.clone(),
+                    alternative: alternative.clone(),
+                    unit_extracts: proposal.unit_extracts.clone(),
+                })?,
+            });
+            events.push(
+                Event::new(&candidate.name, "accepted")
+                    .because(format!(
+                        "{} gaining {} bytes; transaction {} writes {}",
+                        alternative.evidence,
+                        alternative.gained_bytes,
+                        short(&alternative.transaction.id),
+                        units.join(", ")
+                    ))
+                    .about(&alternative.id),
+            );
+        }
+
+        let final_report = self.validate_selected(
+            ctx,
+            candidates,
+            &selections,
+            &applied,
+            &BTreeSet::new(),
+            &mut observations,
+        )?;
+        if regresses(&baseline, &final_report) {
+            bail!(ValidationError("worker union regresses an existing unit".into()));
+        }
+        if final_report.measures.complete_code < starting_complete {
+            bail!(ValidationError("worker union reduces source-linked code".into()));
+        }
+        events.push(Event::new("", "worker-union-validated").because(format!(
+            "{} worker-proved selections held in one coordinator build",
+            candidates.len()
+        )));
+
+        splits_owned.commit();
+        config_owned.commit();
+        Ok(Outcome {
+            accepted: candidates.to_vec(),
+            deferred: Vec::new(),
+            tried,
+            selections,
+            events,
+            report: final_report,
+            validation: VALIDATION.to_string(),
+            applied,
+        })
+    }
+
     /// Rechecks that the project really is the result of the transactions
     /// integration applied, in the order it applied them, then that the build
     /// agrees.
@@ -918,16 +1069,11 @@ struct Trial<'a> {
 }
 
 impl Trial<'_> {
-    /// Applies the alternative's transaction and asks the build whether it
-    /// holds. Everything that can be refused without a build is refused first.
-    fn run(
-        &self,
-        ctx: &BuildContext,
-        owned: &mut Owned,
-        splits: &mut Splits,
-        baseline: &Report,
-        starting_complete: u64,
-    ) -> Result<Report> {
+    /// Checks and applies the transaction without building it. Worker trials
+    /// call this immediately before their build; coordinator integration uses
+    /// the same path to stage a set of already-proved, nonconflicting worker
+    /// selections before one union build.
+    fn apply(&self, owned: &mut Owned, splits: &mut Splits) -> Result<()> {
         let name = self.candidate.name.as_str();
         let transaction = &self.alternative.transaction;
         // A transaction may only write units this run lets the stage change.
@@ -966,7 +1112,21 @@ impl Trial<'_> {
             self.observations,
         )?;
         transaction.apply(&mut splits.blocks)?;
-        write(owned, splits)?;
+        write(owned, splits)
+    }
+
+    /// Applies the alternative's transaction and asks the build whether it
+    /// holds. Everything that can be refused without a build is refused first.
+    fn run(
+        &self,
+        ctx: &BuildContext,
+        owned: &mut Owned,
+        splits: &mut Splits,
+        baseline: &Report,
+        starting_complete: u64,
+    ) -> Result<Report> {
+        let transaction = &self.alternative.transaction;
+        self.apply(owned, splits)?;
 
         let tested = ctx.trial_build()?;
         let names: BTreeSet<&str> = transaction.writes().collect();
@@ -1327,8 +1487,8 @@ fn generate_evidence(
                 crate::stages::discover::config_path(ctx, &ctx.target),
             );
             request.object_root = Some(ctx.root.clone());
-            request.outputs.coverage = Some(path.clone());
-            crate::matching::run_with_cache(
+            request.capture_coverage = true;
+            let output = crate::matching::run_with_cache(
                 &request,
                 &mut matching_cache.lock().unwrap_or_else(|e| e.into_inner()),
             )
@@ -1341,6 +1501,7 @@ fn generate_evidence(
                         .map_or_else(|_| "<unknown>".into(), |cwd| cwd.display().to_string())
                 )
             })?;
+            return output.coverage.context("Matcher did not return coverage evidence");
         }
     }
     let text = std::fs::read_to_string(&path)
@@ -2466,6 +2627,7 @@ mod tests {
             eligible_excluded_by_only: Vec::new(),
             applied,
             retry: Default::default(),
+            timing: Default::default(),
             seconds: 0.0,
         }
     }
