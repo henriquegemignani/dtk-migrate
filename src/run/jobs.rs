@@ -29,15 +29,15 @@ use crate::{
     workspace::{Manifest, fingerprint},
 };
 
-/// Splits candidates into batches of about `size`, keeping every conflict
-/// component whole.
+/// Splits candidates into batches of about `size`.
 ///
-/// Two candidates whose footprints conflict — one reads or writes a unit the
-/// other may write, or both claim the same ground — are decided in the same
-/// lane, one after the other in candidate order. Split across lanes, each
-/// would be proved against a world the other was changing, and which of them
-/// integration saw first would depend on which lane finished first. A
-/// component larger than `size` stays one batch: correctness outranks balance.
+/// Versions 1 and 2 keep candidates whose footprints conflict — one reads or
+/// writes a unit the other may write, or both claim the same ground — in one
+/// lane. Version 3 keeps ordinary conflict components together but caps a
+/// component larger than `size`. Its workers only propose results; coordinator
+/// integration preserves candidate order and adaptively re-proves combinations,
+/// so splitting a broad dependency hub cannot make completion order decide the
+/// result and no longer strands every other worker behind one serial lane.
 ///
 /// Components are placed by their first candidate, and a batch lists its
 /// candidates in their original order, so the result depends only on the
@@ -50,7 +50,7 @@ pub fn batches(
     version: u32,
 ) -> Result<Vec<Vec<Candidate>>> {
     assert_eq!(candidates.len(), footprints.len(), "one footprint per candidate");
-    if !matches!(version, 1 | 2) {
+    if !matches!(version, 1..=3) {
         bail!("Unsupported batching version {version}");
     }
     if size == 0 || candidates.is_empty() {
@@ -58,7 +58,7 @@ pub fn batches(
     }
     let size = match version {
         1 => size,
-        2 => {
+        2 | 3 => {
             // Keep two jobs ready per lane. One per lane still leaves the
             // machine waiting for the slowest batch. Two supplies a replacement
             // as each lane finishes without turning every candidate into its
@@ -72,6 +72,17 @@ pub fn batches(
     let mut result: Vec<Vec<Candidate>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     for component in components {
+        if version >= 3 && component.len() > size {
+            if !current.is_empty() {
+                current.sort_unstable();
+                result.push(current.iter().map(|&index| candidates[index].clone()).collect());
+                current.clear();
+            }
+            for chunk in component.chunks(size) {
+                result.push(chunk.iter().map(|&index| candidates[index].clone()).collect());
+            }
+            continue;
+        }
         if !current.is_empty() && current.len() + component.len() > size {
             current.sort_unstable();
             result.push(current.iter().map(|&index| candidates[index].clone()).collect());
@@ -477,6 +488,21 @@ mod tests {
         let split = batches(&all, 1, &footprints, 1, 1).unwrap();
         assert_eq!(split.len(), 1);
         assert_eq!(names(&split[0]), ["u0", "u1", "u2"]);
+    }
+
+    #[test]
+    fn current_batching_caps_a_dependency_hub() {
+        let all = candidates(5);
+        let mut footprints = alone(&all);
+        for footprint in &mut footprints {
+            footprint.units.insert("hub.cpp".into());
+        }
+        let split = batches(&all, 2, &footprints, 1, 3).unwrap();
+        assert_eq!(split.iter().map(|batch| names(batch)).collect::<Vec<_>>(), [
+            vec!["u0", "u1"],
+            vec!["u2", "u3"],
+            vec!["u4"]
+        ]);
     }
 
     #[test]

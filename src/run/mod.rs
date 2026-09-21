@@ -45,13 +45,13 @@ pub const SCHEMA: u32 = 9;
 /// Stored preparations and worker results that may be interpreted by the same
 /// coordinator compatibility level. Bump this when a same-schema executable
 /// would prepare, evaluate or integrate an existing artifact differently.
-pub const RESUME_COMPATIBILITY: u32 = 1;
+pub const RESUME_COMPATIBILITY: u32 = 2;
 
 /// Fresh runs keep more work available than there are worker lanes, so a slow
 /// batch cannot leave the rest of the machine idle. Runs created before this
 /// was introduced retain version 1 and therefore their exact stored job
 /// partition when resumed with a newer coordinator.
-pub const BATCHING_VERSION: u32 = 2;
+pub const BATCHING_VERSION: u32 = 3;
 
 fn legacy_resume_compatibility() -> u32 { 0 }
 

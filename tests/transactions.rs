@@ -18,7 +18,9 @@
 //! | `Q.cpp` | nothing | `0x1500..0x1600` |
 //!
 //! `Q.cpp` claims ground that touches `B.cpp`, so a transaction for either one
-//! depends on the other's neighbour. They must be decided in one lane.
+//! depends on the other's neighbour. The scheduler records that conflict;
+//! current batching may still divide an oversized component, after which the
+//! coordinator re-proves the proposals in candidate order.
 
 mod common;
 
@@ -172,15 +174,16 @@ fn a_candidate_and_the_neighbour_it_narrows_are_published_as_one_transaction() {
     assert_eq!(summary["dispositions"]["B.cpp"], "revised-by-transaction");
     assert_eq!(summary["dispositions"]["A.cpp"], "accepted");
 
-    // A.cpp and Q.cpp both depend on B.cpp, so one lane decided both, one
-    // after the other: which of them was decided first cannot depend on which
-    // of two lanes happened to finish first.
+    // A.cpp and Q.cpp both depend on B.cpp. Current batching may split an
+    // oversized conflict component so both lanes stay busy; integration then
+    // re-proves them in candidate order, independent of which lane finished
+    // first.
     let jobs = std::fs::read_dir(fixture.root.join(format!("{stage}/jobs"))).unwrap().count();
-    assert_eq!(jobs, 1, "conflicting candidates were split across lanes");
-    let job = fixture.json(&format!("{stage}/jobs/00000/job.json"));
-    let mut batched = names(&job["candidates"]);
-    batched.sort();
-    assert_eq!(batched, ["A.cpp", "Q.cpp"], "{job:#}");
+    assert_eq!(jobs, 2, "the dependency hub should not serialize both workers");
+    let first = fixture.json(&format!("{stage}/jobs/00000/job.json"));
+    let second = fixture.json(&format!("{stage}/jobs/00001/job.json"));
+    assert_eq!(names(&first["candidates"]), ["A.cpp"], "{first:#}");
+    assert_eq!(names(&second["candidates"]), ["Q.cpp"], "{second:#}");
 
     let journal = fixture.json(&format!("build/dtk-migrate/runs/{id}/publication.json"));
     assert_eq!(journal["status"], "published", "{journal:#}");

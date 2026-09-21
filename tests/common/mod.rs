@@ -62,6 +62,16 @@ if os.environ.get("DTK_MIGRATE_FIXTURE_ABORT") and "integration" in Path.cwd().p
 if os.environ.get("DTK_MIGRATE_FIXTURE_ABORT_DISCOVER") and "discover" in Path.cwd().parts:
     sys.exit("fixture: interrupted before discovery")
 
+# Lets coordinator tests make two worker-proved ownership changes fail only
+# when combined. Each name is a split block header. This models a linker
+# interaction the candidate footprints did not predict.
+rejected = [name for name in os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_COMBINATION", "").split(",") if name]
+workspace = Path(os.environ.get("DTK_MIGRATE_WORKSPACE_ROOT", ""))
+if rejected and workspace.name == "integration":
+    splits = Path("config/PAL/splits.txt").read_text()
+    if all(("\n" + name + ":\n") in ("\n" + splits) for name in rejected):
+        sys.exit("fixture: rejected combined ownership")
+
 units = json.loads(Path("fixture_units.json").read_text())
 source_linked = set(json.loads(Path("build/PAL/fixture_linked.json").read_text()))
 out = Path("build/PAL")
@@ -152,7 +162,9 @@ for name, status in objects:
 Path("build/PAL").mkdir(parents=True, exist_ok=True)
 Path("build/PAL/fixture_linked.json").write_text(json.dumps(source_linked))
 outputs = "build/PAL/main.elf build/PAL/main.dol build/PAL/report.json build/PAL/ok"
-lines.append(f"build {outputs}: link {' '.join(linked)}")
+splits_stamp = Path("build/PAL/fixture_splits.stamp")
+splits_stamp.write_text(Path("config/PAL/splits.txt").read_text())
+lines.append(f"build {outputs}: link {' '.join(linked)} | build/PAL/fixture_splits.stamp")
 lines.append("build build.ninja objdiff.json: configure | configure.py")
 lines.append("")
 Path("build.ninja").write_text("\n".join(lines), encoding="utf-8")

@@ -520,8 +520,11 @@ change. Refusals made without a build are reported by category:
 | `dependency-not-permitted` | It must write a unit that `--only` or an earlier stage's reservation excludes. The whole transaction is refused; its candidate half alone would be a different change. |
 
 Candidates whose transactions read or write a common unit, or claim touching
-ground, form one conflict component and are always evaluated in the same worker,
-in candidate order. `coverage.json` lists every applied transaction with its
+ground, form one conflict component. Ordinary components are evaluated in one
+worker in candidate order. An oversized component is divided into ordered
+chunks so one dependency hub cannot leave the other workers idle; those worker
+results remain proposals until the coordinator re-proves their combination in
+candidate order. `coverage.json` lists every applied transaction with its
 per-unit gains and losses, including ones a later refinement superseded.
 
 When functions in an eligible sequence identify data symbols the source version

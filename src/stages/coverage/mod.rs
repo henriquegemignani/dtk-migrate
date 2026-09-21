@@ -736,16 +736,8 @@ impl Stage for Coverage {
         if candidates.is_empty() || candidates.iter().any(|c| !preferred.contains_key(&c.name)) {
             return self.evaluate(ctx, prepared, candidates, preferred);
         }
-        match self.integrate_proven(ctx, prepared, candidates, preferred) {
-            Ok(outcome) => Ok(outcome),
-            Err(error) if is_trial_failure(&error) => {
-                tracing::info!(
-                    "coverage: proved worker union did not hold; falling back to ordered trials: {error:#}"
-                );
-                self.evaluate(ctx, prepared, candidates, preferred)
-            }
-            Err(error) => Err(error),
-        }
+        let baseline = ctx.build(None)?;
+        self.integrate_adaptive(ctx, prepared, candidates, preferred, &baseline)
     }
 
     fn rediscover(
@@ -828,18 +820,84 @@ impl Observations {
 
 fn short(id: &str) -> &str { &id[..id.len().min(16)] }
 
+fn merge_outcomes(mut left: Outcome, right: Outcome) -> Outcome {
+    left.accepted.extend(right.accepted);
+    left.deferred.extend(right.deferred);
+    for (unit, ids) in right.tried {
+        left.tried.entry(unit).or_default().extend(ids);
+    }
+    left.selections.extend(right.selections);
+    left.events.extend(right.events);
+    left.applied.extend(right.applied);
+    left.report = right.report;
+    left.validation = right.validation;
+    left
+}
+
 impl Coverage {
+    /// Re-proves worker selections in the largest groups the current
+    /// coordinator state can sustain. A failed union is split in candidate
+    /// order; a passing left half is committed before the right half is tried,
+    /// so the result has the same deterministic ordering and exact transaction
+    /// preconditions as ordinary evaluation without paying one build for every
+    /// worker-proved candidate.
+    fn integrate_adaptive(
+        &self,
+        ctx: &BuildContext,
+        prepared: &Prepared,
+        candidates: &[Candidate],
+        preferred: &Selections,
+        baseline: &Report,
+    ) -> Result<Outcome> {
+        match self.integrate_proven(ctx, prepared, candidates, preferred, baseline) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if is_trial_failure(&error) && candidates.len() == 1 => {
+                tracing::info!(
+                    "coverage: worker selection for {} did not hold during integration; trying its fallbacks: {error:#}",
+                    candidates[0].name
+                );
+                self.evaluate(ctx, prepared, candidates, preferred)
+            }
+            Err(error) if is_trial_failure(&error) => {
+                let middle = candidates.len() / 2;
+                tracing::info!(
+                    "coverage: proved union of {} selections did not hold; splitting into {} and {}: {error:#}",
+                    candidates.len(),
+                    middle,
+                    candidates.len() - middle
+                );
+                let left = self.integrate_adaptive(
+                    ctx,
+                    prepared,
+                    &candidates[..middle],
+                    preferred,
+                    baseline,
+                )?;
+                let right = self.integrate_adaptive(
+                    ctx,
+                    prepared,
+                    &candidates[middle..],
+                    preferred,
+                    &left.report,
+                )?;
+                Ok(merge_outcomes(left, right))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Applies worker-proved selections in coordinator order, then proves
-    /// their union once. Conflict components were kept in one worker and were
-    /// already evaluated in this order; components assigned to other workers
-    /// have disjoint read/write footprints. The final build remains the
-    /// authority. A failure returns to the ordinary ordered evaluator.
+    /// their union once. Ordinary conflict components were evaluated in one
+    /// worker; an oversized component may have been split to keep lanes busy.
+    /// The final build remains the authority, and adaptive integration divides
+    /// a union that exposes either kind of interaction.
     fn integrate_proven(
         &self,
         ctx: &BuildContext,
         prepared: &Prepared,
         candidates: &[Candidate],
         preferred: &Selections,
+        baseline: &Report,
     ) -> Result<Outcome> {
         let names: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
         if names.len() != candidates.len() {
@@ -849,7 +907,6 @@ impl Coverage {
         let mut splits_owned = Owned::take(&splits_path(ctx))?;
         let mut config_owned = Owned::take(&config_path(ctx))?;
         let mut splits = Splits::parse(&String::from_utf8(splits_owned.original().to_vec())?)?;
-        let baseline = ctx.build(None)?;
         let starting_complete = baseline.measures.complete_code;
         let mut observations = Observations::default();
         let mut selections = Selections::new();
@@ -929,7 +986,7 @@ impl Coverage {
             &BTreeSet::new(),
             &mut observations,
         )?;
-        if regresses(&baseline, &final_report) {
+        if regresses(baseline, &final_report) {
             bail!(ValidationError("worker union regresses an existing unit".into()));
         }
         if final_report.measures.complete_code < starting_complete {

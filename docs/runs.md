@@ -200,8 +200,10 @@ per-worker limit; Ninja's `-j` only limits the processes it starts, and without
 that bound a three-worker run oversubscribes the machine by a factor of its core
 count. Fresh runs keep up to two batches ready per worker and workers pull from
 one shared queue. This keeps linkers occupied when a failed batch takes longer
-to bisect than its neighbours. Conflict components still remain in one batch,
-even when that prevents full occupancy.
+to bisect than its neighbours. Ordinary conflict components remain in one
+batch. A component larger than the computed batch size is split into ordered
+chunks: worker results are proposals against the same frozen baseline, and the
+coordinator re-proves their ordered combination before keeping it.
 
 Disk is checked before starting, for every copy plus headroom. Both the baselines
 and the job artifacts are kept for inspection and resume, so a long run consumes
@@ -225,10 +227,13 @@ Each stage result records preparation, worker and integration wall time, and
 each worker result records its own wall time. Coverage integration applies
 worker-proved, nonconflicting selections in coordinator order and validates
 their union with one build. If that union fails, it restores the baseline and
-uses the ordinary per-alternative evaluator to isolate the interaction. The
-in-process matcher returns its typed coverage report directly; only the durable
-observation record is serialized, instead of writing and immediately reparsing
-a second full JSON report during every rediscovery round.
+bisects the ordered selections, committing each passing subgroup before trying
+the next. Only a failing single-candidate leaf returns to the ordinary
+per-alternative evaluator. This isolates a few cross-worker linker conflicts in
+logarithmic group trials instead of replaying every worker-proved selection one
+at a time. The in-process matcher returns its typed coverage report directly;
+only the durable observation record is serialized, instead of writing and
+immediately reparsing a second full JSON report during every rediscovery round.
 
 The development Cargo profile is optimized while retaining debug assertions
 and symbols. `cargo build` is the normal installation path for this local tool,

@@ -262,6 +262,16 @@ fn only_an_unlinked_unit() -> Vec<CoverageReport> {
     (0..=3).map(|_| report("NTSC", "PAL", units())).collect()
 }
 
+fn independent_worlds() -> Vec<CoverageReport> {
+    let units = || {
+        vec![
+            unit("A.cpp", vec![anchor("A_one", A_FIRST.0, A_FIRST.1)]),
+            unit("B.cpp", vec![anchor("B_one", B_RANGE.0, B_RANGE.1)]),
+        ]
+    };
+    (0..=2).map(|_| report("NTSC", "PAL", units())).collect()
+}
+
 #[test]
 fn the_coordinator_follows_the_cascade_it_was_never_told_about() {
     let Some(fixture) = build_fixture(&cascade_worlds()) else {
@@ -510,4 +520,46 @@ fn a_stage_whose_every_candidate_is_refused_finishes_with_them_deferred() {
     assert_eq!(summary["newly_supported_units"], 0);
     assert_eq!(summary["newly_assigned_code_bytes"], 0);
     assert_eq!(summary["dispositions"]["Unlinked.cpp"], "build-failure");
+}
+
+#[test]
+fn a_failed_worker_union_is_bisected_without_replaying_every_selection() {
+    let Some(fixture) = build_fixture(&independent_worlds()) else {
+        eprintln!("skipped: needs ninja and python on PATH");
+        return;
+    };
+    let output = fixture.migrate(&[], &["DTK_MIGRATE_FIXTURE_REJECT_COMBINATION", "A.cpp,B.cpp"]);
+    assert!(output.status.success(), "{}", describe(&output));
+    let id = fixture.run_id();
+    let stage = format!("build/dtk-migrate/runs/{id}/coverage");
+
+    // Each candidate passed in its own worker. Their union is the only state
+    // the fixture rejects, so integration must keep the ordered left half and
+    // isolate the right half rather than abandoning or replaying both.
+    for job in ["00000", "00001"] {
+        let result = fixture.json(&format!("{stage}/jobs/{job}/result.json"));
+        assert_eq!(names(&result["accepted"]).len(), 1, "{result:#}");
+        assert!(names(&result["deferred"]).is_empty(), "{result:#}");
+    }
+    let result = fixture.json(&format!("{stage}/result.json"));
+    assert_eq!(names(&result["accepted"]), ["A.cpp"], "{result:#}");
+    assert_eq!(names(&result["deferred"]), ["B.cpp"], "{result:#}");
+
+    let published = fixture.published_splits();
+    assert_eq!(published.keys().collect::<Vec<_>>(), ["A.cpp"], "{published:#?}");
+    assert_eq!(published["A.cpp"], [line(".text", A_FIRST.0, A_FIRST.1)]);
+
+    // The full union, the passing half and the failing leaf are visible in the
+    // integration log. A serial fallback would repeat both candidates after
+    // the failed union and therefore require another successful B build.
+    let log = fixture.read(&format!("{stage}/integration-evidence/build.log"));
+    assert!(log.contains("fixture: rejected combined ownership"), "{log}");
+    assert!(
+        result["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| { event["unit"] == "B.cpp" && event["status"] == "rejected" }),
+        "{result:#}"
+    );
 }

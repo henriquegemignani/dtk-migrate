@@ -236,9 +236,10 @@ pub struct Applied {
 
 /// What evaluating a candidate may read or change.
 ///
-/// Two candidates whose footprints conflict are one scheduling unit: they go
-/// to the same worker, in candidate order, so which of them is decided first
-/// can never depend on which lane finished first.
+/// Conflicting footprints form scheduling components. Ordinary components go
+/// to the same worker in candidate order. The current batching policy may
+/// divide an oversized component between workers, whose results remain
+/// proposals until the coordinator re-proves them in candidate order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Footprint {
     pub units: BTreeSet<String>,

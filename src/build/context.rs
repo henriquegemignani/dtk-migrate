@@ -99,10 +99,13 @@ impl BuildContext {
     /// oversubscribes the machine by a factor of its core count.
     fn env(&self) -> Vec<(String, String)> {
         let jobs = self.build_jobs.to_string();
-        ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "RAYON_NUM_THREADS"]
-            .iter()
-            .map(|key| ((*key).to_string(), jobs.clone()))
-            .collect()
+        let mut env: Vec<(String, String)> =
+            ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "RAYON_NUM_THREADS"]
+                .iter()
+                .map(|key| ((*key).to_string(), jobs.clone()))
+                .collect();
+        env.push(("DTK_MIGRATE_WORKSPACE_ROOT".to_string(), self.root.display().to_string()));
+        env
     }
 
     /// Runs `configure.py`, then patches the build graph it generated.
