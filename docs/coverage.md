@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 19, evidence schema 11, identification schema 18. Every threshold
+Policy version 28, evidence schema 12, identification schema 23. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -247,6 +247,21 @@ unowned, and the two target neighbours must still be held when the proposal
 is built. The certificate applies only to the complete code range; a partial
 claim cannot borrow its proof. This rule needs identification schema 22 and
 does not infer ownership from a repeated helper body or vtable name alone.
+
+Coverage policy 28 can add one small weak `.data` vtable allocation to that
+run's code claim in the same atomic transaction. The 16–64-byte source split
+must contain one explicitly sized weak vtable plus only alignment padding;
+the target gap must have one explicitly sized object symbol covering it.
+Unique nonweak vtables of other held units must
+abut it on both sides in both versions. The target gap has the same aligned
+size, and its bytes must equal the source bytes apart from one
+destructor pointer at the same word offset. That pointer must resolve to the
+run's paired destructor, whose target HA/LO references point back to the
+target table. The stage rechecks the source body, both held target flanks,
+the pointer layout and the absence of a foreign target owner before offering
+the combined transaction. The code-only claim remains a fallback. This
+rule is deliberately limited to the table bounded by those exact seams;
+it does not claim pooled strings or assign other weak vtables by name.
 
 Identification schema 23 records source-binary callers. Coverage policy 26
 may extend a represented unit by one changed terminal function when its last

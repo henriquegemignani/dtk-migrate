@@ -263,3 +263,15 @@ baseline-specific manifest and score are retained on F: at
 `target/b65-policy20-verified-manifest.json` and
 `target/b65-policy20-head-light-score/score.json`. This focused run does not
 replace the full policy-16 or policy-17 migration results above.
+
+Policy 28's focused coverage-only run `20716-205110` claimed
+`GuiSys/CGuiFactories.cpp`'s relocation-linked code body and one bounded weak
+`.data` vtable in a single transaction. The PAL rebuild has the retail SHA-1.
+A manifest made from the run's exact saved baseline and the independently
+verified `ca286f45` oracle scores 1,184 correct code bytes plus 16 correct
+data bytes gained, zero known wrong or lost bytes, and 424 verified controls
+unchanged. The code body is exact; the full body remains partial because this
+rule does not claim the eight-byte `.rodata` string. The manifest and score
+are under `target/cgui-factories-weak-vtable-policy28-*` on F:. The frozen
+checkout's split was restored to SHA-256 `a59a122d…` after the trial. This
+focused run does not replace a full multi-stage historical migration.

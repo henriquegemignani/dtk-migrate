@@ -74,6 +74,7 @@ pub const SCORE_SCHEMA: u32 = 5;
 /// reinterpret a future coverage schema merely because some fields deserialize.
 const TYPED_IDENTIFICATION_COVERAGE_SCHEMA: u32 = 10;
 const REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA: u32 = 11;
+const LATEST_COVERAGE_SCHEMA: u32 = 12;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -1009,14 +1010,16 @@ fn referenced_identifications(
     if coverage.schema == TYPED_IDENTIFICATION_COVERAGE_SCHEMA {
         return typed_identifications(coverage, source, target);
     }
-    if coverage.schema != REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA {
-        if coverage.schema > REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA {
+    if !(REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA..=LATEST_COVERAGE_SCHEMA)
+        .contains(&coverage.schema)
+    {
+        if coverage.schema > LATEST_COVERAGE_SCHEMA {
             bail!("Coverage summary schema {} is newer than the benchmark", coverage.schema);
         }
         return Ok((BTreeMap::new(), BTreeMap::new()));
     }
     let reference = coverage.observation.ok_or_else(|| {
-        anyhow::anyhow!("Coverage summary schema 11 is missing its ownership observation reference")
+        anyhow::anyhow!("Coverage summary is missing its ownership observation reference")
     })?;
     if !crate::analysis::ownership::identification_schema_supported(reference.schema) {
         bail!("Coverage observation uses unsupported identification schema {}", reference.schema);

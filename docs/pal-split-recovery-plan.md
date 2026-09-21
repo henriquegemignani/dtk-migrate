@@ -14,6 +14,47 @@ ownership transactions. The full historical NTSC→PAL runs and held-out diagnos
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
 
+### Policy 28: a bounded weak vtable beside a relocation-linked code run
+
+Coverage evidence schema 12 records a 16–64-byte aligned `.data` allocation
+only when the source split starts with one explicitly sized weak vtable and
+contains nothing except its alignment padding, the target has one explicitly
+sized object symbol spanning an unowned gap of the same size, and two unique
+nonweak vtables owned by other units abut
+the source and target gaps on both sides. The two raw spans must be identical
+except for one pointer at the same offset: it changes from the source run's
+destructor to its paired target destructor, which refers back to the target
+table through HA/LO relocations. The stage checks those facts against the
+saved observations and current split ownership. It offers the table together
+with the relocation-linked code run in one transaction, retaining code alone
+as a fallback. Only the certified table's padding is exempted from the
+alternative-ranking penalty; unrelated data keeps that penalty.
+
+On the frozen `b65ad2a6` PAL checkout, this produced one certificate,
+`GuiSys/CGuiFactories.cpp`. Focused run `20716-205110` selected the combined
+claim: `.text 0x802ADCD8–0x802AE178` and `.data
+0x803D4608–0x803D4618`. It published and rebuilt to retail SHA-1
+`4d3780c77842ae7fddbdd5732b70bed100df5c65`. A manifest made from the
+run's exact saved baseline and the independently verified `ca286f45` oracle
+scores 1,184 correct code bytes and 16 correct data bytes gained, zero known
+wrong or lost bytes, and 424 verified controls unchanged. The complete TU is
+still partial: the later split also owns eight bytes of `.rodata` that this
+rule deliberately leaves unclaimed. The focused split was restored to its
+saved SHA-256 `a59a122d…` after scoring; score and manifest are under
+`target/cgui-factories-weak-vtable-policy28-*` on F:.
+
+All five PAL calibration scenarios exited with zero incorrect selections and
+exactly the same held-out exact/attributed/missed counts as policy 26. They
+do not exercise this table claim: `everything` removes its held flanks, while
+the other masking scenarios do not offer this TU with the required context.
+
+The bounds, exact bytes and paired references strongly constrain this one
+placement but do not by themselves identify which compiled PAL object would
+emit a weak table. The old checkout has no PAL `CGuiFactories` compile rule,
+so the stale object cannot fill that gap. The later verified oracle confirms
+the claimed ownership for this case; general emitted-owner proof remains a
+separate plan item. No pooled string is claimed.
+
 ### Policy 27: require a producing rule for clean compiled objects
 
 The frozen PAL checkout contains a leftover `CGuiFactories.o`, but its

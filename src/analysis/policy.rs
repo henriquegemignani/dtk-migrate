@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 27;
+pub const POLICY_VERSION: u32 = 28;
+pub const MIN_BOUNDED_WEAK_VTABLE_BYTES: u32 = 16;
+pub const MAX_BOUNDED_WEAK_VTABLE_BYTES: u32 = 64;
+pub const BOUNDED_WEAK_VTABLE_ALIGNMENT: u32 = 8;
 pub const MIN_COMPILED_TERMINAL_MEMBERS: usize = 3;
 pub const MAX_COMPILED_TERMINAL_MEMBERS: usize = 8;
 pub const MIN_REFERENCE_PLACED_DATA_PAIRS: usize = 2;
@@ -100,6 +103,15 @@ pub struct CoveragePolicy {
     /// touches, with exact before-state preconditions, a named receiver for
     /// every transferred address, and a stable identity.
     pub atomic_ownership_transactions: bool,
+    /// An exactly bounded weak vtable may accompany a relocation-linked code run.
+    #[serde(default)]
+    pub infer_bounded_weak_vtables: bool,
+    #[serde(default)]
+    pub minimum_bounded_weak_vtable_bytes: u32,
+    #[serde(default)]
+    pub maximum_bounded_weak_vtable_bytes: u32,
+    #[serde(default)]
+    pub bounded_weak_vtable_alignment: u32,
     pub minimum_anchor_bytes: u32,
     pub normalized_body_must_be_unique: bool,
     pub confirm_normalized_bytes_after_hash: bool,
@@ -255,6 +267,10 @@ pub fn current_policy() -> CoveragePolicy {
         prefer_combined_exact_anchors: true,
         refuse_unevidenced_ownership_loss: true,
         atomic_ownership_transactions: true,
+        infer_bounded_weak_vtables: true,
+        minimum_bounded_weak_vtable_bytes: MIN_BOUNDED_WEAK_VTABLE_BYTES,
+        maximum_bounded_weak_vtable_bytes: MAX_BOUNDED_WEAK_VTABLE_BYTES,
+        bounded_weak_vtable_alignment: BOUNDED_WEAK_VTABLE_ALIGNMENT,
         minimum_anchor_bytes: MIN_ANCHOR_BYTES,
         normalized_body_must_be_unique: true,
         confirm_normalized_bytes_after_hash: true,

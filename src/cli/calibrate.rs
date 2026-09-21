@@ -722,6 +722,7 @@ mod tests {
             boundary_sequences: Vec::new(),
             adjacent_owner_transitions: Vec::new(),
             required_extracts: Vec::new(),
+            bounded_weak_vtables: Vec::new(),
         }
     }
 

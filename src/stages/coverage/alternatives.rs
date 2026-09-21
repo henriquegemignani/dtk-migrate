@@ -35,10 +35,10 @@ use crate::{
     analysis::{
         boundaries::{self, EdgeHypothesis, Side},
         coverage::{
-            AdjacentOwnerTransition, BoundarySequence, CoverageAnchor, CoverageUnit, GapHelper,
-            LayoutShiftAnchor, SequenceFunction,
+            AdjacentOwnerTransition, BoundarySequence, BoundedWeakVtable, CoverageAnchor,
+            CoverageUnit, GapHelper, LayoutShiftAnchor, SequenceFunction,
         },
-        ownership::{ClaimClass, ObservationIndex, OwnershipAssessment},
+        ownership::{ClaimClass, ObservationIndex, OwnershipAssessment, RelocationLinkedRun},
         policy::*,
     },
     project::{
@@ -894,6 +894,10 @@ fn finish(mut draft: Draft, setting: &Setting) -> Option<Alternative> {
             .filter(|record| record.class == ClaimClass::IndependentlyAttributed)
             .filter_map(|record| record.attribution_id.clone()),
     );
+    if !draft.own_expansions.is_empty() {
+        let anchors = serde_json::to_vec(&draft.anchors).ok()?;
+        evidence.push(format!("cross-section:{:x}", Sha256::digest(anchors)));
+    }
     let transaction = OwnershipTransaction::build(setting.blocks, changes, Provenance {
         policy: setting.policy.clone(),
         observation_sha256: setting.observations.digest().to_string(),
@@ -1162,6 +1166,22 @@ fn anchor_value(function: &SequenceFunction, section: &str) -> serde_json::Value
 }
 
 fn sort_alternatives(alternatives: &mut [Alternative]) {
+    let unexplained_padding = |alternative: &Alternative| -> u32 {
+        alternative
+            .ownership
+            .records
+            .iter()
+            .filter(|record| {
+                record.class == ClaimClass::Padding
+                    && !record.retained
+                    && !(alternative.evidence == "relocation-linked-run+bounded-weak-vtable"
+                        && record.section == ".data")
+            })
+            .filter_map(|record| {
+                parse_address(&record.end)?.checked_sub(parse_address(&record.start)?)
+            })
+            .sum()
+    };
     alternatives.sort_by(|a, b| {
         b.ownership
             .complete_membership
@@ -1177,7 +1197,9 @@ fn sort_alternatives(alternatives: &mut [Alternative]) {
             })
             .then_with(|| b.ownership.supported_edges.cmp(&a.ownership.supported_edges))
             .then_with(|| b.ownership.independent_members.cmp(&a.ownership.independent_members))
-            .then_with(|| a.ownership.padding_bytes.cmp(&b.ownership.padding_bytes))
+            // Only this bounded table certificate explains its .data bytes;
+            // other data padding retains the existing ranking penalty.
+            .then_with(|| unexplained_padding(a).cmp(&unexplained_padding(b)))
             .then_with(|| b.transaction.members.len().cmp(&a.transaction.members.len()))
             .then_with(|| b.gained_bytes.cmp(&a.gained_bytes))
             .then_with(|| parse_address(&a.start).cmp(&parse_address(&b.start)))
@@ -1199,6 +1221,99 @@ pub use run_inference::{RunDiagnostic, joint_runs};
 /// Within one kind, the widest claim first.
 fn sort_drafts(drafts: &mut [Draft]) {
     drafts.sort_by_key(|draft| (Reverse(draft.end - draft.start), draft.start));
+}
+
+fn bounded_weak_vtable_eligible(
+    proof: &BoundedWeakVtable,
+    run: &RelocationLinkedRun,
+    source_blocks: &Blocks,
+    target_blocks: &Blocks,
+    observations: &ObservationIndex,
+) -> bool {
+    let (
+        Some(source_vtable),
+        Some(target_vtable),
+        Some(source_destructor),
+        Some(target_destructor),
+    ) = (
+        parse_address(&run.source_vtable),
+        parse_address(&run.target_vtable),
+        parse_address(&run.source_destructor),
+        parse_address(&run.target_destructor),
+    )
+    else {
+        return false;
+    };
+    let (Some(source_end), Some(target_end)) =
+        (proof.source_start.checked_add(proof.size), proof.target_start.checked_add(proof.size))
+    else {
+        return false;
+    };
+    let offset = proof.pointer_offset as usize;
+    if proof.unit != run.unit
+        || source_destructor == target_destructor
+        || proof.section != ".data"
+        || run.vtable_section != proof.section
+        || proof.source_start != source_vtable
+        || proof.target_start != target_vtable
+        || proof.source_destructor != source_destructor
+        || proof.target_destructor != target_destructor
+        || !(MIN_BOUNDED_WEAK_VTABLE_BYTES..=MAX_BOUNDED_WEAK_VTABLE_BYTES).contains(&proof.size)
+        || proof.size % BOUNDED_WEAK_VTABLE_ALIGNMENT != 0
+        || proof.source_start % BOUNDED_WEAK_VTABLE_ALIGNMENT != 0
+        || proof.target_start % BOUNDED_WEAK_VTABLE_ALIGNMENT != 0
+        || offset % 4 != 0
+        || offset + 4 > proof.size as usize
+        || proof.source_bytes.len() != proof.size as usize
+        || proof.target_bytes.len() != proof.size as usize
+        || proof.source_bytes[..offset] != proof.target_bytes[..offset]
+        || proof.source_bytes[offset + 4..] != proof.target_bytes[offset + 4..]
+        || u32::from_be_bytes(proof.source_bytes[offset..offset + 4].try_into().unwrap())
+            != source_destructor
+        || u32::from_be_bytes(proof.target_bytes[offset..offset + 4].try_into().unwrap())
+            != target_destructor
+        || proof.left.unit == run.unit
+        || proof.right.unit == run.unit
+        || proof.left.unit == proof.right.unit
+        || !observations.report().vtable_pairs.contains(&proof.left)
+        || !observations.report().vtable_pairs.contains(&proof.right)
+        || proof.left.source_section != proof.section
+        || proof.left.target_section != proof.section
+        || proof.right.source_section != proof.section
+        || proof.right.target_section != proof.section
+        || parse_address(&proof.left.source_address).and_then(|at| at.checked_add(proof.left.size))
+            != Some(source_vtable)
+        || parse_address(&proof.left.target_address).and_then(|at| at.checked_add(proof.left.size))
+            != Some(target_vtable)
+        || parse_address(&proof.right.source_address) != Some(source_end)
+        || parse_address(&proof.right.target_address) != Some(target_end)
+        || single_section_range(source_blocks, &run.unit, &proof.section)
+            != Some((proof.source_start, source_end))
+        || overlaps_other(&run.unit, &proof.section, proof.target_start, target_end, target_blocks)
+        || block_contains_range(
+            target_blocks,
+            &run.unit,
+            &proof.section,
+            proof.target_start,
+            target_end,
+        )
+    {
+        return false;
+    }
+    [&proof.left, &proof.right].iter().all(|pair| {
+        let Some(source_start) = parse_address(&pair.source_address) else { return false };
+        let Some(target_start) = parse_address(&pair.target_address) else { return false };
+        let Some(source_end) = source_start.checked_add(pair.size) else { return false };
+        let Some(target_end) = target_start.checked_add(pair.size) else { return false };
+        block_contains_range(source_blocks, &pair.unit, &proof.section, source_start, source_end)
+            && block_contains_range(
+                target_blocks,
+                &pair.unit,
+                &proof.section,
+                target_start,
+                target_end,
+            )
+    })
 }
 
 /// Every range this unit could claim, strongest evidence first.
@@ -1627,7 +1742,7 @@ pub fn build(
             {
                 return None;
             }
-            Some(alternative(
+            let code = alternative(
                 &run.section,
                 start,
                 end,
@@ -1635,8 +1750,36 @@ pub fn build(
                 "relocation-linked-run",
                 None,
                 Vec::new(),
-            ))
+            );
+            let mut drafts = Vec::new();
+            let proofs: Vec<_> = unit
+                .bounded_weak_vtables
+                .iter()
+                .filter(|proof| {
+                    bounded_weak_vtable_eligible(
+                        proof,
+                        run,
+                        source_blocks,
+                        target_blocks,
+                        observations,
+                    )
+                })
+                .collect();
+            if let [proof] = proofs.as_slice() {
+                let mut combined = code.clone();
+                combined.evidence = "relocation-linked-run+bounded-weak-vtable".into();
+                combined.anchors.push(serde_json::to_value(proof).ok()?);
+                combined.own_expansions.push(OwnExpansion {
+                    section: proof.section.clone(),
+                    start: proof.target_start,
+                    end: proof.target_start + proof.size,
+                });
+                drafts.push(combined);
+            }
+            drafts.push(code);
+            Some(drafts)
         })
+        .flatten()
         .collect();
     sort_drafts(&mut relocation_runs);
 
@@ -2759,6 +2902,7 @@ mod tests {
             boundary_sequences: Vec::new(),
             adjacent_owner_transitions: Vec::new(),
             required_extracts: Vec::new(),
+            bounded_weak_vtables: Vec::new(),
         }
     }
 
@@ -3854,6 +3998,15 @@ mod tests {
             split_line(".text", 0x100, 0x200),
             split_line(".data", 0x500, 0x510),
         ]);
+        let mut ranked = vec![code.clone(), combined];
+        sort_alternatives(&mut ranked);
+        assert_eq!(ranked[0].gained_bytes, 0x100);
+
+        let mut certified = with_data.clone();
+        certified.evidence = "relocation-linked-run+bounded-weak-vtable".into();
+        let mut ranked = vec![code, finish(certified, &setting).unwrap()];
+        sort_alternatives(&mut ranked);
+        assert_eq!(ranked[0].gained_bytes, 0x110);
 
         let mut forward = alternative(".text", 0x100, 0x200, vec![], "paired-run", None, vec![]);
         forward.own_expansions = vec![
@@ -3868,6 +4021,109 @@ mod tests {
         occupied.insert("owner.cpp".into(), vec![split_line(".data", 0x500, 0x510)]);
         let blocked = Setting { blocks: &occupied, ..setting };
         assert!(finish(with_data, &blocked).is_none());
+    }
+
+    #[test]
+    fn weak_vtable_claim_requires_both_held_flanks_and_exact_pointer_layout() {
+        use crate::analysis::ownership::VtablePair;
+
+        let left = VtablePair {
+            unit: "left.cpp".into(),
+            name: "__vt__Left".into(),
+            size: 0x40,
+            source_section: ".data".into(),
+            source_address: "0x00000FC0".into(),
+            target_section: ".data".into(),
+            target_address: "0x00001FC0".into(),
+        };
+        let right = VtablePair {
+            unit: "right.cpp".into(),
+            name: "__vt__Right".into(),
+            size: 0x40,
+            source_section: ".data".into(),
+            source_address: "0x00001010".into(),
+            target_section: ".data".into(),
+            target_address: "0x00002010".into(),
+        };
+        let mut report = coverage_fixture::report("source", "target", vec![
+            coverage_fixture::unit("a.cpp", vec![]),
+            coverage_fixture::unit("left.cpp", vec![]),
+            coverage_fixture::unit("right.cpp", vec![]),
+        ]);
+        report.identifications.vtable_pairs = vec![left.clone(), right.clone()];
+        let observations =
+            ObservationIndex::load_self_contained(report.identifications, "source", "target")
+                .unwrap();
+        let run = RelocationLinkedRun {
+            unit: "a.cpp".into(),
+            section: ".text".into(),
+            start: "0x00003000".into(),
+            end: "0x00004100".into(),
+            inserted: "0x00003500".into(),
+            source_vtable: "0x00001000".into(),
+            target_vtable: "0x00002000".into(),
+            vtable_section: ".data".into(),
+            source_destructor: "0x00003000".into(),
+            target_destructor: "0x00004000".into(),
+            first_attribution_id: "first".into(),
+            left_attribution_id: "left".into(),
+            right_attribution_id: "right".into(),
+        };
+        let mut source_bytes = vec![0; 16];
+        source_bytes[8..12].copy_from_slice(&0x3000u32.to_be_bytes());
+        let mut target_bytes = vec![0; 16];
+        target_bytes[8..12].copy_from_slice(&0x4000u32.to_be_bytes());
+        let proof = BoundedWeakVtable {
+            unit: "a.cpp".into(),
+            section: ".data".into(),
+            source_start: 0x1000,
+            target_start: 0x2000,
+            size: 0x10,
+            pointer_offset: 8,
+            source_destructor: 0x3000,
+            target_destructor: 0x4000,
+            source_bytes,
+            target_bytes,
+            left,
+            right,
+        };
+        let source_blocks = IndexMap::from([
+            ("a.cpp".into(), vec![split_line(".data", 0x1000, 0x1010)]),
+            ("left.cpp".into(), vec![split_line(".data", 0xFC0, 0x1000)]),
+            ("right.cpp".into(), vec![split_line(".data", 0x1010, 0x1050)]),
+        ]);
+        let target_blocks = IndexMap::from([
+            ("left.cpp".into(), vec![split_line(".data", 0x1FC0, 0x2000)]),
+            ("right.cpp".into(), vec![split_line(".data", 0x2010, 0x2050)]),
+        ]);
+        let eligible = |candidate: &BoundedWeakVtable, target: &Blocks| {
+            bounded_weak_vtable_eligible(candidate, &run, &source_blocks, target, &observations)
+        };
+        assert!(eligible(&proof, &target_blocks));
+        let mut changed = proof.clone();
+        changed.target_bytes[0] = 1;
+        assert!(!eligible(&changed, &target_blocks));
+        let mut changed = proof.clone();
+        changed.right.target_address = "0x00002018".into();
+        assert!(!eligible(&changed, &target_blocks));
+        let mut changed = proof.clone();
+        changed.target_bytes[8..12].copy_from_slice(&0x4004u32.to_be_bytes());
+        assert!(!eligible(&changed, &target_blocks));
+        let mut unchanged = proof.clone();
+        unchanged.target_destructor = proof.source_destructor;
+        unchanged.target_bytes[8..12].copy_from_slice(&proof.source_destructor.to_be_bytes());
+        let mut same_pointer_run = run.clone();
+        same_pointer_run.target_destructor = same_pointer_run.source_destructor.clone();
+        assert!(!bounded_weak_vtable_eligible(
+            &unchanged,
+            &same_pointer_run,
+            &source_blocks,
+            &target_blocks,
+            &observations,
+        ));
+        let mut occupied = target_blocks.clone();
+        occupied.insert("foreign.cpp".into(), vec![split_line(".data", 0x2000, 0x2010)]);
+        assert!(!eligible(&proof, &occupied));
     }
 
     #[test]
