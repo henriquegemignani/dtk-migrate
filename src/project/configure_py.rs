@@ -256,9 +256,21 @@ fn parse_declarations(text: &str, mask: &Mask) -> Result<Vec<Declaration>> {
         if arguments.len() < 2 {
             continue;
         }
-        let Some(name) = string_literal(text, arguments[1].0, arguments[1].1) else {
+        let Some(mut name) = string_literal(text, arguments[1].0, arguments[1].1) else {
             continue;
         };
+        let mut src_dir = None;
+        for &(start, end) in &arguments[2..] {
+            let Some(value) = string_keyword_argument(text, mask, start, end, "src_dir")? else {
+                continue;
+            };
+            if src_dir.replace(value).is_some() {
+                bail!("Object declaration for {name} gives src_dir more than once");
+            }
+        }
+        if let Some(src_dir) = src_dir {
+            name = resolved_source_name(&src_dir, &name);
+        }
         let (start, end) = arguments[0];
         declarations.push(Declaration {
             name,
@@ -267,6 +279,49 @@ fn parse_declarations(text: &str, mask: &Mask) -> Result<Vec<Declaration>> {
         });
     }
     Ok(declarations)
+}
+
+/// Reads a literal `name="value"` argument. An argument with another name is
+/// ignored, while a recognised keyword with a non-literal value is refused:
+/// without its value an Object's path cannot be matched safely to objdiff.
+fn string_keyword_argument(
+    text: &str,
+    mask: &Mask,
+    start: usize,
+    end: usize,
+    name: &str,
+) -> Result<Option<String>> {
+    if end - start < name.len() || &text[start..start + name.len()] != name {
+        return Ok(None);
+    }
+    let Some(equals) = skip_space(text, mask, start + name.len()).filter(|index| *index < end)
+    else {
+        return Ok(None);
+    };
+    if text.as_bytes()[equals] != b'=' {
+        return Ok(None);
+    }
+    let mut value_start = equals + 1;
+    while value_start < end
+        && (text.as_bytes()[value_start].is_ascii_whitespace() || mask.is_comment(value_start))
+    {
+        value_start += 1;
+    }
+    let value = (value_start < end)
+        .then(|| string_literal(text, value_start, end))
+        .flatten()
+        .with_context(|| format!("{name} in an Object declaration must be a plain string"))?;
+    Ok(Some(value))
+}
+
+fn resolved_source_name(src_dir: &str, name: &str) -> String {
+    let src_dir = src_dir.trim_end_matches(['/', '\\']);
+    let name = name.trim_start_matches(['/', '\\']);
+    if src_dir.is_empty() {
+        name.replace('\\', "/")
+    } else {
+        format!("{src_dir}/{name}").replace('\\', "/")
+    }
 }
 
 fn parse_status(text: &str, mask: &Mask, start: usize, end: usize) -> Status {
@@ -450,6 +505,46 @@ mod tests {
         let source = "    Object(\n        MatchingFor(\"NTSC\"), \"a.cpp\"\n    ),\n";
         let out = render(source, &["a.cpp"]).unwrap();
         assert!(out.contains("        MatchingFor(\"NTSC\", \"PAL\"), \"a.cpp\"\n"), "{out}");
+    }
+
+    #[test]
+    fn src_dir_is_part_of_the_declaration_identity() {
+        let source = "    Object(\n\
+                      \x20       MatchingFor(\"NTSC\"),\n\
+                      \x20       \"rstl/rstl_strings.cpp\",\n\
+                      \x20       src_dir=\"extern/rstl/src\",\n\
+                      \x20   ),\n";
+        let configure = parse(source);
+        assert_eq!(configure.declarations()[0].name, "extern/rstl/src/rstl/rstl_strings.cpp");
+        assert!(
+            configure.configured_names("NTSC").contains("extern/rstl/src/rstl/rstl_strings.cpp")
+        );
+
+        let out = configure
+            .render("PAL", &BTreeSet::from(["extern/rstl/src/rstl/rstl_strings.cpp".to_string()]))
+            .unwrap();
+        assert!(out.contains("MatchingFor(\"NTSC\", \"PAL\")"), "{out}");
+        assert!(out.contains("src_dir=\"extern/rstl/src\""), "{out}");
+    }
+
+    #[test]
+    fn a_non_literal_src_dir_is_refused() {
+        let text = format!(
+            "{VERSIONS}objects = [\n    Object(NonMatching, \"a.cpp\", src_dir=SOURCE),\n]\n"
+        );
+        let error = Configure::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("src_dir") && error.contains("plain string"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_resolved_paths_are_rejected() {
+        let text = format!(
+            "{VERSIONS}objects = [\n\
+             \x20   Object(NonMatching, \"a.cpp\", src_dir=\"extern\"),\n\
+             \x20   Object(Matching, \"extern/a.cpp\"),\n\
+             ]\n"
+        );
+        assert!(Configure::parse(&text).unwrap_err().to_string().contains("Multiple Object"));
     }
 
     #[test]
