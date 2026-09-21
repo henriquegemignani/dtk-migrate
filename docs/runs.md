@@ -166,8 +166,25 @@ stage, tools and timeout — is reused; anything else is rerun rather than trust
 A worker failure stops the other lanes but keeps what they finished, so a resumed
 run picks up from there.
 
-An incomplete run must resume under the same `dtk-migrate` executable that
+An incomplete run normally resumes under the same `dtk-migrate` executable that
 started it; the error names the frozen copy if the current executable differs.
+After a compatible bug fix, explicitly adopt the current binary with:
+
+```text
+dtk-migrate run --project-root <project> --resume <id> --resume-with-current
+```
+
+The run freezes that executable under its `tools/` directory, appends the old
+and new SHA-256 identities to `run.json`, and uses the new copy for subsequent
+integration and build hooks. Completed worker jobs keep the environment under
+which they were measured, so matching sibling results remain reusable. The
+upgrade works only when the run schema and `RESUME_COMPATIBILITY` level match;
+a change that would reinterpret preparation, worker outcomes or integration
+must bump that level and requires a fresh run. Without the explicit flag, a
+different executable remains an error. Runs created before the compatibility
+field existed are refused unless their exact executable digest appears in the
+audited predecessor list; sharing schema 9 alone is not compatibility.
+
 Resuming a run that already published validates its saved result and certificates,
 then does no build work. A run written
 by a tool with a different run schema (currently 9) is refused rather than

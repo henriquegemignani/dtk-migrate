@@ -42,6 +42,13 @@ pub mod publish;
 /// by a tool that would misread it.
 pub const SCHEMA: u32 = 9;
 
+/// Stored preparations and worker results that may be interpreted by the same
+/// coordinator compatibility level. Bump this when a same-schema executable
+/// would prepare, evaluate or integrate an existing artifact differently.
+pub const RESUME_COMPATIBILITY: u32 = 1;
+
+fn legacy_resume_compatibility() -> u32 { 0 }
+
 /// The stages, in the only order they may run in.
 ///
 /// Naming comes first because everything else depends on it: the matcher
@@ -75,6 +82,10 @@ pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
     pub schema: u32,
+    /// Lets an explicit coordinator upgrade distinguish a compatible bug fix
+    /// from a binary that would reinterpret the run's stored artifacts.
+    #[serde(default = "legacy_resume_compatibility")]
+    pub resume_compatibility: u32,
     pub id: String,
     pub root: PathBuf,
     pub source: String,
@@ -92,6 +103,15 @@ pub struct RunRecord {
     pub build_timeout_seconds: Option<f64>,
     pub tools: FrozenTools,
     pub environment: Environment,
+    /// The environment used to fingerprint worker jobs before the first
+    /// compatible coordinator upgrade. Keeping it stable lets completed jobs
+    /// remain reusable; [`coordinator_upgrades`](Self::coordinator_upgrades)
+    /// records which binary evaluated later work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_environment: Option<Environment>,
+    /// Explicit, ordered changes of the executable coordinating this run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coordinator_upgrades: Vec<CoordinatorUpgrade>,
     /// Git identity of the owner checkout before any stage ran. Absent for
     /// projects outside Git; a benchmark may require it when a revision-bound
     /// build proof matters.
@@ -99,6 +119,19 @@ pub struct RunRecord {
     pub repository: Option<RepositoryState>,
     /// The owner project's inputs as they were when the run started.
     pub owner: Snapshot,
+}
+
+impl RunRecord {
+    pub fn artifact_environment(&self) -> &Environment {
+        self.artifact_environment.as_ref().unwrap_or(&self.environment)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinatorUpgrade {
+    pub from_sha256: String,
+    pub to_sha256: String,
+    pub frozen_executable: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

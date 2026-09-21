@@ -174,7 +174,11 @@ fn job_fingerprint(
         "baseline": baseline,
         "candidates": batch,
         "stage": stage,
-        "environment": run.environment,
+        // A compatible coordinator upgrade is allowed to reuse completed
+        // worker jobs. Their identity remains the environment under which the
+        // run first measured them; the run separately records every binary
+        // that coordinated later work.
+        "environment": run.artifact_environment(),
         "build_timeout": run.build_timeout_seconds,
     }))
 }

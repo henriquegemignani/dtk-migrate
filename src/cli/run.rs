@@ -13,12 +13,20 @@ use serde::Serialize;
 
 use crate::{
     run::{
-        Environment, FrozenTools, ORDER, RepositoryState, RunDir, RunRecord, SCHEMA, StageResult,
-        publish, run_stage, stage_for, write_json,
+        CoordinatorUpgrade, Environment, FrozenTools, ORDER, RESUME_COMPATIBILITY, RepositoryState,
+        RunDir, RunRecord, SCHEMA, StageResult, publish, run_stage, stage_for, write_json,
     },
     stages::{MutationScope, Prepared},
     workspace::{LOCK_NAME, ProjectLock, Snapshot},
 };
+
+/// Same-schema binaries released before `resume_compatibility` was recorded,
+/// audited as producing artifacts this build interprets identically. Keep this
+/// list exact: a blanket schema-9 exemption would mix older ownership policies.
+const COMPATIBLE_LEGACY_COORDINATORS: [&str; 2] = [
+    "c014d5828731dfdbc8477307832a2ed9e6763fc62e884c4f1b2ab994b75735e0",
+    "c0deef83c7c621b5b519bbfd3a59929f30464947bd77bb7384b5bef409b8b476",
+];
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {
@@ -69,6 +77,10 @@ pub struct Args {
     /// Continue the run with this id instead of starting a new one.
     #[arg(long, value_name = "RUN_ID")]
     pub resume: Option<String>,
+    /// Resume using this compatible dtk-migrate build, recording the upgrade.
+    /// Completed worker jobs retain their original measurement identity.
+    #[arg(long, requires = "resume")]
+    pub resume_with_current: bool,
 }
 
 /// What the whole run concluded, written to `result.json`.
@@ -94,15 +106,22 @@ pub fn run(args: Args) -> Result<()> {
     // and produce a build nobody can reconstruct.
     let _lock = ProjectLock::acquire(&root)?;
 
-    let (dir, record) = match &args.resume {
+    let (dir, mut record) = match &args.resume {
         Some(id) => resume(&root, id)?,
         None => start(&root, &args)?,
     };
     crate::run::check_environment(&record)?;
+    let already_published = published(&dir)?;
+    if args.resume_with_current {
+        if already_published {
+            bail!("Run {} is already published and does not need a coordinator upgrade", record.id);
+        }
+        upgrade_coordinator(&dir, &mut record, &std::env::current_exe()?)?;
+    }
     // The frozen hook is also the coordinator that interprets evidence and
     // decides what to publish. A same-schema rebuild must not silently finish
     // an incomplete run under the old binary's recorded identity.
-    if !published(&dir)? {
+    if !already_published {
         require_frozen_coordinator(
             &record.environment.migrate_sha256,
             &record.tools.hook,
@@ -238,6 +257,7 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
     };
     let record = RunRecord {
         schema: SCHEMA,
+        resume_compatibility: RESUME_COMPATIBILITY,
         id,
         root: root.to_path_buf(),
         source: source.clone(),
@@ -250,6 +270,8 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
         only: args.only.clone(),
         build_timeout_seconds: Some(args.build_timeout),
         environment: Environment::of(&tools)?,
+        artifact_environment: None,
+        coordinator_upgrades: Vec::new(),
         repository,
         tools,
         owner,
@@ -257,6 +279,69 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
     write_json(&dir.path.join("run.json"), &record)?;
     tracing::info!("Run {}: {}", record.id, dir.path.display());
     Ok((dir, record))
+}
+
+/// Rebinds an incomplete run to this executable without changing the identity
+/// used by already completed worker jobs. The compatibility level is the
+/// promise that their stored candidates and outcomes retain the same meaning.
+fn upgrade_coordinator(dir: &RunDir, record: &mut RunRecord, executable: &Path) -> Result<()> {
+    if effective_resume_compatibility(record) != RESUME_COMPATIBILITY {
+        bail!(
+            "Run {} has coordinator compatibility {}, but this build requires {}; start a fresh run",
+            record.id,
+            record.resume_compatibility,
+            RESUME_COMPATIBILITY
+        );
+    }
+    let digest = crate::workspace::hash_file(executable)?;
+    if digest == record.environment.migrate_sha256 {
+        tracing::info!("Run {} already uses this dtk-migrate executable", record.id);
+        return Ok(());
+    }
+
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let frozen =
+        dir.path.join("tools").join(format!("dtk-migrate-coordinator-{}{suffix}", &digest[..16]));
+    if frozen.exists() {
+        if crate::workspace::hash_file(&frozen)? != digest {
+            bail!("Coordinator upgrade path contains different bytes: {}", frozen.display());
+        }
+    } else {
+        std::fs::copy(executable, &frozen)
+            .with_context(|| format!("Failed to freeze {}", executable.display()))?;
+        if crate::workspace::hash_file(&frozen)? != digest {
+            bail!("Frozen coordinator does not match {}", executable.display());
+        }
+    }
+
+    let previous = record.environment.migrate_sha256.clone();
+    if record.artifact_environment.is_none() {
+        record.artifact_environment = Some(record.environment.clone());
+    }
+    record.resume_compatibility = RESUME_COMPATIBILITY;
+    record.tools.hook = frozen.clone();
+    // The old environment was checked immediately before this call. Change
+    // only the executable identity; a concurrent PATH, evidence or tool change
+    // must still disagree with the recorded environment on the next check.
+    record.environment.migrate_sha256 = digest.clone();
+    record.coordinator_upgrades.push(CoordinatorUpgrade {
+        from_sha256: previous,
+        to_sha256: digest,
+        frozen_executable: frozen.clone(),
+    });
+    publish::write_json_atomic(&dir.path.join("run.json"), record)?;
+    tracing::info!("Run {} upgraded to compatible coordinator {}", record.id, frozen.display());
+    Ok(())
+}
+
+fn effective_resume_compatibility(record: &RunRecord) -> u32 {
+    if record.resume_compatibility == 0
+        && COMPATIBLE_LEGACY_COORDINATORS.contains(&record.environment.migrate_sha256.as_str())
+    {
+        RESUME_COMPATIBILITY
+    } else {
+        record.resume_compatibility
+    }
 }
 
 fn repository_state(root: &Path) -> Result<Option<RepositoryState>> {
@@ -310,7 +395,8 @@ fn require_frozen_coordinator(expected: &str, frozen: &Path, executable: &Path) 
     if crate::workspace::hash_file(executable)? != expected {
         bail!(
             "The current dtk-migrate executable differs from the one that started this run; \
-             resume with the frozen executable at {} or start a fresh run",
+             resume with the frozen executable at {}, pass --resume-with-current for an explicit \
+             compatible upgrade, or start a fresh run",
             frozen.display()
         );
     }
@@ -426,6 +512,45 @@ fn timestamp_id() -> String {
 mod tests {
     use super::*;
 
+    fn upgrade_record(directory: &Path, original: &Path) -> RunRecord {
+        let tools_dir = directory.join("tools");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        let dtk = tools_dir.join("dtk");
+        let ninja = tools_dir.join("ninja");
+        let hook = tools_dir.join("dtk-migrate");
+        std::fs::write(&dtk, b"dtk").unwrap();
+        std::fs::write(&ninja, b"ninja").unwrap();
+        std::fs::copy(original, &hook).unwrap();
+        let tools = FrozenTools {
+            dtk,
+            ninja,
+            python: PathBuf::from("python"),
+            hook,
+            toolchain_root: directory.to_path_buf(),
+        };
+        RunRecord {
+            schema: SCHEMA,
+            resume_compatibility: RESUME_COMPATIBILITY,
+            id: "run".into(),
+            root: directory.to_path_buf(),
+            source: "NTSC".into(),
+            target: "PAL".into(),
+            stages: vec!["verify".into()],
+            workers: 1,
+            build_jobs: 1,
+            batch_size: 1,
+            limit: None,
+            only: Vec::new(),
+            build_timeout_seconds: Some(120.0),
+            environment: Environment::of(&tools).unwrap(),
+            artifact_environment: None,
+            coordinator_upgrades: Vec::new(),
+            tools,
+            repository: None,
+            owner: Snapshot { manifest: Default::default(), mappings: serde_json::Value::Null },
+        }
+    }
+
     #[test]
     fn stages_run_in_the_fixed_order_whatever_order_they_are_asked_for() {
         let asked = ["verify".to_string(), "derive".to_string(), "discover".to_string()];
@@ -507,5 +632,87 @@ mod tests {
             require_frozen_coordinator(&digest, &original, &rebuilt).unwrap_err().to_string();
         assert!(error.contains("differs"), "{error}");
         assert!(error.contains(&original.display().to_string()), "{error}");
+        assert!(error.contains("--resume-with-current"), "{error}");
+    }
+
+    #[test]
+    fn a_compatible_upgrade_is_frozen_recorded_and_keeps_worker_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original");
+        let rebuilt = directory.path().join("rebuilt");
+        std::fs::write(&original, b"original coordinator").unwrap();
+        std::fs::write(&rebuilt, b"compatible fixed coordinator").unwrap();
+        let dir = RunDir { path: directory.path().join("run") };
+        std::fs::create_dir_all(&dir.path).unwrap();
+        let mut record = upgrade_record(&dir.path, &original);
+        let worker_environment = record.artifact_environment().clone();
+
+        upgrade_coordinator(&dir, &mut record, &rebuilt).unwrap();
+
+        assert_eq!(record.artifact_environment(), &worker_environment);
+        assert_eq!(record.coordinator_upgrades.len(), 1);
+        let upgrade = &record.coordinator_upgrades[0];
+        assert_eq!(upgrade.from_sha256, worker_environment.migrate_sha256);
+        assert_eq!(upgrade.to_sha256, crate::workspace::hash_file(&rebuilt).unwrap());
+        assert_eq!(record.tools.hook, upgrade.frozen_executable);
+        assert!(record.tools.hook.is_file());
+        crate::run::check_environment(&record).unwrap();
+        require_frozen_coordinator(
+            &record.environment.migrate_sha256,
+            &record.tools.hook,
+            &rebuilt,
+        )
+        .unwrap();
+        assert!(
+            require_frozen_coordinator(
+                &record.environment.migrate_sha256,
+                &record.tools.hook,
+                &original,
+            )
+            .is_err()
+        );
+
+        let stored: RunRecord = crate::run::read_json(&dir.path.join("run.json")).unwrap();
+        assert_eq!(stored.coordinator_upgrades, record.coordinator_upgrades);
+        upgrade_coordinator(&dir, &mut record, &rebuilt).unwrap();
+        assert_eq!(record.coordinator_upgrades.len(), 1, "the same upgrade is a no-op");
+    }
+
+    #[test]
+    fn an_incompatible_coordinator_cannot_upgrade_a_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original");
+        let rebuilt = directory.path().join("rebuilt");
+        std::fs::write(&original, b"original coordinator").unwrap();
+        std::fs::write(&rebuilt, b"incompatible coordinator").unwrap();
+        let dir = RunDir { path: directory.path().join("run") };
+        std::fs::create_dir_all(&dir.path).unwrap();
+        let mut record = upgrade_record(&dir.path, &original);
+        record.resume_compatibility += 1;
+
+        let error = upgrade_coordinator(&dir, &mut record, &rebuilt).unwrap_err().to_string();
+        assert!(error.contains("compatibility"), "{error}");
+        assert!(record.coordinator_upgrades.is_empty());
+    }
+
+    #[test]
+    fn legacy_runs_need_an_exact_audited_predecessor_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original");
+        std::fs::write(&original, b"original coordinator").unwrap();
+        let dir = RunDir { path: directory.path().join("run") };
+        std::fs::create_dir_all(&dir.path).unwrap();
+        let record = upgrade_record(&dir.path, &original);
+        let mut value = serde_json::to_value(record).unwrap();
+        value.as_object_mut().unwrap().remove("resume_compatibility");
+        value["environment"]["migrate_sha256"] = serde_json::Value::String("unknown".into());
+        let unknown: RunRecord = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(unknown.resume_compatibility, 0);
+        assert_eq!(effective_resume_compatibility(&unknown), 0);
+
+        value["environment"]["migrate_sha256"] =
+            serde_json::Value::String(COMPATIBLE_LEGACY_COORDINATORS[0].into());
+        let audited: RunRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(effective_resume_compatibility(&audited), RESUME_COMPATIBILITY);
     }
 }
