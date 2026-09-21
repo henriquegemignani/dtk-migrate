@@ -35,8 +35,9 @@ use crate::{
     analysis::{
         boundaries::{self, EdgeHypothesis, Side},
         coverage::{
-            AdjacentOwnerTransition, BoundarySequence, BoundedWeakVtable, CoverageAnchor,
-            CoverageUnit, GapHelper, LayoutShiftAnchor, SequenceFunction,
+            AdjacentOwnerTransition, BoundarySequence, BoundedRunData, BoundedWeakVtable,
+            CoverageAnchor, CoverageUnit, DataReferenceSite, GapHelper, LayoutShiftAnchor,
+            SequenceFunction,
         },
         ownership::{ClaimClass, ObservationIndex, OwnershipAssessment, RelocationLinkedRun},
         policy::*,
@@ -1174,8 +1175,10 @@ fn sort_alternatives(alternatives: &mut [Alternative]) {
             .filter(|record| {
                 record.class == ClaimClass::Padding
                     && !record.retained
-                    && !(alternative.evidence == "relocation-linked-run+bounded-weak-vtable"
+                    && !((alternative.evidence.contains("bounded-weak-vtable")
                         && record.section == ".data")
+                        || (alternative.evidence.contains("bounded-run-data")
+                            && record.section == ".rodata"))
             })
             .filter_map(|record| {
                 parse_address(&record.end)?.checked_sub(parse_address(&record.start)?)
@@ -1197,8 +1200,8 @@ fn sort_alternatives(alternatives: &mut [Alternative]) {
             })
             .then_with(|| b.ownership.supported_edges.cmp(&a.ownership.supported_edges))
             .then_with(|| b.ownership.independent_members.cmp(&a.ownership.independent_members))
-            // Only this bounded table certificate explains its .data bytes;
-            // other data padding retains the existing ranking penalty.
+            // Only the bounded certificates explain their respective data
+            // bytes; other data padding retains the existing ranking penalty.
             .then_with(|| unexplained_padding(a).cmp(&unexplained_padding(b)))
             .then_with(|| b.transaction.members.len().cmp(&a.transaction.members.len()))
             .then_with(|| b.gained_bytes.cmp(&a.gained_bytes))
@@ -1314,6 +1317,140 @@ fn bounded_weak_vtable_eligible(
                 target_end,
             )
     })
+}
+
+fn bounded_run_data_eligible(
+    proof: &BoundedRunData,
+    run: &RelocationLinkedRun,
+    source_blocks: &Blocks,
+    target_blocks: &Blocks,
+    observations: &ObservationIndex,
+) -> bool {
+    let (Some(source_end), Some(target_end)) =
+        (proof.source_start.checked_add(proof.size), proof.target_start.checked_add(proof.size))
+    else {
+        return false;
+    };
+    let aligned = proof
+        .symbol_size
+        .checked_add(BOUNDED_RUN_DATA_ALIGNMENT - 1)
+        .map(|value| value / BOUNDED_RUN_DATA_ALIGNMENT * BOUNDED_RUN_DATA_ALIGNMENT);
+    if proof.unit != run.unit
+        || proof.section != ".rodata"
+        || !(MIN_BOUNDED_RUN_DATA_BYTES..=MAX_BOUNDED_RUN_DATA_BYTES).contains(&proof.size)
+        || aligned != Some(proof.size)
+        || proof.source_start % BOUNDED_RUN_DATA_ALIGNMENT != 0
+        || proof.target_start % BOUNDED_RUN_DATA_ALIGNMENT != 0
+        || proof.source_bytes.len() != proof.size as usize
+        || proof.source_bytes != proof.target_bytes
+        || proof.left.pair.unit == run.unit
+        || proof.right.pair.unit == run.unit
+        || proof.left.pair.unit == proof.right.pair.unit
+        || !observations.report().local_data_pairs.contains(&proof.left.pair)
+        || !observations.report().local_data_pairs.contains(&proof.right.pair)
+        || !run.members.iter().any(|member| {
+            parse_address(&member.source_address) == Some(proof.source_function)
+                && parse_address(&member.target_address) == Some(proof.target_function)
+        })
+        || single_section_range(source_blocks, &run.unit, &proof.section)
+            != Some((proof.source_start, source_end))
+        || overlaps_other(&run.unit, &proof.section, proof.target_start, target_end, target_blocks)
+        || block_contains_range(
+            target_blocks,
+            &run.unit,
+            &proof.section,
+            proof.target_start,
+            target_end,
+        )
+    {
+        return false;
+    }
+    let sites = |references: &[crate::analysis::object_evidence::CompiledReference], at: u64| {
+        let mut result: Vec<_> = references
+            .iter()
+            .filter(|reference| {
+                reference.target_section.as_deref() == Some(".rodata")
+                    && reference.target_address == at
+                    && matches!(reference.kind.as_str(), "PpcAddr16Ha" | "PpcAddr16Lo")
+            })
+            .map(|reference| DataReferenceSite {
+                offset: reference.offset,
+                kind: reference.kind.clone(),
+                addend: reference.addend,
+            })
+            .collect();
+        result.sort_by(|a, b| (&a.offset, &a.kind, a.addend).cmp(&(&b.offset, &b.kind, b.addend)));
+        result
+    };
+    let source_refs = observations.report().unmatched_source_references.iter().find(|item| {
+        item.section == ".text" && parse_address(&item.address) == Some(proof.source_function)
+    });
+    let target_refs = observations.report().unattributed_references.iter().find(|item| {
+        item.section == ".text" && parse_address(&item.address) == Some(proof.target_function)
+    });
+    if source_refs.is_none_or(|item| {
+        sites(&item.references, u64::from(proof.source_start)) != proof.reference_sites
+    }) || target_refs.is_none_or(|item| {
+        sites(&item.references, u64::from(proof.target_start)) != proof.reference_sites
+    }) || proof.reference_sites.len() != 2
+        || !proof.reference_sites.iter().any(|item| item.kind == "PpcAddr16Ha")
+        || !proof.reference_sites.iter().any(|item| item.kind == "PpcAddr16Lo")
+    {
+        return false;
+    }
+    let flank = |item: &crate::analysis::coverage::BoundedDataFlank,
+                 source_edge: u32,
+                 target_edge: u32,
+                 before: bool| {
+        if item.size == 0
+            || item.pair.source_section != proof.section
+            || item.pair.target_section != proof.section
+            || !item.pair.source_extent_known
+            || !item.pair.target_extent_known
+            || item.pair.source_size == 0
+            || item.pair.source_size != item.pair.target_size
+            || item
+                .pair
+                .source_size
+                .checked_add(BOUNDED_RUN_DATA_ALIGNMENT - 1)
+                .map(|value| value / BOUNDED_RUN_DATA_ALIGNMENT * BOUNDED_RUN_DATA_ALIGNMENT)
+                != Some(item.size)
+        {
+            return false;
+        }
+        let (Some(source_start), Some(target_start)) =
+            (parse_address(&item.pair.source_address), parse_address(&item.pair.target_address))
+        else {
+            return false;
+        };
+        let (Some(source_end), Some(target_end)) =
+            (source_start.checked_add(item.size), target_start.checked_add(item.size))
+        else {
+            return false;
+        };
+        let placed = if before {
+            source_end == source_edge && target_end == target_edge
+        } else {
+            source_start == source_edge && target_start == target_edge
+        };
+        placed
+            && block_contains_range(
+                source_blocks,
+                &item.pair.unit,
+                &proof.section,
+                source_start,
+                source_end,
+            )
+            && block_contains_range(
+                target_blocks,
+                &item.pair.unit,
+                &proof.section,
+                target_start,
+                target_end,
+            )
+    };
+    flank(&proof.left, proof.source_start, proof.target_start, true)
+        && flank(&proof.right, source_end, target_end, false)
 }
 
 /// Every range this unit could claim, strongest evidence first.
@@ -1751,8 +1888,8 @@ pub fn build(
                 None,
                 Vec::new(),
             );
-            let mut drafts = Vec::new();
-            let proofs: Vec<_> = unit
+            let mut certificates = Vec::new();
+            let vtable_proofs: Vec<_> = unit
                 .bounded_weak_vtables
                 .iter()
                 .filter(|proof| {
@@ -1765,15 +1902,53 @@ pub fn build(
                     )
                 })
                 .collect();
-            if let [proof] = proofs.as_slice() {
+            if let [proof] = vtable_proofs.as_slice() {
+                certificates.push((
+                    "bounded-weak-vtable",
+                    OwnExpansion {
+                        section: proof.section.clone(),
+                        start: proof.target_start,
+                        end: proof.target_start.checked_add(proof.size)?,
+                    },
+                    serde_json::to_value(proof).ok()?,
+                ));
+            }
+            let data_proofs: Vec<_> = unit
+                .bounded_run_data
+                .iter()
+                .filter(|proof| {
+                    bounded_run_data_eligible(
+                        proof,
+                        run,
+                        source_blocks,
+                        target_blocks,
+                        observations,
+                    )
+                })
+                .collect();
+            if let [proof] = data_proofs.as_slice() {
+                certificates.push((
+                    "bounded-run-data",
+                    OwnExpansion {
+                        section: proof.section.clone(),
+                        start: proof.target_start,
+                        end: proof.target_start.checked_add(proof.size)?,
+                    },
+                    serde_json::to_value(proof).ok()?,
+                ));
+            }
+            let mut drafts = Vec::new();
+            for mask in (1_usize..(1_usize << certificates.len())).rev() {
                 let mut combined = code.clone();
-                combined.evidence = "relocation-linked-run+bounded-weak-vtable".into();
-                combined.anchors.push(serde_json::to_value(proof).ok()?);
-                combined.own_expansions.push(OwnExpansion {
-                    section: proof.section.clone(),
-                    start: proof.target_start,
-                    end: proof.target_start + proof.size,
-                });
+                for (index, (label, expansion, anchor)) in certificates.iter().enumerate() {
+                    if mask & (1 << index) == 0 {
+                        continue;
+                    }
+                    combined.evidence.push('+');
+                    combined.evidence.push_str(label);
+                    combined.own_expansions.push(expansion.clone());
+                    combined.anchors.push(anchor.clone());
+                }
                 drafts.push(combined);
             }
             drafts.push(code);
@@ -2903,6 +3078,7 @@ mod tests {
             adjacent_owner_transitions: Vec::new(),
             required_extracts: Vec::new(),
             bounded_weak_vtables: Vec::new(),
+            bounded_run_data: Vec::new(),
         }
     }
 
@@ -4008,6 +4184,23 @@ mod tests {
         sort_alternatives(&mut ranked);
         assert_eq!(ranked[0].gained_bytes, 0x110);
 
+        let code = ranked.remove(1);
+        let mut with_rodata =
+            alternative(".text", 0x100, 0x200, vec![], "relocation-linked-run", None, vec![]);
+        with_rodata.own_expansions.push(OwnExpansion {
+            section: ".rodata".into(),
+            start: 0x400,
+            end: 0x408,
+        });
+        let ordinary = finish(with_rodata.clone(), &setting).unwrap();
+        let mut ranked = vec![code.clone(), ordinary];
+        sort_alternatives(&mut ranked);
+        assert_eq!(ranked[0].gained_bytes, 0x100);
+        with_rodata.evidence = "relocation-linked-run+bounded-run-data".into();
+        let mut ranked = vec![code, finish(with_rodata, &setting).unwrap()];
+        sort_alternatives(&mut ranked);
+        assert_eq!(ranked[0].gained_bytes, 0x108);
+
         let mut forward = alternative(".text", 0x100, 0x200, vec![], "paired-run", None, vec![]);
         forward.own_expansions = vec![
             OwnExpansion { section: ".rodata".into(), start: 0x400, end: 0x408 },
@@ -4065,6 +4258,10 @@ mod tests {
             vtable_section: ".data".into(),
             source_destructor: "0x00003000".into(),
             target_destructor: "0x00004000".into(),
+            members: vec![crate::analysis::ownership::RelocationRunMember {
+                source_address: "0x00003000".into(),
+                target_address: "0x00004000".into(),
+            }],
             first_attribution_id: "first".into(),
             left_attribution_id: "left".into(),
             right_attribution_id: "right".into(),
@@ -4123,6 +4320,151 @@ mod tests {
         ));
         let mut occupied = target_blocks.clone();
         occupied.insert("foreign.cpp".into(), vec![split_line(".data", 0x2000, 0x2010)]);
+        assert!(!eligible(&proof, &occupied));
+    }
+
+    #[test]
+    fn run_data_claim_requires_held_flanks_bytes_and_paired_reference_sites() {
+        use crate::analysis::{
+            coverage::{BoundedDataFlank, BoundedRunData, DataReferenceSite},
+            object_evidence::{CompiledReference, TargetFunctionReferences},
+            ownership::{
+                LocalDataPair, RelocationRunMember, SourceFunctionObservation,
+                TargetFunctionObservation,
+            },
+        };
+
+        let pair = |unit: &str, source: u32, target: u32| LocalDataPair {
+            unit: unit.into(),
+            source_section: ".rodata".into(),
+            source_address: format!("0x{source:08X}"),
+            source_name: "@stringBase0".into(),
+            target_section: ".rodata".into(),
+            target_address: format!("0x{target:08X}"),
+            target_name: "@stringBase0".into(),
+            source_size: 0x40,
+            target_size: 0x40,
+            source_extent_known: true,
+            target_extent_known: true,
+            reference_positions: 2,
+        };
+        let left = pair("left.cpp", 0xFC0, 0x1FC0);
+        let right = pair("right.cpp", 0x1008, 0x2008);
+        let reference = |address: u64, offset: u32, kind: &str| CompiledReference {
+            offset,
+            kind: kind.into(),
+            target: "@stringBase0".into(),
+            target_section: Some(".rodata".into()),
+            target_address: address,
+            addend: 0,
+        };
+        let references = |address: u64, function: u32| TargetFunctionReferences {
+            section: ".text".into(),
+            address: format!("0x{function:08X}"),
+            end: format!("0x{:08X}", function + 0x40),
+            references: vec![
+                reference(address, 8, "PpcAddr16Ha"),
+                reference(address, 16, "PpcAddr16Lo"),
+            ],
+        };
+        let mut report = coverage_fixture::report("source", "target", vec![
+            coverage_fixture::unit("a.cpp", vec![]),
+            coverage_fixture::unit("left.cpp", vec![]),
+            coverage_fixture::unit("right.cpp", vec![]),
+        ]);
+        report.identifications.local_data_pairs = vec![left.clone(), right.clone()];
+        report.identifications.source_functions = vec![SourceFunctionObservation {
+            name: "source_member".into(),
+            unit: "a.cpp".into(),
+            module: "main".into(),
+            section: ".text".into(),
+            address: "0x00003000".into(),
+            end: "0x00003040".into(),
+            extent_known: true,
+            normalized_body_sha256: None,
+            weak: false,
+            callers: Vec::new(),
+        }];
+        report.identifications.target_functions = vec![TargetFunctionObservation {
+            name: "target_member".into(),
+            module: "main".into(),
+            section: ".text".into(),
+            address: "0x00004000".into(),
+            end: "0x00004040".into(),
+            extent_known: true,
+            current_owner: None,
+            owner_autogenerated: false,
+            callers: Vec::new(),
+            normalized_body_sha256: None,
+            weak: false,
+        }];
+        report.identifications.unmatched_source_references = vec![references(0x1000, 0x3000)];
+        report.identifications.unattributed_references = vec![references(0x2000, 0x4000)];
+        let observations =
+            ObservationIndex::load_self_contained(report.identifications, "source", "target")
+                .unwrap();
+        let run = RelocationLinkedRun {
+            unit: "a.cpp".into(),
+            section: ".text".into(),
+            start: "0x00004000".into(),
+            end: "0x00004100".into(),
+            inserted: "0x00004080".into(),
+            source_vtable: "0x00005000".into(),
+            target_vtable: "0x00006000".into(),
+            vtable_section: ".data".into(),
+            source_destructor: "0x00003040".into(),
+            target_destructor: "0x00004040".into(),
+            members: vec![RelocationRunMember {
+                source_address: "0x00003000".into(),
+                target_address: "0x00004000".into(),
+            }],
+            first_attribution_id: "first".into(),
+            left_attribution_id: "left".into(),
+            right_attribution_id: "right".into(),
+        };
+        let reference_sites = vec![
+            DataReferenceSite { offset: 8, kind: "PpcAddr16Ha".into(), addend: 0 },
+            DataReferenceSite { offset: 16, kind: "PpcAddr16Lo".into(), addend: 0 },
+        ];
+        let proof = BoundedRunData {
+            unit: "a.cpp".into(),
+            section: ".rodata".into(),
+            source_start: 0x1000,
+            target_start: 0x2000,
+            size: 8,
+            symbol_size: 7,
+            source_bytes: b"widget\0\0".to_vec(),
+            target_bytes: b"widget\0\0".to_vec(),
+            source_function: 0x3000,
+            target_function: 0x4000,
+            reference_sites,
+            left: BoundedDataFlank { pair: left, size: 0x40 },
+            right: BoundedDataFlank { pair: right, size: 0x40 },
+        };
+        let source_blocks = IndexMap::from([
+            ("a.cpp".into(), vec![split_line(".rodata", 0x1000, 0x1008)]),
+            ("left.cpp".into(), vec![split_line(".rodata", 0xFC0, 0x1000)]),
+            ("right.cpp".into(), vec![split_line(".rodata", 0x1008, 0x1048)]),
+        ]);
+        let target_blocks = IndexMap::from([
+            ("left.cpp".into(), vec![split_line(".rodata", 0x1FC0, 0x2000)]),
+            ("right.cpp".into(), vec![split_line(".rodata", 0x2008, 0x2048)]),
+        ]);
+        let eligible = |candidate: &BoundedRunData, target: &Blocks| {
+            bounded_run_data_eligible(candidate, &run, &source_blocks, target, &observations)
+        };
+        assert!(eligible(&proof, &target_blocks));
+        let mut changed = proof.clone();
+        changed.target_bytes[0] ^= 1;
+        assert!(!eligible(&changed, &target_blocks));
+        let mut changed = proof.clone();
+        changed.reference_sites[0].offset = 4;
+        assert!(!eligible(&changed, &target_blocks));
+        let mut changed = proof.clone();
+        changed.right.pair.target_address = "0x0000200C".into();
+        assert!(!eligible(&changed, &target_blocks));
+        let mut occupied = target_blocks.clone();
+        occupied.insert("foreign.cpp".into(), vec![split_line(".rodata", 0x2000, 0x2008)]);
         assert!(!eligible(&proof, &occupied));
     }
 

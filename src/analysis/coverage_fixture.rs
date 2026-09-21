@@ -188,6 +188,7 @@ pub fn unit(name: &str, anchors: Vec<CoverageAnchor>) -> CoverageUnit {
         adjacent_owner_transitions: Vec::new(),
         required_extracts: Vec::new(),
         bounded_weak_vtables: Vec::new(),
+        bounded_run_data: Vec::new(),
     }
 }
 

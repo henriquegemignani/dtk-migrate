@@ -32,9 +32,9 @@ use crate::analysis::{
     },
 };
 
-pub const IDENTIFICATION_SCHEMA: u32 = 23;
+pub const IDENTIFICATION_SCHEMA: u32 = 24;
 mod relocation_run;
-pub use relocation_run::RelocationLinkedRun;
+pub use relocation_run::{RelocationLinkedRun, RelocationRunMember};
 #[derive(Clone, Copy)]
 enum DestructorPlacement {
     Unchecked,
@@ -114,8 +114,18 @@ pub struct LocalDataPair {
     pub target_section: String,
     pub target_address: String,
     pub target_name: String,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub source_size: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub target_size: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub source_extent_known: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub target_extent_known: bool,
     pub reference_positions: u32,
 }
+
+fn is_zero_u32(value: &u32) -> bool { *value == 0 }
 
 /// An otherwise unattributed target function placed at a source-unit head by
 /// two independently paired local data starts, a same-unit call, and the
@@ -1259,6 +1269,11 @@ impl ObservationIndex {
                 || pair.source_name.is_empty()
                 || pair.target_name.is_empty()
                 || pair.reference_positions < 2
+                || (report.schema >= 24 && (pair.source_size == 0 || pair.target_size == 0))
+                || (pair.source_extent_known && pair.source_size == 0)
+                || (pair.target_extent_known && pair.target_size == 0)
+                || source_address.checked_add(pair.source_size).is_none()
+                || target_address.checked_add(pair.target_size).is_none()
                 || !source_data.insert((pair.source_section.clone(), source_address))
                 || !target_data.insert((pair.target_section.clone(), target_address))
             {
@@ -3355,6 +3370,10 @@ pub fn identify_units_with_data(
                 target_section: target.obj.sections.get(right.section?)?.name.clone(),
                 target_address: hex(u32::try_from(right.address).ok()?),
                 target_name: right.name.clone(),
+                source_size: u32::try_from(left.size).ok()?,
+                target_size: u32::try_from(right.size).ok()?,
+                source_extent_known: left.size_known,
+                target_extent_known: right.size_known,
                 reference_positions: pair.evidence,
             })
         })
@@ -5160,6 +5179,10 @@ mod tests {
                 target_section: ".bss".into(),
                 target_address: hex(address),
                 target_name: name.into(),
+                source_size: 4,
+                target_size: 4,
+                source_extent_known: true,
+                target_extent_known: true,
                 reference_positions: 2,
             })
             .collect();

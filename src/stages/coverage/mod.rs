@@ -61,7 +61,7 @@ pub struct Coverage {
 }
 
 /// The evidence schema this stage understands.
-pub const EVIDENCE_SCHEMA: u32 = 12;
+pub const EVIDENCE_SCHEMA: u32 = 13;
 pub const POLICY_VERSION: u32 = crate::analysis::policy::POLICY_VERSION;
 
 const VALIDATION: &str = "atomic-ownership-transactions-with-exact-preconditions-and-canonical-attributed-ownership-and-unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-or-composed-independent-edges-or-decisive-joint-unit-runs-required-extracts-and-extracted-link-inputs-and-retail-bytes";

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use decomp_toolkit::{
     obj::{ObjRelocKind, ObjSectionKind, ObjSymbolKind},
@@ -14,13 +14,13 @@ use crate::analysis::{
     mask::Masked,
     matching::{MatchResult, MatchTarget, MatchTier},
     ownership::{
-        IdentificationReport, ObservationIndex, RelocationLinkedRun, VtablePair,
+        IdentificationReport, LocalDataPair, ObservationIndex, RelocationLinkedRun, VtablePair,
         destructor_emitter_placed,
     },
     source_slot::competing_source_slots,
 };
 
-pub const COVERAGE_SCHEMA: u32 = 12;
+pub const COVERAGE_SCHEMA: u32 = 13;
 pub use crate::analysis::policy::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +84,10 @@ pub struct CoverageUnit {
     /// two held data neighbours. The run alone does not grant data ownership.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bounded_weak_vtables: Vec<BoundedWeakVtable>,
+    /// Small read-only allocations placed by one relocation-linked member and
+    /// held allocations on both sides.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bounded_run_data: Vec<BoundedRunData>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +104,36 @@ pub struct BoundedWeakVtable {
     pub target_bytes: Vec<u8>,
     pub left: VtablePair,
     pub right: VtablePair,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundedRunData {
+    pub unit: String,
+    pub section: String,
+    pub source_start: u32,
+    pub target_start: u32,
+    pub size: u32,
+    pub symbol_size: u32,
+    pub source_bytes: Vec<u8>,
+    pub target_bytes: Vec<u8>,
+    pub source_function: u32,
+    pub target_function: u32,
+    pub reference_sites: Vec<DataReferenceSite>,
+    pub left: BoundedDataFlank,
+    pub right: BoundedDataFlank,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataReferenceSite {
+    pub offset: u32,
+    pub kind: String,
+    pub addend: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundedDataFlank {
+    pub pair: LocalDataPair,
+    pub size: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -407,6 +441,7 @@ pub fn build_report(
             adjacent_owner_transitions: Vec::new(),
             required_extracts: Vec::new(),
             bounded_weak_vtables: Vec::new(),
+            bounded_run_data: Vec::new(),
         });
         if section.kind == ObjSectionKind::Code {
             let end =
@@ -523,6 +558,7 @@ pub fn build_report(
                 adjacent_owner_transitions: Vec::new(),
                 required_extracts: Vec::new(),
                 bounded_weak_vtables: Vec::new(),
+                bounded_run_data: Vec::new(),
             })
             .anchors
             .push(CoverageAnchor {
@@ -591,6 +627,11 @@ pub fn build_report(
                     && let Some(unit) = units.get_mut(&run.unit)
                 {
                     unit.bounded_weak_vtables.push(proof);
+                }
+                for proof in bounded_run_data(source, target, &identifications, run) {
+                    if let Some(unit) = units.get_mut(&run.unit) {
+                        unit.bounded_run_data.push(proof);
+                    }
                 }
             }
         }
@@ -780,6 +821,216 @@ fn bounded_weak_vtable(
         left: (*left).clone(),
         right: (*right).clone(),
     })
+}
+
+fn bounded_run_data(
+    source: &MatchTarget,
+    target: &MatchTarget,
+    identifications: &IdentificationReport,
+    run: &RelocationLinkedRun,
+) -> Vec<BoundedRunData> {
+    let address = |text: &str| u32::from_str_radix(text.strip_prefix("0x")?, 16).ok();
+    let Some(source_section) = source.obj.sections.iter().find(|(_, item)| item.name == ".rodata")
+    else {
+        return Vec::new();
+    };
+    let source_section = source_section.1;
+    let Some(target_section) = target.obj.sections.iter().find(|(_, item)| item.name == ".rodata")
+    else {
+        return Vec::new();
+    };
+    let target_section = target_section.1;
+    let sites = |references: &[crate::analysis::object_evidence::CompiledReference], at: u64| {
+        let mut result: Vec<_> = references
+            .iter()
+            .filter(|reference| {
+                reference.target_section.as_deref() == Some(".rodata")
+                    && reference.target_address == at
+                    && matches!(reference.kind.as_str(), "PpcAddr16Ha" | "PpcAddr16Lo")
+            })
+            .map(|reference| DataReferenceSite {
+                offset: reference.offset,
+                kind: reference.kind.clone(),
+                addend: reference.addend,
+            })
+            .collect();
+        result.sort_by(|a, b| (&a.offset, &a.kind, a.addend).cmp(&(&b.offset, &b.kind, b.addend)));
+        result
+    };
+    let has_pair = |items: &[DataReferenceSite]| {
+        items.len() == 2
+            && items.iter().any(|item| item.kind == "PpcAddr16Ha")
+            && items.iter().any(|item| item.kind == "PpcAddr16Lo")
+    };
+    let explicit_symbol = |input: &MatchTarget, at: u32| {
+        let symbols: Vec<_> = input
+            .obj
+            .symbols
+            .iter()
+            .filter(|(_, symbol)| {
+                symbol.address == u64::from(at)
+                    && symbol.kind == ObjSymbolKind::Object
+                    && symbol.size_known
+                    && symbol.size > 0
+                    && symbol
+                        .section
+                        .is_some_and(|index| input.obj.sections[index].name == ".rodata")
+            })
+            .collect();
+        let [(_, symbol)] = symbols.as_slice() else { return None };
+        u32::try_from(symbol.size).ok()
+    };
+    let aligned = |size: u32| {
+        size.checked_add(BOUNDED_RUN_DATA_ALIGNMENT - 1)
+            .map(|value| value / BOUNDED_RUN_DATA_ALIGNMENT * BOUNDED_RUN_DATA_ALIGNMENT)
+    };
+    let bytes = |section: &decomp_toolkit::obj::ObjSection, start: u32, size: u32| {
+        let offset = usize::try_from(u64::from(start).checked_sub(section.address)?).ok()?;
+        Some(section.data.get(offset..offset.checked_add(size as usize)?)?.to_vec())
+    };
+    let flank = |pair: &LocalDataPair,
+                 source_edge: u32,
+                 target_edge: u32,
+                 before: bool|
+     -> Option<BoundedDataFlank> {
+        if pair.source_section != ".rodata"
+            || pair.target_section != ".rodata"
+            || pair.unit == run.unit
+        {
+            return None;
+        }
+        let source_start = address(&pair.source_address)?;
+        let target_start = address(&pair.target_address)?;
+        let source_size = explicit_symbol(source, source_start)?;
+        let target_size = explicit_symbol(target, target_start)?;
+        if source_size != target_size
+            || !pair.source_extent_known
+            || !pair.target_extent_known
+            || pair.source_size != source_size
+            || pair.target_size != target_size
+        {
+            return None;
+        }
+        let size = aligned(source_size)?;
+        let placed = if before {
+            source_start.checked_add(size) == Some(source_edge)
+                && target_start.checked_add(size) == Some(target_edge)
+        } else {
+            source_start == source_edge && target_start == target_edge
+        };
+        placed.then(|| BoundedDataFlank { pair: pair.clone(), size })
+    };
+
+    let mut found = Vec::new();
+    for member in &run.members {
+        let (Some(source_function), Some(target_function)) =
+            (address(&member.source_address), address(&member.target_address))
+        else {
+            continue;
+        };
+        let Some(source_refs) = identifications.unmatched_source_references.iter().find(|item| {
+            item.section == ".text" && address(&item.address) == Some(source_function)
+        }) else {
+            continue;
+        };
+        let Some(target_refs) = identifications.unattributed_references.iter().find(|item| {
+            item.section == ".text" && address(&item.address) == Some(target_function)
+        }) else {
+            continue;
+        };
+        let source_addresses: BTreeSet<u64> = source_refs
+            .references
+            .iter()
+            .filter(|item| item.target_section.as_deref() == Some(".rodata"))
+            .map(|item| item.target_address)
+            .collect();
+        let target_addresses: BTreeSet<u64> = target_refs
+            .references
+            .iter()
+            .filter(|item| item.target_section.as_deref() == Some(".rodata"))
+            .map(|item| item.target_address)
+            .collect();
+        for (source_address, target_address) in source_addresses
+            .iter()
+            .flat_map(|source| target_addresses.iter().map(move |target| (*source, *target)))
+        {
+            let reference_sites = sites(&source_refs.references, source_address);
+            if !has_pair(&reference_sites)
+                || reference_sites != sites(&target_refs.references, target_address)
+            {
+                continue;
+            }
+            let (Ok(source_start), Ok(target_start)) =
+                (u32::try_from(source_address), u32::try_from(target_address))
+            else {
+                continue;
+            };
+            let Some(symbol_size) = explicit_symbol(source, source_start) else { continue };
+            if explicit_symbol(target, target_start) != Some(symbol_size) {
+                continue;
+            }
+            let Some(size) = aligned(symbol_size) else { continue };
+            let Some((split_start, split)) = source_section.splits.for_address(source_start) else {
+                continue;
+            };
+            let Some(source_end) = source_start.checked_add(size) else { continue };
+            let Some(target_end) = target_start.checked_add(size) else { continue };
+            if split_start != source_start
+                || split.end != source_end
+                || split.unit != run.unit
+                || !(MIN_BOUNDED_RUN_DATA_BYTES..=MAX_BOUNDED_RUN_DATA_BYTES).contains(&size)
+                || source_start % BOUNDED_RUN_DATA_ALIGNMENT != 0
+                || target_start % BOUNDED_RUN_DATA_ALIGNMENT != 0
+                || target_section
+                    .splits
+                    .for_address(target_start)
+                    .is_some_and(|(_, item)| !target.obj.is_unit_autogenerated(&item.unit))
+            {
+                continue;
+            }
+            let left: Vec<_> = identifications
+                .local_data_pairs
+                .iter()
+                .filter_map(|pair| flank(pair, source_start, target_start, true))
+                .collect();
+            let right: Vec<_> = identifications
+                .local_data_pairs
+                .iter()
+                .filter_map(|pair| flank(pair, source_end, target_end, false))
+                .collect();
+            let ([left], [right]) = (left.as_slice(), right.as_slice()) else { continue };
+            if left.pair.unit == right.pair.unit {
+                continue;
+            }
+            let (Some(source_bytes), Some(target_bytes)) = (
+                bytes(source_section, source_start, size),
+                bytes(target_section, target_start, size),
+            ) else {
+                continue;
+            };
+            if source_bytes != target_bytes {
+                continue;
+            }
+            found.push(BoundedRunData {
+                unit: run.unit.clone(),
+                section: ".rodata".into(),
+                source_start,
+                target_start,
+                size,
+                symbol_size,
+                source_bytes,
+                target_bytes,
+                source_function,
+                target_function,
+                reference_sites,
+                left: left.clone(),
+                right: right.clone(),
+            });
+        }
+    }
+    found.sort_by_key(|item| (item.source_start, item.target_start, item.source_function));
+    found.dedup_by_key(|item| (item.source_start, item.target_start, item.source_function));
+    found
 }
 
 #[derive(Debug, Clone)]

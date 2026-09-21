@@ -74,7 +74,7 @@ pub const SCORE_SCHEMA: u32 = 5;
 /// reinterpret a future coverage schema merely because some fields deserialize.
 const TYPED_IDENTIFICATION_COVERAGE_SCHEMA: u32 = 10;
 const REFERENCED_IDENTIFICATION_COVERAGE_SCHEMA: u32 = 11;
-const LATEST_COVERAGE_SCHEMA: u32 = 12;
+const LATEST_COVERAGE_SCHEMA: u32 = 13;
 
 #[derive(ClapArgs, Debug)]
 pub struct Args {

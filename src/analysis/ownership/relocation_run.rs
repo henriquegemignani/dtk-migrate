@@ -16,9 +16,17 @@ pub struct RelocationLinkedRun {
     pub vtable_section: String,
     pub source_destructor: String,
     pub target_destructor: String,
+    #[serde(default)]
+    pub members: Vec<RelocationRunMember>,
     pub first_attribution_id: String,
     pub left_attribution_id: String,
     pub right_attribution_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelocationRunMember {
+    pub source_address: String,
+    pub target_address: String,
 }
 
 impl ObservationIndex {
@@ -256,6 +264,13 @@ impl ObservationIndex {
                                     vtable_section: ".data".into(),
                                     source_destructor: destructor.address.clone(),
                                     target_destructor: target_destructor.address.clone(),
+                                    members: pairs
+                                        .iter()
+                                        .map(|(source, target)| RelocationRunMember {
+                                            source_address: source.address.clone(),
+                                            target_address: target.address.clone(),
+                                        })
+                                        .collect(),
                                     first_attribution_id: first_attribution.id.clone(),
                                     left_attribution_id: left_attr.id.clone(),
                                     right_attribution_id: right_attr.id.clone(),

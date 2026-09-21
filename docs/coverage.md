@@ -34,7 +34,7 @@ fall would mean a name took a pairing away from someone.
 
 ## coverage — which source file owns a target range
 
-Policy version 28, evidence schema 12, identification schema 23. Every threshold
+Policy version 29, evidence schema 13, identification schema 24. Every threshold
 lives in one policy module (`src/analysis/policy.rs`) shared by the evidence
 generator and the stage that re-derives it. Evidence comes from `match --coverage`;
 each *alternative* is one complete way a unit could claim a range, tried
@@ -262,6 +262,21 @@ the pointer layout and the absence of a foreign target owner before offering
 the combined transaction. The code-only claim remains a fallback. This
 rule is deliberately limited to the table bounded by those exact seams;
 it does not claim pooled strings or assign other weak vtables by name.
+
+Coverage policy 29 can add one small `.rodata` allocation referenced by a
+member of that same relocation-linked run. The member must be paired in the
+run, and its otherwise-unattributed source and target copies must use the same
+HA/LO relocation offsets and addends for the two allocation addresses. Both
+binaries must record one explicit, equally sized object at those addresses;
+the complete aligned bytes must agree. The source split must contain exactly
+that allocation. On both sides, independently paired local-data allocations
+of two different held units must end and begin at its exact boundaries. Those
+flank records now carry explicit source and target extents in identification
+schema 24, and inferred or unequal extents cannot support the rule. The stage
+rechecks the run member, reference sites, current flanks and target ownership.
+It tries code plus both data certificates first, followed by each narrower
+combination and code alone. A same string value or a code reference without
+the two section-specific flanks grants no ownership.
 
 Identification schema 23 records source-binary callers. Coverage policy 26
 may extend a represented unit by one changed terminal function when its last

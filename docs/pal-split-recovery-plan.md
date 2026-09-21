@@ -14,6 +14,38 @@ ownership transactions. The full historical NTSC→PAL runs and held-out diagnos
 broader emitted-owner proof, additional recall rules and independently
 verified ownership controls, not a claim that every later PAL split is found.
 
+### Policy 29: bounded read-only data referenced by a linked run
+
+Coverage schema 13 can compose a small `.rodata` allocation with policy 28's
+code and vtable claim. One paired member of the relocation-linked run must
+reference the source and target allocations at identical HA/LO offsets and
+addends. Both binaries must give the objects equal explicit sizes and equal
+complete aligned bytes. The source split contains exactly that allocation.
+Two different held units' independently paired local-data allocations bound
+it on both sides in both versions. Identification schema 24 records the flank
+symbol sizes and whether each extent was explicit, so the stage can rederive
+the widths instead of trusting the coverage report. It also rechecks the run
+member, references, current flanks and absence of a foreign target owner.
+
+The frozen scan produced exactly one such record among 824 units: the
+eight-byte `CGuiFactories` allocation from NTSC `0x803D6888` to PAL
+`0x803C1D88`, bounded by held `CGuiCamera` and `CGuiFrame` allocations.
+Focused run `20717-082512` selected `.text`, `.data` and `.rodata` together,
+published, and rebuilt to retail SHA-1 `4d3780c7…`. Against the exact saved
+baseline and independently verified `ca286f45` oracle, `CGuiFactories` is now
+exact in code and full ownership: 1,184 correct code bytes and 24 correct data
+bytes gained, zero known wrong or lost bytes, and all 424 verified controls
+unchanged. The score is at
+`target/cgui-factories-bounded-data-policy29-score/` on F:. The frozen split
+was restored to SHA-256 `a59a122d…` after scoring.
+
+All five frozen PAL calibration scenarios have exactly the same aggregate
+measures as policy 28 and no incorrect assignment. The held-out offered
+populations recover 166, 87, 97, 113 and 7 exact units for `everything`,
+`isolated-unit`, `consecutive-units`, `truncated-splits` and
+`misplaced-helper`, respectively. Records are under
+`target/policy29-pal-calibration/` on F:.
+
 ### Policy 28: a bounded weak vtable beside a relocation-linked code run
 
 Coverage evidence schema 12 records a 16–64-byte aligned `.data` allocation

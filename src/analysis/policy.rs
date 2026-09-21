@@ -11,10 +11,13 @@ use serde::{Deserialize, Serialize};
 
 /// The acceptance semantics this build applies. Bumped whenever what the policy
 /// accepts changes, even when no JSON shape does.
-pub const POLICY_VERSION: u32 = 28;
+pub const POLICY_VERSION: u32 = 29;
 pub const MIN_BOUNDED_WEAK_VTABLE_BYTES: u32 = 16;
 pub const MAX_BOUNDED_WEAK_VTABLE_BYTES: u32 = 64;
 pub const BOUNDED_WEAK_VTABLE_ALIGNMENT: u32 = 8;
+pub const MIN_BOUNDED_RUN_DATA_BYTES: u32 = 4;
+pub const MAX_BOUNDED_RUN_DATA_BYTES: u32 = 64;
+pub const BOUNDED_RUN_DATA_ALIGNMENT: u32 = 4;
 pub const MIN_COMPILED_TERMINAL_MEMBERS: usize = 3;
 pub const MAX_COMPILED_TERMINAL_MEMBERS: usize = 8;
 pub const MIN_REFERENCE_PLACED_DATA_PAIRS: usize = 2;
@@ -112,6 +115,14 @@ pub struct CoveragePolicy {
     pub maximum_bounded_weak_vtable_bytes: u32,
     #[serde(default)]
     pub bounded_weak_vtable_alignment: u32,
+    #[serde(default)]
+    pub infer_bounded_run_data: bool,
+    #[serde(default)]
+    pub minimum_bounded_run_data_bytes: u32,
+    #[serde(default)]
+    pub maximum_bounded_run_data_bytes: u32,
+    #[serde(default)]
+    pub bounded_run_data_alignment: u32,
     pub minimum_anchor_bytes: u32,
     pub normalized_body_must_be_unique: bool,
     pub confirm_normalized_bytes_after_hash: bool,
@@ -271,6 +282,10 @@ pub fn current_policy() -> CoveragePolicy {
         minimum_bounded_weak_vtable_bytes: MIN_BOUNDED_WEAK_VTABLE_BYTES,
         maximum_bounded_weak_vtable_bytes: MAX_BOUNDED_WEAK_VTABLE_BYTES,
         bounded_weak_vtable_alignment: BOUNDED_WEAK_VTABLE_ALIGNMENT,
+        infer_bounded_run_data: true,
+        minimum_bounded_run_data_bytes: MIN_BOUNDED_RUN_DATA_BYTES,
+        maximum_bounded_run_data_bytes: MAX_BOUNDED_RUN_DATA_BYTES,
+        bounded_run_data_alignment: BOUNDED_RUN_DATA_ALIGNMENT,
         minimum_anchor_bytes: MIN_ANCHOR_BYTES,
         normalized_body_must_be_unique: true,
         confirm_normalized_bytes_after_hash: true,

@@ -275,3 +275,15 @@ rule does not claim the eight-byte `.rodata` string. The manifest and score
 are under `target/cgui-factories-weak-vtable-policy28-*` on F:. The frozen
 checkout's split was restored to SHA-256 `a59a122d…` after the trial. This
 focused run does not replace a full multi-stage historical migration.
+
+Policy 29's focused run `20717-082512` added the bounded eight-byte `.rodata`
+allocation referenced by the same relocation-linked code run. It selected the
+code, weak vtable and read-only allocation in one transaction and rebuilt to
+the PAL retail SHA-1. The verified oracle now scores `CGuiFactories` exact in
+complete ownership: 1,208 correct bytes gained, zero known wrong or lost
+bytes, and 424 verified controls unchanged. The score is retained at
+`target/cgui-factories-bounded-data-policy29-score/`; the frozen split was
+restored afterward. All five frozen PAL calibration scenarios match policy
+28's aggregate measures exactly and contain no incorrect assignment; their
+records are at `target/policy29-pal-calibration/`. This remains a focused
+coverage-only result.
