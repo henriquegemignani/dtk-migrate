@@ -53,6 +53,7 @@ without redoing finished work.
 
 See [runs](docs/runs.md) for the run directory, isolation and resource guidance,
 and [coverage](docs/coverage.md) for what each stage will and will not accept.
+The current performance investigation has a [continuation handoff](docs/performance-handoff.md).
 
 ## Matching two versions directly
 
