@@ -661,13 +661,17 @@ pub fn run_stage(
                 batches.len()
             );
         }
-        // Verification's unsettled candidates are tested in balanced
+        // Discovery and verification retry unsettled candidates in balanced
         // bisection subtrees against this exact coordinator baseline. A worker
         // that accepts nobody has already exhausted its subtree; integration
         // may reuse that result while no earlier subtree has landed.
         let negative = std::collections::BTreeMap::new();
         let mut negative_groups = std::collections::BTreeMap::new();
-        if stage_name == "verify" && round > 0 && queue.len() >= 16 && run.workers > 1 {
+        if matches!(stage_name, "discover" | "verify")
+            && round > 0
+            && queue.len() >= 16
+            && run.workers > 1
+        {
             let snapshot = Snapshot::of(&integrated)?;
             let groups = parallel_subtrees(&queue, run.workers);
             let trials = jobs::execute_in(
@@ -694,7 +698,7 @@ pub fn run_stage(
                 );
             }
             tracing::info!(
-                "verify: {} of {} bisection subtrees refused in parallel against integration round {round}",
+                "{stage_name}: {} of {} bisection subtrees refused in parallel against integration round {round}",
                 negative_groups.len(),
                 groups.len()
             );

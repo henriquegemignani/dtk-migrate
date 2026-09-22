@@ -789,6 +789,49 @@ impl Stage for Discover {
         candidates: &[Candidate],
         _preferred: &Selections,
     ) -> Result<Outcome> {
+        self.evaluate_with_groups(ctx, candidates, &BTreeMap::new())
+    }
+
+    fn integrate_pretested(
+        &self,
+        ctx: &BuildContext,
+        _prepared: &Prepared,
+        candidates: &[Candidate],
+        _preferred: &Selections,
+        _negative: &BTreeMap<String, Event>,
+        negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
+    ) -> Result<Outcome> {
+        self.evaluate_with_groups(ctx, candidates, negative_groups)
+    }
+
+    fn validate(
+        &self,
+        ctx: &BuildContext,
+        accepted: &[Candidate],
+        _prepared: &Prepared,
+        _selections: &Selections,
+        _applied: &[crate::stages::Applied],
+    ) -> Result<Report> {
+        let blocks =
+            Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;
+        for candidate in accepted {
+            let proposal = proposal_of(candidate)?;
+            if blocks.get(&candidate.name) != Some(&proposal.lines) {
+                bail!("Discovery split for {} changed after selection", candidate.name);
+            }
+            validate_proposal(self, ctx, &candidate.name, &proposal, true)?;
+        }
+        ctx.build(None)
+    }
+}
+
+impl Discover {
+    fn evaluate_with_groups(
+        &self,
+        ctx: &BuildContext,
+        candidates: &[Candidate],
+        negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
+    ) -> Result<Outcome> {
         let names: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
         if names.len() != candidates.len() {
             bail!("Duplicate discovery candidate names");
@@ -803,6 +846,14 @@ impl Stage for Discover {
         if !candidates.is_empty() {
             let mut queue = vec![candidates.to_vec()];
             while let Some(batch) = queue.pop() {
+                if state.accepted.is_empty() {
+                    let key: Vec<String> =
+                        batch.iter().map(|candidate| candidate.name.clone()).collect();
+                    if let Some(proved) = negative_groups.get(&key) {
+                        state.events.extend(proved.iter().cloned());
+                        continue;
+                    }
+                }
                 let retry =
                     state.trial(self, ctx, &mut owned, &mut splits, &batch, &baseline_cycles)?;
                 match retry {
@@ -831,26 +882,6 @@ impl Stage for Discover {
             applied: Vec::new(),
             selections: Selections::new(),
         })
-    }
-
-    fn validate(
-        &self,
-        ctx: &BuildContext,
-        accepted: &[Candidate],
-        _prepared: &Prepared,
-        _selections: &Selections,
-        _applied: &[crate::stages::Applied],
-    ) -> Result<Report> {
-        let blocks =
-            Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;
-        for candidate in accepted {
-            let proposal = proposal_of(candidate)?;
-            if blocks.get(&candidate.name) != Some(&proposal.lines) {
-                bail!("Discovery split for {} changed after selection", candidate.name);
-            }
-            validate_proposal(self, ctx, &candidate.name, &proposal, true)?;
-        }
-        ctx.build(None)
     }
 }
 

@@ -77,20 +77,26 @@ source_linked = set(json.loads(Path("build/PAL/fixture_linked.json").read_text()
 rejected_source = set(filter(None, os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_SOURCE", "").split(",")))
 if source_linked & rejected_source:
     sys.exit("fixture: rejected source " + ",".join(sorted(source_linked & rejected_source)))
+splits = Path("config/PAL/splits.txt").read_text()
+named = {name for name in json.loads(Path("fixture_units.json").read_text()) if ("\n" + name + ":\n") in ("\n" + splits)}
+rejected_split = set(filter(None, os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_SPLIT", "").split(",")))
+if named & rejected_split:
+    sys.exit("fixture: rejected split " + ",".join(sorted(named & rejected_split)))
+split_matched = os.environ.get("DTK_MIGRATE_FIXTURE_MATCH_SPLITS") == "1"
 out = Path("build/PAL")
 out.mkdir(parents=True, exist_ok=True)
 (out / "main.dol").write_bytes(Path("orig/PAL/sys/main.dol").read_bytes())
 (out / "main.elf").write_bytes(b"fixture elf")
 (out / "ok").write_text("ok")
 report = {
-    "measures": {"matched_code": 256 * len(units), "total_code": 768,
+    "measures": {"matched_code": 256 * (len(named) if split_matched else len(units)), "total_code": 768,
                  "complete_code": 256 * len(source_linked)},
     "units": [
         {
             "name": name,
             "metadata": {"source_path": "src/" + name,
                          "complete": name in source_linked},
-            "measures": {"matched_code": 256},
+            "measures": {"matched_code": 256 if (not split_matched or name in named) else 0},
             "sections": [{"name": ".text", "fuzzy_match_percent": 100}],
         }
         for name in units

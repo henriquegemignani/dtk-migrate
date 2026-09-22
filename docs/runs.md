@@ -276,13 +276,13 @@ Code proposal validation used to re-read and parse the same 149 MB report for
 every candidate and retry; the cached index is keyed by its schema, digest,
 path and version pair, and the report is verified when first loaded.
 
-When verification retries at least 16 candidates after an acceptance, it
+When discovery or verification retries at least 16 candidates after an acceptance, it
 pretests balanced subtrees of the ordered bisection in the worker pool against
 that exact integration baseline. If a worker exhausts a subtree without
 accepting anyone, the coordinator reuses its failure when it reaches the same
 subtree. An earlier acceptance invalidates that result, so the coordinator
 then evaluates the subtree itself. Pretest jobs are stored under
-`verify/pretests-<round>` and fingerprinted against their baseline for resume.
+`<stage>/pretests-<round>` and fingerprinted against their baseline for resume.
 
 Candidate builds run the retail link/hash target before generating
 `report.json`, under one shared timeout budget. A state the linker or checksum
