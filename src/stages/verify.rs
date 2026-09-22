@@ -26,7 +26,8 @@ use crate::{
         transaction::Owned,
     },
     stages::{
-        Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage, bisect_pretested,
+        Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage,
+        bisect_pretested_groups,
     },
 };
 
@@ -125,7 +126,7 @@ impl Stage for Verify {
         candidates: &[Candidate],
         _preferred: &Selections,
     ) -> Result<Outcome> {
-        self.evaluate_with_negative(ctx, candidates, &BTreeMap::new())
+        self.evaluate_with_negative(ctx, candidates, &BTreeMap::new(), &BTreeMap::new())
     }
 
     fn integrate_pretested(
@@ -135,8 +136,9 @@ impl Stage for Verify {
         candidates: &[Candidate],
         _preferred: &Selections,
         negative: &BTreeMap<String, Event>,
+        negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
     ) -> Result<Outcome> {
-        self.evaluate_with_negative(ctx, candidates, negative)
+        self.evaluate_with_negative(ctx, candidates, negative, negative_groups)
     }
 
     fn validate(
@@ -160,6 +162,7 @@ impl Verify {
         ctx: &BuildContext,
         candidates: &[Candidate],
         negative: &BTreeMap<String, Event>,
+        negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
     ) -> Result<Outcome> {
         let path = ctx.root.join("configure.py");
         let mut owned = Owned::take(&path)?;
@@ -176,11 +179,12 @@ impl Verify {
             owned.write(configure.render(&ctx.target, names)?.as_bytes())
         };
 
-        let (accepted, deferred, events) = bisect_pretested(
+        let (accepted, deferred, events) = bisect_pretested_groups(
             candidates,
             "failed-source-link-or-hash",
             "retail-hash-verified-source",
             negative,
+            negative_groups,
             |already, batch| {
                 let proposed: BTreeSet<String> =
                     already.iter().chain(batch).map(|c| c.name.clone()).collect();

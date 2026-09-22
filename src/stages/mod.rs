@@ -393,9 +393,9 @@ pub trait Stage {
         self.evaluate(ctx, prepared, candidates, preferred)
     }
 
-    /// Optional negative singleton trials proved in parallel against this
-    /// exact integration baseline. A stage may reuse one only until the first
-    /// acceptance changes that baseline; all group trials remain mandatory.
+    /// Optional negative trials proved in parallel against this exact
+    /// integration baseline. A stage may reuse one only until the first
+    /// acceptance changes that baseline.
     fn integrate_pretested(
         &self,
         ctx: &BuildContext,
@@ -403,6 +403,7 @@ pub trait Stage {
         candidates: &[Candidate],
         preferred: &Selections,
         _negative: &BTreeMap<String, Event>,
+        _negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
     ) -> Result<Outcome> {
         self.integrate(ctx, prepared, candidates, preferred)
     }
@@ -497,6 +498,27 @@ pub fn bisect_pretested(
     negative: &BTreeMap<String, Event>,
     mut trial: impl FnMut(&[Candidate], &[Candidate]) -> Result<()>,
 ) -> Result<(Vec<Candidate>, Vec<Candidate>, Vec<Event>)> {
+    bisect_pretested_groups(
+        candidates,
+        failure_status,
+        success_status,
+        negative,
+        &BTreeMap::new(),
+        &mut trial,
+    )
+}
+
+/// As above, also reusing whole failed subtrees evaluated by workers from the
+/// same baseline. Their internal bisection must have accepted nothing. Once a
+/// preceding subtree lands, its changed linker inputs invalidate the cache.
+pub fn bisect_pretested_groups(
+    candidates: &[Candidate],
+    failure_status: &str,
+    success_status: &str,
+    negative: &BTreeMap<String, Event>,
+    negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
+    mut trial: impl FnMut(&[Candidate], &[Candidate]) -> Result<()>,
+) -> Result<(Vec<Candidate>, Vec<Candidate>, Vec<Event>)> {
     let mut accepted: Vec<Candidate> = Vec::new();
     let mut deferred: Vec<Candidate> = Vec::new();
     let mut events: Vec<Event> = Vec::new();
@@ -508,6 +530,14 @@ pub fn bisect_pretested(
     while let Some(batch) = queue.pop_front() {
         if batch.is_empty() {
             continue;
+        }
+        if accepted.is_empty() {
+            let key: Vec<String> = batch.iter().map(|candidate| candidate.name.clone()).collect();
+            if let Some(proved) = negative_groups.get(&key) {
+                events.extend(proved.iter().cloned());
+                deferred.extend(batch);
+                continue;
+            }
         }
         if accepted.is_empty()
             && batch.len() == 1
@@ -584,6 +614,52 @@ mod tests {
 
     fn build_failure() -> anyhow::Error {
         anyhow::Error::new(CommandError::Failed { status: Some(1), evidence: None })
+    }
+
+    #[test]
+    fn a_failed_subtree_is_reused_only_before_any_acceptance() {
+        let all = candidates(&["a", "b", "c", "d"]);
+        let failed = vec![Event::new("a", "failed"), Event::new("b", "failed")];
+        let cache = BTreeMap::from([(vec!["a".into(), "b".into()], failed)]);
+        let mut tried = Vec::new();
+        let (accepted, deferred, _) = bisect_pretested_groups(
+            &all,
+            "failed",
+            "kept",
+            &BTreeMap::new(),
+            &cache,
+            |_, batch| {
+                tried
+                    .push(batch.iter().map(|candidate| candidate.name.clone()).collect::<Vec<_>>());
+                if batch.len() == 4 { Err(build_failure()) } else { Ok(()) }
+            },
+        )
+        .unwrap();
+        assert_eq!(tried, [vec!["a", "b", "c", "d"], vec!["c", "d"]]);
+        assert_eq!(names(&accepted), ["c", "d"]);
+        assert_eq!(names(&deferred), ["a", "b"]);
+
+        let cache = BTreeMap::from([(vec!["c".into(), "d".into()], vec![
+            Event::new("c", "failed"),
+            Event::new("d", "failed"),
+        ])]);
+        let mut tried = Vec::new();
+        let (accepted, deferred, _) = bisect_pretested_groups(
+            &all,
+            "failed",
+            "kept",
+            &BTreeMap::new(),
+            &cache,
+            |_, batch| {
+                tried
+                    .push(batch.iter().map(|candidate| candidate.name.clone()).collect::<Vec<_>>());
+                if batch.len() == 4 { Err(build_failure()) } else { Ok(()) }
+            },
+        )
+        .unwrap();
+        assert_eq!(tried, [vec!["a", "b", "c", "d"], vec!["a", "b"], vec!["c", "d"]]);
+        assert_eq!(names(&accepted), ["a", "b", "c", "d"]);
+        assert!(deferred.is_empty());
     }
 
     #[test]

@@ -74,6 +74,9 @@ if rejected and workspace.name == "integration":
 
 units = json.loads(Path("fixture_units.json").read_text())
 source_linked = set(json.loads(Path("build/PAL/fixture_linked.json").read_text()))
+rejected_source = set(filter(None, os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_SOURCE", "").split(",")))
+if source_linked & rejected_source:
+    sys.exit("fixture: rejected source " + ",".join(sorted(source_linked & rejected_source)))
 out = Path("build/PAL")
 out.mkdir(parents=True, exist_ok=True)
 (out / "main.dol").write_bytes(Path("orig/PAL/sys/main.dol").read_bytes())
@@ -311,13 +314,24 @@ impl Fixture {
         extra_args: &[&str],
         env: &[&str],
     ) -> std::process::Output {
+        self.migrate_stages_with_settings("coverage", workers, batch_size, extra_args, env)
+    }
+
+    pub fn migrate_stages_with_settings(
+        &self,
+        stages: &str,
+        workers: &str,
+        batch_size: &str,
+        extra_args: &[&str],
+        env: &[&str],
+    ) -> std::process::Output {
         let mut args = vec![
             "--source",
             "NTSC",
             "--target",
             "PAL",
             "--stages",
-            "coverage",
+            stages,
             "--workers",
             workers,
             "--batch-size",

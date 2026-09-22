@@ -73,6 +73,23 @@ pub const ORDER: [&str; 4] = ["derive", "coverage", "discover", "verify"];
 /// settles on the next pass.
 const MAX_REDISCOVERY_ROUNDS: usize = 3;
 
+/// Balanced subtrees of the ordered bisection, each large enough to amortize
+/// a worker copy. A failed subtree can be reused exactly at that node while
+/// integration has accepted nothing from an earlier subtree.
+fn parallel_subtrees(candidates: &[Candidate], workers: usize) -> Vec<Vec<Candidate>> {
+    let mut groups = vec![candidates.to_vec()];
+    while groups.len() * 2 <= workers && groups.len() * 2 <= candidates.len() / 4 {
+        groups = groups
+            .into_iter()
+            .flat_map(|group| {
+                let middle = group.len() / 2;
+                [group[..middle].to_vec(), group[middle..].to_vec()]
+            })
+            .collect();
+    }
+    groups
+}
+
 pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
     Ok(match name {
         "coverage" => Box::new(Coverage::default()),
@@ -644,15 +661,15 @@ pub fn run_stage(
                 batches.len()
             );
         }
-        // Verification's rejected singletons are independent *trials* of the
-        // current coordinator baseline, not accepted decisions. Measure them
-        // in worker copies before the ordered bisection. A negative result can
-        // save the matching leaf build only while integration has accepted
-        // nothing else; group trials and the final retail proof still run.
-        let mut negative = std::collections::BTreeMap::new();
-        if stage_name == "verify" && round > 0 && queue.len() >= 16 {
+        // Verification's unsettled candidates are tested in balanced
+        // bisection subtrees against this exact coordinator baseline. A worker
+        // that accepts nobody has already exhausted its subtree; integration
+        // may reuse that result while no earlier subtree has landed.
+        let negative = std::collections::BTreeMap::new();
+        let mut negative_groups = std::collections::BTreeMap::new();
+        if stage_name == "verify" && round > 0 && queue.len() >= 16 && run.workers > 1 {
             let snapshot = Snapshot::of(&integrated)?;
-            let singleton: Vec<Vec<Candidate>> = queue.iter().cloned().map(|c| vec![c]).collect();
+            let groups = parallel_subtrees(&queue, run.workers);
             let trials = jobs::execute_in(
                 dir,
                 run,
@@ -661,25 +678,25 @@ pub fn run_stage(
                 &integrated,
                 &snapshot.manifest,
                 &prepared.prepared,
-                &singleton,
+                &groups,
                 cancel.clone(),
                 &stage_dir.join(format!("pretests-{round}")),
             )?;
-            for trial in &trials {
-                if !trial.accepted.is_empty() || trial.deferred.len() != 1 {
+            for (group, trial) in groups.iter().zip(&trials) {
+                if !trial.accepted.is_empty()
+                    || trial.deferred.iter().map(|c| &c.name).ne(group.iter().map(|c| &c.name))
+                {
                     continue;
                 }
-                let name = &trial.deferred[0].name;
-                if let Some(event) = trial.events.iter().find(|event| {
-                    event.unit == *name && event.status == "failed-source-link-or-hash"
-                }) {
-                    negative.insert(name.clone(), event.clone());
-                }
+                negative_groups.insert(
+                    group.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+                    trial.events.clone(),
+                );
             }
             tracing::info!(
-                "verify: {} of {} singleton refusals pretested in parallel against integration round {round}",
-                negative.len(),
-                queue.len()
+                "verify: {} of {} bisection subtrees refused in parallel against integration round {round}",
+                negative_groups.len(),
+                groups.len()
             );
         }
         let trialled_at = round_started.elapsed();
@@ -689,6 +706,7 @@ pub fn run_stage(
             &queue,
             &round_preferred,
             &negative,
+            &negative_groups,
         )?;
         let integrated_at = round_started.elapsed();
         events.extend(result.events.clone());
@@ -931,6 +949,20 @@ mod tests {
         project::report::Report,
         stages::{Applied, Outcome, Prepared, Selections},
     };
+
+    #[test]
+    fn speculative_verify_groups_are_exact_balanced_bisection_subtrees() {
+        let candidates: Vec<Candidate> =
+            (0..127).map(|i| Candidate::new(format!("{i}.cpp"))).collect();
+        let groups = parallel_subtrees(&candidates, 12);
+        assert_eq!(groups.len(), 8);
+        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), candidates.len());
+        assert_eq!(
+            groups.iter().flatten().map(|c| &c.name).collect::<Vec<_>>(),
+            candidates.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+        assert!(groups.iter().all(|group| (15..=16).contains(&group.len())));
+    }
 
     /// A stage whose only behaviour is which units each candidate writes.
     struct Writes(BTreeMap<&'static str, &'static [&'static str]>);
