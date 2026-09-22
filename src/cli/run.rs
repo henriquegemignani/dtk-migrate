@@ -28,6 +28,8 @@ const COMPATIBLE_LEGACY_COORDINATORS: [&str; 2] = [
     "c0deef83c7c621b5b519bbfd3a59929f30464947bd77bb7384b5bef409b8b476",
 ];
 
+const MAX_BUILD_TIMEOUT_SECONDS: f64 = 60.0;
+
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// The dtk-template project to migrate.
@@ -45,7 +47,7 @@ pub struct Args {
     pub stages: Vec<String>,
     /// How many candidate batches to evaluate at once, each in its own copy of
     /// the project.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = default_workers())]
     pub workers: usize,
     /// Ninja jobs inside each worker.
     #[arg(long, default_value_t = 4)]
@@ -62,7 +64,7 @@ pub struct Args {
     pub only: Vec<String>,
     /// Seconds a candidate build may take before its process tree is killed.
     /// The first, cold build of a workspace is deliberately not bounded.
-    #[arg(long, default_value_t = 120.0)]
+    #[arg(long, default_value_t = MAX_BUILD_TIMEOUT_SECONDS)]
     pub build_timeout: f64,
     /// The decomp-toolkit binary. Defaults to the project's own.
     #[arg(long)]
@@ -81,6 +83,11 @@ pub struct Args {
     /// Completed worker jobs retain their original measurement identity.
     #[arg(long, requires = "resume")]
     pub resume_with_current: bool,
+}
+
+fn default_workers() -> usize {
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+    (cores / 4).clamp(1, 6)
 }
 
 /// What the whole run concluded, written to `result.json`.
@@ -205,6 +212,7 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
     if args.workers == 0 || args.build_jobs == 0 {
         bail!("--workers and --build-jobs must be positive");
     }
+    validate_build_timeout(args.build_timeout)?;
     let stages = resolve_stages(&args.stages)?;
     // Capture the inputs before creating the run directory or freezing tools,
     // with Git state on both sides so a concurrent edit cannot be recorded as
@@ -280,6 +288,15 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
     write_json(&dir.path.join("run.json"), &record)?;
     tracing::info!("Run {}: {}", record.id, dir.path.display());
     Ok((dir, record))
+}
+
+fn validate_build_timeout(seconds: f64) -> Result<()> {
+    if !seconds.is_finite() || seconds <= 0.0 || seconds > MAX_BUILD_TIMEOUT_SECONDS {
+        bail!(
+            "--build-timeout must be greater than zero and at most {MAX_BUILD_TIMEOUT_SECONDS} seconds"
+        );
+    }
+    Ok(())
 }
 
 /// Rebinds an incomplete run to this executable without changing the identity
@@ -579,6 +596,14 @@ mod tests {
     #[test]
     fn no_stages_is_an_error() {
         assert!(resolve_stages(&[]).is_err());
+    }
+
+    #[test]
+    fn new_runs_bound_candidate_builds_to_one_minute() {
+        assert!(validate_build_timeout(60.0).is_ok());
+        for seconds in [0.0, -1.0, 60.1, 120.0, f64::NAN, f64::INFINITY] {
+            assert!(validate_build_timeout(seconds).is_err(), "{seconds}");
+        }
     }
 
     #[test]

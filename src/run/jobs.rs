@@ -50,7 +50,7 @@ pub fn batches(
     version: u32,
 ) -> Result<Vec<Vec<Candidate>>> {
     assert_eq!(candidates.len(), footprints.len(), "one footprint per candidate");
-    if !matches!(version, 1..=3) {
+    if !matches!(version, 1..=4) {
         bail!("Unsupported batching version {version}");
     }
     if size == 0 || candidates.is_empty() {
@@ -58,12 +58,14 @@ pub fn batches(
     }
     let size = match version {
         1 => size,
-        2 | 3 => {
-            // Keep two jobs ready per lane. One per lane still leaves the
-            // machine waiting for the slowest batch. Two supplies a replacement
-            // as each lane finishes without turning every candidate into its
-            // own expensive full-link trial.
-            let target = workers.max(1).saturating_mul(2).min(candidates.len());
+        2..=4 => {
+            // Keep four jobs ready per lane. The expensive outliers are whole
+            // candidate batches: a batch with several slow linker refusals
+            // held one lane for twenty minutes after its eleven siblings had
+            // finished. Smaller batches let those outliers run on separate
+            // lanes while still amortising workspace resets and group builds.
+            let jobs_per_lane = if version >= 4 { 4 } else { 2 };
+            let target = workers.max(1).saturating_mul(jobs_per_lane).min(candidates.len());
             size.min(candidates.len().div_ceil(target).max(1))
         }
         _ => unreachable!("batching version was checked above"),
@@ -251,9 +253,35 @@ pub fn execute(
     batches: &[Vec<Candidate>],
     cancel: Option<Cancel>,
 ) -> Result<Vec<JobResult>> {
+    execute_in(
+        dir,
+        run,
+        stage,
+        stage_name,
+        baseline,
+        manifest,
+        prepared,
+        batches,
+        cancel,
+        &dir.stage(stage_name).join("jobs"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_in(
+    dir: &RunDir,
+    run: &RunRecord,
+    stage: &(dyn Stage + Send + Sync),
+    stage_name: &str,
+    baseline: &Path,
+    manifest: &Manifest,
+    prepared: &Prepared,
+    batches: &[Vec<Candidate>],
+    cancel: Option<Cancel>,
+    jobs_dir: &Path,
+) -> Result<Vec<JobResult>> {
     crate::run::check_environment(run)?;
     let baseline_hash = crate::run::baseline_fingerprint(manifest)?;
-    let stage_dir = dir.stage(stage_name);
 
     let specs: Vec<JobSpec> = batches
         .iter()
@@ -283,7 +311,6 @@ pub fn execute(
             let results = &results;
             let failures = &failures;
             let cancel = cancel.clone();
-            let stage_dir = stage_dir.as_path();
             let next = &next;
             handles.push(scope.spawn(move || {
                 // Pull work only after finishing the current batch. Trial cost
@@ -299,7 +326,7 @@ pub fn execute(
                         return;
                     }
                     let spec = &specs[index];
-                    let output = stage_dir.join("jobs").join(&spec.job_id);
+                    let output = jobs_dir.join(&spec.job_id);
                     match run_one(
                         run,
                         stage,
@@ -526,10 +553,18 @@ mod tests {
     }
 
     #[test]
-    fn fresh_runs_keep_two_batches_ready_per_worker() {
+    fn prior_runs_keep_two_batches_ready_per_worker() {
         let all = candidates(55);
         let split = batches(&all, 40, &alone(&all), 3, 2).unwrap();
         assert_eq!(split.len(), 6);
+        assert!(split.iter().all(|batch| batch.len() <= 10));
+    }
+
+    #[test]
+    fn fresh_runs_spread_slow_batches_across_more_lanes() {
+        let all = candidates(231);
+        let split = batches(&all, 40, &alone(&all), 6, 4).unwrap();
+        assert_eq!(split.len(), 24);
         assert!(split.iter().all(|batch| batch.len() <= 10));
     }
 

@@ -25,7 +25,9 @@ use crate::{
         report::{ObjdiffConfig, ObjdiffUnit, Report, strip_source_root},
         transaction::Owned,
     },
-    stages::{Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage, bisect},
+    stages::{
+        Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage, bisect_pretested,
+    },
 };
 
 pub struct Verify;
@@ -123,6 +125,42 @@ impl Stage for Verify {
         candidates: &[Candidate],
         _preferred: &Selections,
     ) -> Result<Outcome> {
+        self.evaluate_with_negative(ctx, candidates, &BTreeMap::new())
+    }
+
+    fn integrate_pretested(
+        &self,
+        ctx: &BuildContext,
+        _prepared: &Prepared,
+        candidates: &[Candidate],
+        _preferred: &Selections,
+        negative: &BTreeMap<String, Event>,
+    ) -> Result<Outcome> {
+        self.evaluate_with_negative(ctx, candidates, negative)
+    }
+
+    fn validate(
+        &self,
+        ctx: &BuildContext,
+        accepted: &[Candidate],
+        _prepared: &Prepared,
+        _selections: &Selections,
+        _applied: &[crate::stages::Applied],
+    ) -> Result<Report> {
+        let text = std::fs::read_to_string(ctx.root.join("configure.py"))?;
+        let mut names = Configure::parse(&text)?.configured_names(&ctx.target);
+        names.extend(accepted.iter().map(|c| c.name.clone()));
+        validate(ctx, &names, false, None)
+    }
+}
+
+impl Verify {
+    fn evaluate_with_negative(
+        &self,
+        ctx: &BuildContext,
+        candidates: &[Candidate],
+        negative: &BTreeMap<String, Event>,
+    ) -> Result<Outcome> {
         let path = ctx.root.join("configure.py");
         let mut owned = Owned::take(&path)?;
         let text = String::from_utf8(owned.original().to_vec())?;
@@ -138,10 +176,11 @@ impl Stage for Verify {
             owned.write(configure.render(&ctx.target, names)?.as_bytes())
         };
 
-        let (accepted, deferred, events) = bisect(
+        let (accepted, deferred, events) = bisect_pretested(
             candidates,
             "failed-source-link-or-hash",
             "retail-hash-verified-source",
+            negative,
             |already, batch| {
                 let proposed: BTreeSet<String> =
                     already.iter().chain(batch).map(|c| c.name.clone()).collect();
@@ -179,20 +218,6 @@ impl Stage for Verify {
             applied: Vec::new(),
             selections: Selections::new(),
         })
-    }
-
-    fn validate(
-        &self,
-        ctx: &BuildContext,
-        accepted: &[Candidate],
-        _prepared: &Prepared,
-        _selections: &Selections,
-        _applied: &[crate::stages::Applied],
-    ) -> Result<Report> {
-        let text = std::fs::read_to_string(ctx.root.join("configure.py"))?;
-        let mut names = Configure::parse(&text)?.configured_names(&ctx.target);
-        names.extend(accepted.iter().map(|c| c.name.clone()));
-        validate(ctx, &names, false, None)
     }
 }
 

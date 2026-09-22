@@ -729,15 +729,39 @@ impl Stage for Coverage {
         candidates: &[Candidate],
         preferred: &Selections,
     ) -> Result<Outcome> {
-        // Only worker-proved selections qualify. Rediscovered candidates have
-        // no worker result and continue through the ordinary per-alternative
-        // evaluator. If the union exposes an interaction footprints failed to
-        // predict, discard it and let that evaluator isolate the failure.
-        if candidates.is_empty() || candidates.iter().any(|c| !preferred.contains_key(&c.name)) {
+        if candidates.is_empty() {
             return self.evaluate(ctx, prepared, candidates, preferred);
         }
-        let baseline = ctx.build(None)?;
-        self.integrate_adaptive(ctx, prepared, candidates, preferred, &baseline)
+        // A parallel rediscovery round can prove some candidates and defer
+        // others. Keep their original order: adjacent proven selections get
+        // one union build, while an unproven candidate still gets the ordinary
+        // fallback search against everything accepted before it.
+        let mut result: Option<Outcome> = None;
+        let mut start = 0;
+        while start < candidates.len() {
+            let proven = preferred.contains_key(&candidates[start].name);
+            let mut end = start + 1;
+            while end < candidates.len() && preferred.contains_key(&candidates[end].name) == proven
+            {
+                end += 1;
+            }
+            let part = &candidates[start..end];
+            let next = if proven {
+                let baseline = match &result {
+                    Some(previous) => previous.report.clone(),
+                    None => ctx.build(None)?,
+                };
+                self.integrate_adaptive(ctx, prepared, part, preferred, &baseline)?
+            } else {
+                self.evaluate(ctx, prepared, part, preferred)?
+            };
+            result = Some(match result {
+                Some(previous) => merge_outcomes(previous, next),
+                None => next,
+            });
+            start = end;
+        }
+        Ok(result.expect("a nonempty candidate list yields an integration outcome"))
     }
 
     fn rediscover(
@@ -834,6 +858,17 @@ fn merge_outcomes(mut left: Outcome, right: Outcome) -> Outcome {
     left
 }
 
+#[derive(Debug)]
+struct SelectedApplyFailure(usize);
+
+impl std::fmt::Display for SelectedApplyFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "worker selection {} could not be applied", self.0)
+    }
+}
+
+impl std::error::Error for SelectedApplyFailure {}
+
 impl Coverage {
     /// Re-proves worker selections in the largest groups the current
     /// coordinator state can sustain. A failed union is split in candidate
@@ -857,6 +892,34 @@ impl Coverage {
                     candidates[0].name
                 );
                 self.evaluate(ctx, prepared, candidates, preferred)
+            }
+            Err(error)
+                if is_trial_failure(&error)
+                    && error.downcast_ref::<SelectedApplyFailure>().is_some() =>
+            {
+                let index = error.downcast_ref::<SelectedApplyFailure>().unwrap().0;
+                tracing::info!(
+                    "coverage: worker selection for {} failed before the union build; testing its ordered prefix, fallback and suffix: {error:#}",
+                    candidates[index].name
+                );
+                // A failed application identifies its candidate before any
+                // build. Keep the ordered prefix and suffix as groups and
+                // send only that candidate through its fallback evaluator.
+                let mut result: Option<Outcome> = None;
+                for part in
+                    [&candidates[..index], &candidates[index..index + 1], &candidates[index + 1..]]
+                {
+                    if part.is_empty() {
+                        continue;
+                    }
+                    let current = result.as_ref().map_or(baseline, |outcome| &outcome.report);
+                    let next = self.integrate_adaptive(ctx, prepared, part, preferred, current)?;
+                    result = Some(match result {
+                        Some(previous) => merge_outcomes(previous, next),
+                        None => next,
+                    });
+                }
+                Ok(result.expect("a nonempty candidate set contains the failed selection"))
             }
             Err(error) if is_trial_failure(&error) => {
                 let middle = candidates.len() / 2;
@@ -914,7 +977,7 @@ impl Coverage {
         let mut events = Vec::new();
         let mut tried = Tried::new();
 
-        for candidate in candidates {
+        for (selection_index, candidate) in candidates.iter().enumerate() {
             let proposal = proposal_of(candidate)?;
             let selected = preferred.get(&candidate.name).ok_or_else(|| {
                 ValidationError(format!(
@@ -951,7 +1014,8 @@ impl Coverage {
                 observations: index,
                 permitted: &prepared.permitted,
             }
-            .apply(&mut splits_owned, &mut splits)?;
+            .apply(&mut splits_owned, &mut splits)
+            .with_context(|| SelectedApplyFailure(selection_index))?;
 
             let units: Vec<String> = alternative.transaction.writes().map(str::to_string).collect();
             selections.insert(candidate.name.clone(), alternative.id.clone());

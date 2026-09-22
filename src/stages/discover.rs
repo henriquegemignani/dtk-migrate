@@ -15,6 +15,8 @@
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -40,7 +42,43 @@ use crate::{
     },
 };
 
-pub struct Discover;
+#[derive(Default)]
+pub struct Discover {
+    observations: Mutex<BTreeMap<ObservationKey, Arc<ObservationIndex>>>,
+}
+
+type ObservationKey = (u32, String, String, String, String);
+
+impl Discover {
+    fn observations(
+        &self,
+        reference: &ObservationReference,
+        source: &str,
+        target: &str,
+    ) -> Result<Arc<ObservationIndex>> {
+        let key = (
+            reference.schema,
+            reference.sha256.clone(),
+            reference.file.clone(),
+            source.to_owned(),
+            target.to_owned(),
+        );
+        let mut cached = self
+            .observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Ownership observation cache was poisoned"))?;
+        if !cached.contains_key(&key) {
+            let started = Instant::now();
+            cached.insert(key.clone(), Arc::new(load_reference(reference, source, target)?));
+            tracing::info!(
+                "discover: loaded ownership observations once in {:.3}s ({})",
+                started.elapsed().as_secs_f64(),
+                reference.file
+            );
+        }
+        Ok(cached[&key].clone())
+    }
+}
 
 const VALIDATION: &str = "canonical attributed ownership and objdiff matched code; retail hash checks split integrity, not candidate source linkage";
 
@@ -765,7 +803,8 @@ impl Stage for Discover {
         if !candidates.is_empty() {
             let mut queue = vec![candidates.to_vec()];
             while let Some(batch) = queue.pop() {
-                let retry = state.trial(ctx, &mut owned, &mut splits, &batch, &baseline_cycles)?;
+                let retry =
+                    state.trial(self, ctx, &mut owned, &mut splits, &batch, &baseline_cycles)?;
                 match retry {
                     Retry::Done => {}
                     Retry::Split(halves) => queue.extend(halves.into_iter().rev()),
@@ -809,7 +848,7 @@ impl Stage for Discover {
             if blocks.get(&candidate.name) != Some(&proposal.lines) {
                 bail!("Discovery split for {} changed after selection", candidate.name);
             }
-            validate_proposal(ctx, &candidate.name, &proposal, true)?;
+            validate_proposal(self, ctx, &candidate.name, &proposal, true)?;
         }
         ctx.build(None)
     }
@@ -893,6 +932,7 @@ fn next_fallback(candidate: &Candidate) -> Result<Option<Candidate>> {
 impl Trials {
     fn trial(
         &mut self,
+        discover: &Discover,
         ctx: &BuildContext,
         owned: &mut Owned,
         splits: &mut Splits,
@@ -906,10 +946,17 @@ impl Trials {
         let mut new_names: Vec<String> = Vec::new();
         for (index, candidate) in batch.iter().enumerate() {
             let proposal = proposal_of(candidate)?;
-            if let Err(error) = validate_proposal(ctx, &candidate.name, &proposal, false) {
+            if let Err(error) = validate_proposal(discover, ctx, &candidate.name, &proposal, false)
+            {
                 let mut alternative = next_fallback(candidate)?;
                 while let Some(fallback) = alternative {
-                    match validate_proposal(ctx, &candidate.name, &proposal_of(&fallback)?, false) {
+                    match validate_proposal(
+                        discover,
+                        ctx,
+                        &candidate.name,
+                        &proposal_of(&fallback)?,
+                        false,
+                    ) {
                         Ok(()) => {
                             self.events.push(
                                 Event::new(&candidate.name, "evidence-refused")
@@ -1051,6 +1098,7 @@ impl Trials {
 }
 
 fn validate_proposal(
+    discover: &Discover,
     ctx: &BuildContext,
     unit: &str,
     proposal: &Proposal,
@@ -1070,7 +1118,7 @@ fn validate_proposal(
         .ownership
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Code proposal for {unit} has no ownership certificate"))?;
-    let observations = load_reference(reference, &ctx.source, &ctx.target)?;
+    let observations = discover.observations(reference, &ctx.source, &ctx.target)?;
     let blocks =
         Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;
     let expected = if applied { &proposal.lines } else { &proposal.before_lines };
@@ -1174,7 +1222,7 @@ fn reproduced_data_body(
 mod tests {
     use super::*;
     use crate::{
-        analysis::unit_matching::UnitTier,
+        analysis::{ownership::IdentificationReport, unit_matching::UnitTier},
         matching::data_evidence::{
             CommonAlignBasis, DataMemberEvidence, DataRangeEvidence, DataSizeBasis,
         },
@@ -1193,6 +1241,23 @@ mod tests {
     fn data(start: u32, end: u32) -> String { format_range(".data", start, end) }
     fn bss(start: u32, end: u32) -> String { format_range(".bss", start, end) }
     fn sbss(start: u32, end: u32) -> String { format_range(".sbss", start, end) }
+
+    #[test]
+    fn code_trials_share_one_verified_ownership_report() {
+        let directory = tempfile::tempdir().unwrap();
+        let index = ObservationIndex::load_self_contained(
+            IdentificationReport::empty("NTSC", "PAL"),
+            "NTSC",
+            "PAL",
+        )
+        .unwrap();
+        let reference = index.persist(directory.path()).unwrap();
+        let discover = Discover::default();
+        let first = discover.observations(&reference, "NTSC", "PAL").unwrap();
+        let second = discover.observations(&reference, "NTSC", "PAL").unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(discover.observations(&reference, "NTSC", "different-target").is_err());
+    }
 
     #[test]
     fn a_bounded_ordinary_bss_witness_does_not_admit_any_other_bss_range() {
@@ -1403,10 +1468,10 @@ mod tests {
         ] {
             let available = variants
                 .iter()
-                .filter(|candidate| !Discover.is_reserved(candidate, &reserved).unwrap())
+                .filter(|candidate| !Discover::default().is_reserved(candidate, &reserved).unwrap())
                 .cloned()
                 .collect();
-            let selected = Discover.choose_variants(available).unwrap();
+            let selected = Discover::default().choose_variants(available).unwrap();
             assert_eq!(selected.len(), 1);
             let body = proposal_of(&selected[0]).unwrap();
             assert_eq!(body.kind, expected);

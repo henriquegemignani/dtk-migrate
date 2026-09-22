@@ -45,13 +45,13 @@ pub const SCHEMA: u32 = 9;
 /// Stored preparations and worker results that may be interpreted by the same
 /// coordinator compatibility level. Bump this when a same-schema executable
 /// would prepare, evaluate or integrate an existing artifact differently.
-pub const RESUME_COMPATIBILITY: u32 = 3;
+pub const RESUME_COMPATIBILITY: u32 = 5;
 
 /// Fresh runs keep more work available than there are worker lanes, so a slow
 /// batch cannot leave the rest of the machine idle. Runs created before this
 /// was introduced retain version 1 and therefore their exact stored job
 /// partition when resumed with a newer coordinator.
-pub const BATCHING_VERSION: u32 = 3;
+pub const BATCHING_VERSION: u32 = 4;
 
 fn legacy_resume_compatibility() -> u32 { 0 }
 
@@ -76,7 +76,7 @@ const MAX_REDISCOVERY_ROUNDS: usize = 3;
 pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
     Ok(match name {
         "coverage" => Box::new(Coverage::default()),
-        "discover" => Box::new(Discover),
+        "discover" => Box::new(Discover::default()),
         "verify" => Box::new(Verify),
         "derive" => Box::new(Derive),
         other => bail!("Unknown stage: {other}"),
@@ -500,7 +500,7 @@ pub fn run_stage(
     let integrated = dir.integration();
     crate::workspace::reset_workspace(&baseline_dir, &integrated, &manifest)?;
     crate::workspace::seed_objdiff(&baseline_dir, &integrated)?;
-    let ctx = context(&integrated, run, stage_dir.join("integration-evidence"), cancel);
+    let ctx = context(&integrated, run, stage_dir.join("integration-evidence"), cancel.clone());
 
     // The candidate as accepted, paired with the selection made against it. A
     // stage proving a refreshed proposal records an id that exists only in that
@@ -576,7 +576,102 @@ pub fn run_stage(
         for candidate in &queue {
             remember(candidate);
         }
-        let result = stage.integrate(&ctx, &prepared.prepared, &queue, &preferred)?;
+        // Rediscovery runs in the integrated workspace, but evaluating every
+        // new coverage proposal there makes one retail link per candidate.
+        // Prove the round's proposals in worker copies of this exact state
+        // first, then integrate their selections in coordinator order. Worker
+        // refusals still reach integration for a fresh attempt after earlier
+        // changes have landed.
+        let mut round_preferred = if round == 0 { preferred.clone() } else { Selections::new() };
+        if stage_name == "coverage" && round > 0 && queue.len() >= 16 {
+            let snapshot = Snapshot::of(&integrated)?;
+            let footprints = queue
+                .iter()
+                .map(|candidate| stage.footprint(candidate))
+                .collect::<Result<Vec<_>>>()?;
+            let batches = jobs::batches(
+                &queue,
+                run.batch_size,
+                &footprints,
+                run.workers,
+                run.batching_version,
+            )?;
+            let trials = jobs::execute_in(
+                dir,
+                run,
+                stage.as_ref(),
+                stage_name,
+                &integrated,
+                &snapshot.manifest,
+                &prepared.prepared,
+                &batches,
+                cancel.clone(),
+                &stage_dir.join(format!("rediscovery-workers-{round}")),
+            )?;
+            let mut selected = 0;
+            for trial in &trials {
+                events.extend(trial.events.clone());
+                for (unit, ids) in &trial.tried {
+                    tried.entry(unit.clone()).or_default().extend(ids.iter().cloned());
+                }
+                for candidate in &trial.accepted {
+                    if let Some(id) = trial.selections.get(&candidate.name) {
+                        round_preferred.insert(candidate.name.clone(), id.clone());
+                        selected += 1;
+                    }
+                }
+            }
+            tracing::info!(
+                "coverage: {selected} of {} rediscovered candidates selected in {} parallel batches for round {round}",
+                queue.len(),
+                batches.len()
+            );
+        }
+        // Verification's rejected singletons are independent *trials* of the
+        // current coordinator baseline, not accepted decisions. Measure them
+        // in worker copies before the ordered bisection. A negative result can
+        // save the matching leaf build only while integration has accepted
+        // nothing else; group trials and the final retail proof still run.
+        let mut negative = std::collections::BTreeMap::new();
+        if stage_name == "verify" && round > 0 && queue.len() >= 16 {
+            let snapshot = Snapshot::of(&integrated)?;
+            let singleton: Vec<Vec<Candidate>> = queue.iter().cloned().map(|c| vec![c]).collect();
+            let trials = jobs::execute_in(
+                dir,
+                run,
+                stage.as_ref(),
+                stage_name,
+                &integrated,
+                &snapshot.manifest,
+                &prepared.prepared,
+                &singleton,
+                cancel.clone(),
+                &stage_dir.join(format!("pretests-{round}")),
+            )?;
+            for trial in &trials {
+                if !trial.accepted.is_empty() || trial.deferred.len() != 1 {
+                    continue;
+                }
+                let name = &trial.deferred[0].name;
+                if let Some(event) = trial.events.iter().find(|event| {
+                    event.unit == *name && event.status == "failed-source-link-or-hash"
+                }) {
+                    negative.insert(name.clone(), event.clone());
+                }
+            }
+            tracing::info!(
+                "verify: {} of {} singleton refusals pretested in parallel against integration round {round}",
+                negative.len(),
+                queue.len()
+            );
+        }
+        let result = stage.integrate_pretested(
+            &ctx,
+            &prepared.prepared,
+            &queue,
+            &round_preferred,
+            &negative,
+        )?;
         events.extend(result.events.clone());
         for (unit, ids) in &result.tried {
             tried.entry(unit.clone()).or_default().extend(ids.iter().cloned());

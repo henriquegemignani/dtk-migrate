@@ -8,7 +8,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -16,6 +16,7 @@ use sha1::{Digest, Sha1};
 
 use crate::{
     build::{
+        awake_time::AwakeInstant,
         configure,
         process::{Cancel, CommandError, Spec, run},
     },
@@ -175,7 +176,7 @@ impl BuildContext {
     /// budget so this ordering cannot make a bounded trial run twice as long.
     pub fn build(&self, timeout: Option<Duration>) -> Result<Report> {
         self.configure()?;
-        let started = Instant::now();
+        let started = AwakeInstant::now();
         let link_args: Vec<String> =
             vec!["-j".into(), self.build_jobs.to_string(), format!("build/{}/ok", self.target)];
         self.run(&self.tools.ninja.clone(), &link_args, false, timeout)
@@ -218,7 +219,7 @@ impl BuildContext {
     }
 }
 
-fn remaining(limit: Option<Duration>, started: Instant) -> Result<Option<Duration>> {
+fn remaining(limit: Option<Duration>, started: AwakeInstant) -> Result<Option<Duration>> {
     let Some(limit) = limit else { return Ok(None) };
     let elapsed = started.elapsed();
     if let Some(remaining) = limit.checked_sub(elapsed)
@@ -293,7 +294,7 @@ mod tests {
 
     #[test]
     fn two_build_phases_share_one_timeout_budget() {
-        let started = Instant::now();
+        let started = AwakeInstant::now();
         let left = remaining(Some(Duration::from_secs(1)), started).unwrap().unwrap();
         assert!(left <= Duration::from_secs(1));
         assert!(is_trial_failure(&remaining(Some(Duration::ZERO), started).unwrap_err()));

@@ -25,6 +25,7 @@ use crate::{
         ownership::identify_units_with_data,
         unit_matching::propose_units,
     },
+    build::awake_time::AwakeInstant,
     matching::{
         data_evidence::DataEvidenceReport,
         proposals::write_unit_proposals,
@@ -106,6 +107,7 @@ pub(crate) struct RunOutput {
 }
 
 pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Result<RunOutput> {
+    let started = AwakeInstant::now();
     let object_root = request
         .object_root
         .as_ref()
@@ -120,8 +122,10 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
 
     let (source_config, source_obj) =
         load_analyzed(&request.source_config, request.source_root.as_deref(), "--source-root")?;
+    let source_loaded = started.elapsed();
     let (target_config, mut target_obj) =
         load_analyzed(&request.target_config, request.target_root.as_deref(), "--target-root")?;
+    let target_loaded = started.elapsed();
 
     // Before anything reads the target: a scenario that hid ownership after the
     // fact would only be hiding it from whichever reader remembered to ask.
@@ -141,6 +145,7 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
         target_obj,
         &options,
     );
+    let matching_ready = started.elapsed();
     let source = prepared.source.as_ref();
     let target = prepared.target.as_ref();
     info!("Matching {} functions against {} functions", source.graph.len(), target.graph.len());
@@ -220,6 +225,7 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
             compiled,
         );
     }
+    let identification_ready = started.elapsed();
     let report = Report::build(source, target, result, request.validate);
     report.print_summary();
 
@@ -323,6 +329,18 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
         serde_json::to_writer_pretty(&mut file, &identifications)?;
         file.flush()?;
         info!("Wrote TU identifications to {}", path);
+    }
+    if request.capture_coverage {
+        let finished = started.elapsed();
+        info!(
+            "Coverage evidence time: source {:.3}s, target {:.3}s, matching {:.3}s, identification/object evidence {:.3}s, reporting {:.3}s, total {:.3}s",
+            source_loaded.as_secs_f64(),
+            (target_loaded - source_loaded).as_secs_f64(),
+            (matching_ready - target_loaded).as_secs_f64(),
+            (identification_ready - matching_ready).as_secs_f64(),
+            (finished - identification_ready).as_secs_f64(),
+            finished.as_secs_f64()
+        );
     }
     Ok(RunOutput { coverage: captured_coverage })
 }

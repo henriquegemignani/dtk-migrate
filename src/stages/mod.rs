@@ -393,6 +393,20 @@ pub trait Stage {
         self.evaluate(ctx, prepared, candidates, preferred)
     }
 
+    /// Optional negative singleton trials proved in parallel against this
+    /// exact integration baseline. A stage may reuse one only until the first
+    /// acceptance changes that baseline; all group trials remain mandatory.
+    fn integrate_pretested(
+        &self,
+        ctx: &BuildContext,
+        prepared: &Prepared,
+        candidates: &[Candidate],
+        preferred: &Selections,
+        _negative: &BTreeMap<String, Event>,
+    ) -> Result<Outcome> {
+        self.integrate(ctx, prepared, candidates, preferred)
+    }
+
     /// Rechecks an accepted set in the project that is about to keep it.
     ///
     /// A worker proved something in its own copy. Publication applies the same
@@ -469,6 +483,18 @@ pub fn bisect(
     candidates: &[Candidate],
     failure_status: &str,
     success_status: &str,
+    trial: impl FnMut(&[Candidate], &[Candidate]) -> Result<()>,
+) -> Result<(Vec<Candidate>, Vec<Candidate>, Vec<Event>)> {
+    bisect_pretested(candidates, failure_status, success_status, &BTreeMap::new(), trial)
+}
+
+/// The same ordered bisection, reusing failed singletons from this baseline.
+/// Passing candidates or failures from a different baseline are never cached.
+pub fn bisect_pretested(
+    candidates: &[Candidate],
+    failure_status: &str,
+    success_status: &str,
+    negative: &BTreeMap<String, Event>,
     mut trial: impl FnMut(&[Candidate], &[Candidate]) -> Result<()>,
 ) -> Result<(Vec<Candidate>, Vec<Candidate>, Vec<Event>)> {
     let mut accepted: Vec<Candidate> = Vec::new();
@@ -481,6 +507,16 @@ pub fn bisect(
     queue.push_back(candidates.to_vec());
     while let Some(batch) = queue.pop_front() {
         if batch.is_empty() {
+            continue;
+        }
+        if accepted.is_empty()
+            && batch.len() == 1
+            && let Some(event) = negative.get(&batch[0].name)
+            && event.unit == batch[0].name
+            && event.status == failure_status
+        {
+            events.push(event.clone());
+            deferred.extend(batch);
             continue;
         }
         match trial(&accepted, &batch) {
@@ -574,6 +610,46 @@ mod tests {
         .unwrap();
         assert_eq!(names(&accepted), ["a", "b", "d"]);
         assert_eq!(names(&deferred), ["c"]);
+    }
+
+    #[test]
+    fn a_parallel_refusal_skips_only_the_same_baseline_leaf() {
+        let all = candidates(&["a", "b"]);
+        let negative = BTreeMap::from([(
+            "a".to_string(),
+            Event::new("a", "failed").because("proved in a worker copy"),
+        )]);
+        let mut tried = Vec::new();
+        let (accepted, deferred, events) =
+            bisect_pretested(&all, "failed", "kept", &negative, |_, batch| {
+                tried.push(names(batch).join(","));
+                if batch.len() > 1 || batch[0].name == "a" { Err(build_failure()) } else { Ok(()) }
+            })
+            .unwrap();
+        assert_eq!(tried, ["a,b", "b"]);
+        assert_eq!(names(&accepted), ["b"]);
+        assert_eq!(names(&deferred), ["a"]);
+        assert_eq!(events[0].reason.as_deref(), Some("proved in a worker copy"));
+    }
+
+    #[test]
+    fn an_acceptance_invalidates_every_parallel_refusal() {
+        let all = candidates(&["a", "b", "c"]);
+        let negative =
+            BTreeMap::from([("b".to_string(), Event::new("b", "failed").because("old baseline"))]);
+        let mut tried = Vec::new();
+        let (_, deferred, events) =
+            bisect_pretested(&all, "failed", "kept", &negative, |_, batch| {
+                tried.push(names(batch).join(","));
+                if batch.len() > 1 || batch[0].name == "b" { Err(build_failure()) } else { Ok(()) }
+            })
+            .unwrap();
+        assert!(tried.contains(&"b".to_string()), "b must be retested after a is accepted");
+        assert_eq!(names(&deferred), ["b"]);
+        assert_ne!(
+            events.iter().find(|event| event.unit == "b").unwrap().reason.as_deref(),
+            Some("old baseline")
+        );
     }
 
     #[test]

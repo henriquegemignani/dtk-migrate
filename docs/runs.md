@@ -166,6 +166,10 @@ stage, tools and timeout — is reused; anything else is rerun rather than trust
 A worker failure stops the other lanes but keeps what they finished, so a resumed
 run picks up from there.
 
+On Windows, candidate timeouts and command timing logs measure awake system
+time. Suspending the computer does not consume a candidate's timeout budget or
+turn an unfinished build into a candidate refusal on wake.
+
 An incomplete run normally resumes under the same `dtk-migrate` executable that
 started it; the error names the frozen copy if the current executable differs.
 After a compatible bug fix, explicitly adopt the current binary with:
@@ -194,13 +198,15 @@ be read as empty. The read-only benchmark retains a separate legacy adapter.
 
 ## Resource settings
 
-The defaults are three workers and four Ninja jobs each, measured on a 24-core
-host. Native thread pools inside dtk and the compilers are bounded to the same
+The default worker count is one per four available logical CPUs, capped at six;
+Ninja gets four jobs per worker. On a 24-core host this means six workers and
+up to 24 build jobs. Native thread pools inside dtk and the compilers are bounded to the same
 per-worker limit; Ninja's `-j` only limits the processes it starts, and without
-that bound a three-worker run oversubscribes the machine by a factor of its core
-count. Fresh runs keep up to two batches ready per worker and workers pull from
-one shared queue. This keeps linkers occupied when a failed batch takes longer
-to bisect than its neighbours. Ordinary conflict components remain in one
+that bound concurrent workers can oversubscribe the machine by a factor of its core
+count. Fresh runs aim for at least four batches per worker, and workers pull from
+one shared queue. A measured discovery batch with 20 candidates took 1,257
+seconds after its eleven siblings finished in at most 246 seconds; smaller
+batches spread those slow linker refusals across lanes. Ordinary conflict components remain in one
 batch. A component larger than the computed batch size is split into ordered
 chunks: worker results are proposals against the same frozen baseline, and the
 coordinator re-proves their ordered combination before keeping it.
@@ -209,7 +215,9 @@ Disk is checked before starting, for every copy plus headroom. Both the baseline
 and the job artifacts are kept for inspection and resume, so a long run consumes
 more of it.
 
-Candidate builds time out after 120 seconds by default. The bound applies only to
+  New runs bound candidate builds to 60 seconds by default, and reject a
+  `--build-timeout` above 60 seconds. A resumed run keeps its recorded bound.
+  The bound applies only to
 *candidate* builds: the first, cold build of a workspace is deliberately
 unbounded, so a legitimate cold build is not judged by the trial limit. A timeout
 kills the whole compiler and linker process tree and enters the normal bisection
@@ -224,7 +232,16 @@ the batching algorithm version, so a compatible coordinator upgrade preserves
 an older run's exact job partition and can reuse its completed batches.
 
 Each stage result records preparation, worker and integration wall time, and
-each worker result records its own wall time. Coverage integration applies
+each worker result records its own wall time.
+Every command log also ends each invocation with `! timing seconds=<elapsed>
+outcome=<ok|failed|timeout|cancelled|io-error>`. These lines distinguish
+configure, link/hash and report time inside a worker or integration round,
+  including failed trials, without changing the run schema.
+  With `RUST_LOG=info`, coverage evidence also logs elapsed time for source
+  and target analysis, matching, identification and compiled-object evidence,
+  and report generation.
+
+Coverage integration applies
 worker-proved, nonconflicting selections in coordinator order and validates
 their union with one build. If that union fails, it restores the baseline and
 bisects the ordered selections, committing each passing subgroup before trying
@@ -234,6 +251,30 @@ logarithmic group trials instead of replaying every worker-proved selection one
 at a time. The in-process matcher returns its typed coverage report directly;
 only the durable observation record is serialized, instead of writing and
 immediately reparsing a second full JSON report during every rediscovery round.
+When applying a worker selection fails before a build, integration already
+knows which candidate failed and tests the ordered prefix, that candidate's
+fallbacks, and the suffix directly. Build or hash failures still use bisection.
+
+Rediscovered coverage candidates are evaluated in parallel worker batches
+against the coordinator's current split state. Integration then keeps their
+original order, validates consecutive worker selections as groups, and runs
+the ordinary fallback evaluator for candidates without a proven selection.
+The final combined build remains required; worker proofs are not publication
+certificates. This avoids one serial link per rediscovered candidate when the
+workers' selections can be combined.
+
+Discovery shares its verified ownership observation index across worker lanes.
+Code proposal validation used to re-read and parse the same 149 MB report for
+every candidate and retry; the cached index is keyed by its schema, digest,
+path and version pair, and the report is verified when first loaded.
+
+When verification retries at least 16 candidates after an acceptance, it
+pretests each singleton in the worker pool against that exact integration
+baseline. Ordered bisection still tests groups. A failed singleton proof is
+reused only until the first new acceptance in that round; from then on the
+coordinator rebuilds it because its baseline changed. Pretest jobs are stored
+under `verify/pretests-<round>` and fingerprinted against their baseline for
+resume.
 
 Candidate builds run the retail link/hash target before generating
 `report.json`, under one shared timeout budget. A state the linker or checksum

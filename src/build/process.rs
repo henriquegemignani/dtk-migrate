@@ -14,11 +14,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+
+use super::awake_time::AwakeInstant;
 
 /// Why a command did not succeed.
 ///
@@ -149,6 +151,7 @@ pub fn run(spec: &Spec) -> Result<String, CommandError> {
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    let started = AwakeInstant::now();
     let mut tree = Tree::new(&mut command)?;
     let mut output = String::new();
     let mut errors = String::new();
@@ -172,6 +175,14 @@ pub fn run(spec: &Spec) -> Result<String, CommandError> {
         Ok(()) => {}
         Err(error) => writeln!(log, "! {error}")?,
     }
+    let outcome = match &status {
+        Ok(()) => "ok",
+        Err(CommandError::Failed { .. }) => "failed",
+        Err(CommandError::TimedOut { .. }) => "timeout",
+        Err(CommandError::Cancelled) => "cancelled",
+        Err(CommandError::Io(_)) => "io-error",
+    };
+    writeln!(log, "! timing seconds={:.3} outcome={outcome}", started.elapsed().as_secs_f64())?;
     log.flush()?;
     let log_end = log.metadata()?.len();
     status.map_err(|error| {
@@ -218,7 +229,7 @@ fn read_all(stream: Option<impl Read>) -> String {
 }
 
 fn wait(tree: &mut Tree, spec: &Spec) -> Result<(), CommandError> {
-    let started = Instant::now();
+    let started = AwakeInstant::now();
     loop {
         if let Some(status) = tree.child.try_wait()? {
             return if status.success() {
@@ -402,6 +413,8 @@ impl Tree {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
 
     fn spec<'a>(program: &'a Path, args: &[&str], dir: &'a Path, log: &'a Path) -> Spec<'a> {
@@ -433,6 +446,8 @@ mod tests {
         let logged = std::fs::read_to_string(&log).unwrap();
         assert!(logged.contains("hello"), "{logged:?}");
         assert!(logged.starts_with('+'), "the log should record the command");
+        assert!(logged.contains("! timing seconds="));
+        assert!(logged.contains("outcome=ok"));
     }
 
     #[test]
@@ -444,6 +459,7 @@ mod tests {
             run(&spec(Path::new(program), &[flag, "exit 3"], dir.path(), &log)).unwrap_err();
         assert!(matches!(error, CommandError::Failed { status: Some(3), .. }), "{error:?}");
         assert!(std::fs::read_to_string(&log).unwrap().contains("exit status 3"));
+        assert!(std::fs::read_to_string(&log).unwrap().contains("outcome=failed"));
     }
 
     #[test]
