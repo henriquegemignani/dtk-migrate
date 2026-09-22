@@ -259,12 +259,14 @@ coordinator still re-proves the combination across workers. The in-process
 matcher returns its typed coverage report directly;
 only the durable observation record is serialized, instead of writing and
 immediately reparsing a second full JSON report during every rediscovery round.
+Adaptive integration keeps one parsed observation index across its subgroups;
+bisecting a failed union does not parse the same report again for each half.
 Build or hash failures still use bisection.
 
 Rediscovered coverage candidates are evaluated in parallel worker batches
-against the coordinator's current split state. Integration then keeps their
-original order, validates consecutive worker selections as groups, and runs
-the ordinary fallback evaluator for candidates without a proven selection.
+against the coordinator's current split state. Integration keeps their
+original order and tries locally applicable alternatives as one group, using
+worker selections as preferences.
 The final combined build remains required; worker proofs are not publication
 certificates. This avoids one serial link per rediscovered candidate when the
 workers' selections can be combined.

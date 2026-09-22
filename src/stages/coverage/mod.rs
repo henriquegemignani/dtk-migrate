@@ -600,14 +600,13 @@ impl Stage for Coverage {
                 }
             }
             let baseline = ctx.build(None)?;
-            return self.integrate_adaptive(
+            let mut run = Integration {
                 ctx,
                 prepared,
-                candidates,
-                &selections,
-                &baseline,
-                ctx.build_timeout,
-            );
+                timeout: ctx.build_timeout,
+                observations: Observations::default(),
+            };
+            return self.integrate_adaptive(&mut run, candidates, &selections, &baseline);
         }
         let splits_file = splits_path(ctx);
         let config_file = config_path(ctx);
@@ -766,7 +765,9 @@ impl Stage for Coverage {
         // proof obligation. Unselected candidates can join the same locally
         // valid transaction sequence; the final build proves all of them.
         let baseline = ctx.build(None)?;
-        self.integrate_adaptive(ctx, prepared, candidates, preferred, &baseline, None)
+        let mut run =
+            Integration { ctx, prepared, timeout: None, observations: Observations::default() };
+        self.integrate_adaptive(&mut run, candidates, preferred, &baseline)
     }
 
     fn rediscover(
@@ -835,6 +836,15 @@ impl Stage for Coverage {
 #[derive(Default)]
 struct Observations(BTreeMap<String, ObservationIndex>);
 
+/// A single adaptive proof keeps its parsed observations across failed unions
+/// and their subgroups.
+struct Integration<'a> {
+    ctx: &'a BuildContext,
+    prepared: &'a Prepared,
+    timeout: Option<std::time::Duration>,
+    observations: Observations,
+}
+
 impl Observations {
     fn load(
         &mut self,
@@ -874,21 +884,19 @@ impl Coverage {
     /// candidate.
     fn integrate_adaptive(
         &self,
-        ctx: &BuildContext,
-        prepared: &Prepared,
+        run: &mut Integration<'_>,
         candidates: &[Candidate],
         preferred: &Selections,
         baseline: &Report,
-        timeout: Option<std::time::Duration>,
     ) -> Result<Outcome> {
-        match self.integrate_locally(ctx, prepared, candidates, preferred, baseline, timeout) {
+        match self.integrate_locally(run, candidates, preferred, baseline) {
             Ok(outcome) => Ok(outcome),
             Err(error) if is_trial_failure(&error) && candidates.len() == 1 => {
                 tracing::info!(
                     "coverage: selection for {} did not hold; trying its fallbacks: {error:#}",
                     candidates[0].name
                 );
-                self.evaluate(ctx, prepared, candidates, preferred)
+                self.evaluate(run.ctx, run.prepared, candidates, preferred)
             }
             Err(error) if is_trial_failure(&error) => {
                 let middle = candidates.len() / 2;
@@ -898,22 +906,10 @@ impl Coverage {
                     middle,
                     candidates.len() - middle
                 );
-                let left = self.integrate_adaptive(
-                    ctx,
-                    prepared,
-                    &candidates[..middle],
-                    preferred,
-                    baseline,
-                    timeout,
-                )?;
-                let right = self.integrate_adaptive(
-                    ctx,
-                    prepared,
-                    &candidates[middle..],
-                    preferred,
-                    &left.report,
-                    timeout,
-                )?;
+                let left =
+                    self.integrate_adaptive(run, &candidates[..middle], preferred, baseline)?;
+                let right =
+                    self.integrate_adaptive(run, &candidates[middle..], preferred, &left.report)?;
                 Ok(merge_outcomes(left, right))
             }
             Err(error) => Err(error),
@@ -926,13 +922,14 @@ impl Coverage {
     /// failure of the combined build goes back to adaptive bisection.
     fn integrate_locally(
         &self,
-        ctx: &BuildContext,
-        prepared: &Prepared,
+        run: &mut Integration<'_>,
         candidates: &[Candidate],
         preferred: &Selections,
         baseline: &Report,
-        timeout: Option<std::time::Duration>,
     ) -> Result<Outcome> {
+        let ctx = run.ctx;
+        let prepared = run.prepared;
+        let observations = &mut run.observations;
         let names: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
         if names.len() != candidates.len() {
             bail!("Duplicate coverage candidate names");
@@ -942,7 +939,6 @@ impl Coverage {
         let mut config_owned = Owned::take(&config_path(ctx))?;
         let mut splits = Splits::parse(&String::from_utf8(splits_owned.original().to_vec())?)?;
         let starting_complete = baseline.measures.complete_code;
-        let mut observations = Observations::default();
         let mut accepted = Vec::new();
         let mut deferred = Vec::new();
         let mut selections = Selections::new();
@@ -1037,8 +1033,8 @@ impl Coverage {
             &selections,
             &applied,
             &BTreeSet::new(),
-            &mut observations,
-            timeout,
+            observations,
+            run.timeout,
         )?;
         if regresses(baseline, &final_report) {
             bail!(ValidationError("coverage union regresses an existing unit".into()));
