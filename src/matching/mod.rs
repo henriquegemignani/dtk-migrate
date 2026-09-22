@@ -330,7 +330,7 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
         file.flush()?;
         info!("Wrote TU identifications to {}", path);
     }
-    if request.capture_coverage {
+    if request.capture_coverage || outputs.coverage.is_some() {
         let finished = started.elapsed();
         info!(
             "Coverage evidence time: source {:.3}s, target {:.3}s, matching {:.3}s, identification/object evidence {:.3}s, reporting {:.3}s, total {:.3}s",

@@ -301,6 +301,16 @@ pub fn build(layout: &Layout) -> Option<Fixture> {
 impl Fixture {
     /// Starts a fresh coverage run.
     pub fn migrate(&self, extra_args: &[&str], env: &[&str]) -> std::process::Output {
+        self.migrate_with_settings("2", "1", extra_args, env)
+    }
+
+    pub fn migrate_with_settings(
+        &self,
+        workers: &str,
+        batch_size: &str,
+        extra_args: &[&str],
+        env: &[&str],
+    ) -> std::process::Output {
         let mut args = vec![
             "--source",
             "NTSC",
@@ -309,9 +319,9 @@ impl Fixture {
             "--stages",
             "coverage",
             "--workers",
-            "2",
+            workers,
             "--batch-size",
-            "1",
+            batch_size,
         ];
         args.extend_from_slice(extra_args);
         self.invoke(&args, env)

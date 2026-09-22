@@ -27,7 +27,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    build::{context::BuildContext, process::Cancel},
+    build::{awake_time::AwakeInstant, context::BuildContext, process::Cancel},
     stages::{
         Candidate, Event, MutationScope, Selections, Stage, coverage::Coverage, derive::Derive,
         discover::Discover, verify::Verify,
@@ -470,26 +470,42 @@ pub fn run_stage(
     };
 
     let candidates = prepared.prepared.candidates.clone();
-    let footprints = candidates
-        .iter()
-        .map(|candidate| stage.footprint(candidate))
-        .collect::<Result<Vec<_>>>()?;
-    let batches =
-        jobs::batches(&candidates, run.batch_size, &footprints, run.workers, run.batching_version)?;
-    tracing::info!("{stage_name}: {} candidates in {} batches", candidates.len(), batches.len());
-
     let worker_started = Instant::now();
-    let outcomes = jobs::execute(
-        dir,
-        run,
-        stage.as_ref(),
-        stage_name,
-        &baseline_dir,
-        &manifest,
-        &prepared.prepared,
-        &batches,
-        cancel.clone(),
-    )?;
+    // Derivation already trials the complete union and bisects a failing set.
+    // Screening the same names in worker batches first adds many retail builds
+    // to the common case where the union holds, without changing that proof.
+    let outcomes = if stage_name == "derive" {
+        tracing::info!("derive: {} candidates sent directly to integration", candidates.len());
+        Vec::new()
+    } else {
+        let footprints = candidates
+            .iter()
+            .map(|candidate| stage.footprint(candidate))
+            .collect::<Result<Vec<_>>>()?;
+        let batches = jobs::batches(
+            &candidates,
+            run.batch_size,
+            &footprints,
+            run.workers,
+            run.batching_version,
+        )?;
+        tracing::info!(
+            "{stage_name}: {} candidates in {} batches",
+            candidates.len(),
+            batches.len()
+        );
+        jobs::execute(
+            dir,
+            run,
+            stage.as_ref(),
+            stage_name,
+            &baseline_dir,
+            &manifest,
+            &prepared.prepared,
+            &batches,
+            cancel.clone(),
+        )?
+    };
     let worker_seconds = worker_started.elapsed().as_secs_f64();
 
     // Integration proves the union in one workspace, then retries what the
@@ -561,7 +577,7 @@ pub fn run_stage(
     // Integration is itself a round: if every worker's candidate holds, the
     // workspace has changed and the only work left may be a unit that became
     // eligible because of it.
-    let mut queue = proposed;
+    let mut queue = if stage_name == "derive" { candidates.clone() } else { proposed };
     let mut outcome = None;
     for round in 0..=MAX_REDISCOVERY_ROUNDS {
         // The first round runs even with nothing to try. A stage that found no
@@ -573,6 +589,7 @@ pub fn run_stage(
         if queue.is_empty() && outcome.is_some() {
             break;
         }
+        let round_started = AwakeInstant::now();
         for candidate in &queue {
             remember(candidate);
         }
@@ -665,6 +682,7 @@ pub fn run_stage(
                 queue.len()
             );
         }
+        let trialled_at = round_started.elapsed();
         let result = stage.integrate_pretested(
             &ctx,
             &prepared.prepared,
@@ -672,6 +690,7 @@ pub fn run_stage(
             &round_preferred,
             &negative,
         )?;
+        let integrated_at = round_started.elapsed();
         events.extend(result.events.clone());
         for (unit, ids) in &result.tried {
             tried.entry(unit.clone()).or_default().extend(ids.iter().cloned());
@@ -693,11 +712,22 @@ pub fn run_stage(
         outcome = Some(result);
 
         if added.is_empty() {
+            tracing::info!(
+                "{stage_name}: integration round {round} parallel trials {:.3}s, ordered integration {:.3}s; settled",
+                trialled_at.as_secs_f64(),
+                (integrated_at - trialled_at).as_secs_f64()
+            );
             break;
         }
         // Something landed, so ask the stage what that made possible. This is
         // the only place it happens: one workspace holding every batch's result.
         let rediscovered = stage.rediscover(&ctx, &prepared.prepared, &tried)?;
+        tracing::info!(
+            "{stage_name}: integration round {round} parallel trials {:.3}s, ordered integration {:.3}s, rediscovery {:.3}s",
+            trialled_at.as_secs_f64(),
+            (integrated_at - trialled_at).as_secs_f64(),
+            (round_started.elapsed() - integrated_at).as_secs_f64()
+        );
         let discovered = rediscovered.as_ref().map(|r| r.candidates.as_slice()).unwrap_or_default();
         retry.skipped_as_unchanged += rediscovered.as_ref().map_or(0, |r| r.skipped_unchanged);
         retry.regenerated += discovered.len();

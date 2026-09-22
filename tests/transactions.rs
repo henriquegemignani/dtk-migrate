@@ -137,7 +137,7 @@ fn a_candidate_and_the_neighbour_it_narrows_are_published_as_one_transaction() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|event| event["status"] == "worker-union-validated"),
+            .any(|event| event["status"] == "selection-union-validated"),
         "worker selections were needlessly relinked one at a time: {result:#}"
     );
     let applied = result["applied"].as_array().unwrap();

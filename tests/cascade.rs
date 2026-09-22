@@ -273,6 +273,65 @@ fn independent_worlds() -> Vec<CoverageReport> {
 }
 
 #[test]
+fn a_worker_proves_independent_first_choices_in_one_build() {
+    let units = ["A.cpp", "B.cpp", "C.cpp", "D.cpp", "E.cpp"];
+    let source_splits = format!(
+        "{}{}",
+        common::SPLITS_HEADER,
+        units
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let start = 0x8000_4000 + (i as u32) * 0x200;
+                format!("{name}:\n{}\n\n", line(".text", start, start + 0x100))
+            })
+            .collect::<String>()
+    );
+    let worlds = (0..=5)
+        .map(|_| {
+            report(
+                "NTSC",
+                "PAL",
+                units
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        let start = 0x8000_1000 + (i as u32) * 0x200;
+                        unit(name, vec![anchor(&format!("member_{i}"), start, start + 0x100)])
+                    })
+                    .collect(),
+            )
+        })
+        .map(Some)
+        .collect();
+    let Some(fixture) = common::build(&Layout {
+        units: units.iter().map(|name| (*name).to_string()).collect(),
+        source_splits,
+        target_splits: format!("{}\n", common::SPLITS_HEADER.trim_end()),
+        worlds,
+        discover: None,
+    }) else {
+        eprintln!("skipped: needs ninja and python on PATH");
+        return;
+    };
+
+    // Five candidates, one worker and a batch ceiling of two produces at
+    // least one multi-candidate batch under the normal queue-sizing policy.
+    let output = fixture.migrate_with_settings("1", "2", &[], &[]);
+    assert!(output.status.success(), "{}", describe(&output));
+    let id = fixture.run_id();
+    let stage = format!("build/dtk-migrate/runs/{id}/coverage");
+    let job = fixture.json(&format!("{stage}/jobs/00000/result.json"));
+    assert_eq!(names(&job["accepted"]).len(), 2, "{job:#}");
+    assert!(job["events"].as_array().unwrap().iter().any(|event| {
+        event["status"] == "selection-union-validated"
+            && event["reason"].as_str().is_some_and(|reason| reason.starts_with("2 selections"))
+    }));
+    let result = fixture.json(&format!("{stage}/result.json"));
+    assert_eq!(names(&result["accepted"]).len(), 5, "{result:#}");
+}
+
+#[test]
 fn the_coordinator_follows_the_cascade_it_was_never_told_about() {
     let Some(fixture) = build_fixture(&cascade_worlds()) else {
         eprintln!("skipped: needs ninja and python on PATH");

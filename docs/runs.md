@@ -77,7 +77,9 @@ The generated build graph is patched after each configure:
 - the `configure` rule is pointed back at this binary, so regenerating the graph
   mid-build does not undo the first change.
 
-Both edits refuse a rule they do not recognise rather than guessing.
+Both edits refuse a rule they do not recognise rather than guessing. Each trial
+still configures explicitly: a split or symbol edit may not be a declared Ninja
+dependency of the generated graph, so skipping that step can test stale inputs.
 After final validation, publication regenerates the owner's ordinary build
 graph so a later plain `ninja` no longer carries either trial-only edit.
 
@@ -210,6 +212,9 @@ batches spread those slow linker refusals across lanes. Ordinary conflict compon
 batch. A component larger than the computed batch size is split into ordered
 chunks: worker results are proposals against the same frozen baseline, and the
 coordinator re-proves their ordered combination before keeping it.
+Derivation goes straight to integration: its evaluator already trials the full
+union of names and bisects a failed union, so worker screening would repeat the
+same retail builds without strengthening the final proof.
 
 Disk is checked before starting, for every copy plus headroom. Both the baselines
 and the job artifacts are kept for inspection and resume, so a long run consumes
@@ -241,19 +246,20 @@ configure, link/hash and report time inside a worker or integration round,
   and target analysis, matching, identification and compiled-object evidence,
   and report generation.
 
-Coverage integration applies
-worker-proved, nonconflicting selections in coordinator order and validates
-their union with one build. If that union fails, it restores the baseline and
-bisects the ordered selections, committing each passing subgroup before trying
-the next. Only a failing single-candidate leaf returns to the ordinary
-per-alternative evaluator. This isolates a few cross-worker linker conflicts in
-logarithmic group trials instead of replaying every worker-proved selection one
-at a time. The in-process matcher returns its typed coverage report directly;
+Coverage integration tries each candidate's alternatives against the current
+split map in coordinator order, preferring a worker selection when available.
+An alternative with stale ownership fails before a build; the next alternative
+can be tried locally. The chosen transactions are then proved by one combined
+link/hash build. If that build fails, integration restores the baseline and
+bisects the candidates in order, committing each passing subgroup before trying
+the next. A failing single-candidate leaf uses ordinary per-alternative builds.
+Coverage workers use the same adaptive proof for multi-candidate batches, so a
+passing batch needs one link/hash trial instead of one per candidate. The
+coordinator still re-proves the combination across workers. The in-process
+matcher returns its typed coverage report directly;
 only the durable observation record is serialized, instead of writing and
 immediately reparsing a second full JSON report during every rediscovery round.
-When applying a worker selection fails before a build, integration already
-knows which candidate failed and tests the ordered prefix, that candidate's
-fallbacks, and the suffix directly. Build or hash failures still use bisection.
+Build or hash failures still use bisection.
 
 Rediscovered coverage candidates are evaluated in parallel worker batches
 against the coordinator's current split state. Integration then keeps their

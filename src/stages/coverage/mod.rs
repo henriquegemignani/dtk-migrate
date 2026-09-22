@@ -39,7 +39,10 @@ use crate::{
             load_reference,
         },
     },
-    build::context::{BuildContext, ValidationError, is_trial_failure},
+    build::{
+        awake_time::AwakeInstant,
+        context::{BuildContext, ValidationError, is_trial_failure},
+    },
     project::{
         audit::{self, Stunted},
         ownership_transaction::OwnershipTransaction,
@@ -580,6 +583,32 @@ impl Stage for Coverage {
         if names.len() != candidates.len() {
             bail!("Duplicate coverage candidate names");
         }
+        if candidates.len() > 1 {
+            // The final linked state, rather than a separate link for every
+            // member, is the claim we must prove. Try the leading alternative
+            // of each candidate as one transaction sequence. The adaptive
+            // path isolates a failed union; a failed singleton returns here
+            // and tries its alternatives in order.
+            let mut selections = preferred.clone();
+            for candidate in candidates {
+                if !selections.contains_key(&candidate.name) {
+                    let proposal = proposal_of(candidate)?;
+                    let first = proposal.alternatives.first().with_context(|| {
+                        format!("Coverage candidate {} has no alternatives", candidate.name)
+                    })?;
+                    selections.insert(candidate.name.clone(), first.id.clone());
+                }
+            }
+            let baseline = ctx.build(None)?;
+            return self.integrate_adaptive(
+                ctx,
+                prepared,
+                candidates,
+                &selections,
+                &baseline,
+                ctx.build_timeout,
+            );
+        }
         let splits_file = splits_path(ctx);
         let config_file = config_path(ctx);
         let mut splits_owned = Owned::take(&splits_file)?;
@@ -697,13 +726,14 @@ impl Stage for Coverage {
         let deferred: Vec<Candidate> =
             candidates.iter().filter(|c| !taken.contains(c.name.as_str())).cloned().collect();
 
-        let final_report = self.validate_selected(
+        let final_report = Self::validate_selected(
             ctx,
             &accepted,
             &selections,
             &applied,
             &BTreeSet::new(),
             &mut observations,
+            None,
         )?;
         if regresses(&report, &final_report) {
             bail!("Final coverage report regressed after validation");
@@ -732,36 +762,11 @@ impl Stage for Coverage {
         if candidates.is_empty() {
             return self.evaluate(ctx, prepared, candidates, preferred);
         }
-        // A parallel rediscovery round can prove some candidates and defer
-        // others. Keep their original order: adjacent proven selections get
-        // one union build, while an unproven candidate still gets the ordinary
-        // fallback search against everything accepted before it.
-        let mut result: Option<Outcome> = None;
-        let mut start = 0;
-        while start < candidates.len() {
-            let proven = preferred.contains_key(&candidates[start].name);
-            let mut end = start + 1;
-            while end < candidates.len() && preferred.contains_key(&candidates[end].name) == proven
-            {
-                end += 1;
-            }
-            let part = &candidates[start..end];
-            let next = if proven {
-                let baseline = match &result {
-                    Some(previous) => previous.report.clone(),
-                    None => ctx.build(None)?,
-                };
-                self.integrate_adaptive(ctx, prepared, part, preferred, &baseline)?
-            } else {
-                self.evaluate(ctx, prepared, part, preferred)?
-            };
-            result = Some(match result {
-                Some(previous) => merge_outcomes(previous, next),
-                None => next,
-            });
-            start = end;
-        }
-        Ok(result.expect("a nonempty candidate list yields an integration outcome"))
+        // A worker selection is a preferred first choice, not a separate
+        // proof obligation. Unselected candidates can join the same locally
+        // valid transaction sequence; the final build proves all of them.
+        let baseline = ctx.build(None)?;
+        self.integrate_adaptive(ctx, prepared, candidates, preferred, &baseline, None)
     }
 
     fn rediscover(
@@ -781,13 +786,14 @@ impl Stage for Coverage {
         selections: &Selections,
         applied: &[Applied],
     ) -> Result<Report> {
-        self.validate_selected(
+        Self::validate_selected(
             ctx,
             accepted,
             selections,
             applied,
             &BTreeSet::new(),
             &mut Observations::default(),
+            None,
         )
     }
 
@@ -800,13 +806,14 @@ impl Stage for Coverage {
         applied: &[Applied],
         certificates: &FinalCertificates,
     ) -> Result<Report> {
-        self.validate_selected(
+        Self::validate_selected(
             ctx,
             accepted,
             selections,
             applied,
             &certificates.source_linked,
             &mut Observations::default(),
+            None,
         )
     }
 
@@ -858,24 +865,13 @@ fn merge_outcomes(mut left: Outcome, right: Outcome) -> Outcome {
     left
 }
 
-#[derive(Debug)]
-struct SelectedApplyFailure(usize);
-
-impl std::fmt::Display for SelectedApplyFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "worker selection {} could not be applied", self.0)
-    }
-}
-
-impl std::error::Error for SelectedApplyFailure {}
-
 impl Coverage {
-    /// Re-proves worker selections in the largest groups the current
+    /// Proves selections in the largest groups the current
     /// coordinator state can sustain. A failed union is split in candidate
     /// order; a passing left half is committed before the right half is tried,
     /// so the result has the same deterministic ordering and exact transaction
     /// preconditions as ordinary evaluation without paying one build for every
-    /// worker-proved candidate.
+    /// candidate.
     fn integrate_adaptive(
         &self,
         ctx: &BuildContext,
@@ -883,43 +879,16 @@ impl Coverage {
         candidates: &[Candidate],
         preferred: &Selections,
         baseline: &Report,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Outcome> {
-        match self.integrate_proven(ctx, prepared, candidates, preferred, baseline) {
+        match self.integrate_locally(ctx, prepared, candidates, preferred, baseline, timeout) {
             Ok(outcome) => Ok(outcome),
             Err(error) if is_trial_failure(&error) && candidates.len() == 1 => {
                 tracing::info!(
-                    "coverage: worker selection for {} did not hold during integration; trying its fallbacks: {error:#}",
+                    "coverage: selection for {} did not hold; trying its fallbacks: {error:#}",
                     candidates[0].name
                 );
                 self.evaluate(ctx, prepared, candidates, preferred)
-            }
-            Err(error)
-                if is_trial_failure(&error)
-                    && error.downcast_ref::<SelectedApplyFailure>().is_some() =>
-            {
-                let index = error.downcast_ref::<SelectedApplyFailure>().unwrap().0;
-                tracing::info!(
-                    "coverage: worker selection for {} failed before the union build; testing its ordered prefix, fallback and suffix: {error:#}",
-                    candidates[index].name
-                );
-                // A failed application identifies its candidate before any
-                // build. Keep the ordered prefix and suffix as groups and
-                // send only that candidate through its fallback evaluator.
-                let mut result: Option<Outcome> = None;
-                for part in
-                    [&candidates[..index], &candidates[index..index + 1], &candidates[index + 1..]]
-                {
-                    if part.is_empty() {
-                        continue;
-                    }
-                    let current = result.as_ref().map_or(baseline, |outcome| &outcome.report);
-                    let next = self.integrate_adaptive(ctx, prepared, part, preferred, current)?;
-                    result = Some(match result {
-                        Some(previous) => merge_outcomes(previous, next),
-                        None => next,
-                    });
-                }
-                Ok(result.expect("a nonempty candidate set contains the failed selection"))
             }
             Err(error) if is_trial_failure(&error) => {
                 let middle = candidates.len() / 2;
@@ -935,6 +904,7 @@ impl Coverage {
                     &candidates[..middle],
                     preferred,
                     baseline,
+                    timeout,
                 )?;
                 let right = self.integrate_adaptive(
                     ctx,
@@ -942,6 +912,7 @@ impl Coverage {
                     &candidates[middle..],
                     preferred,
                     &left.report,
+                    timeout,
                 )?;
                 Ok(merge_outcomes(left, right))
             }
@@ -949,18 +920,18 @@ impl Coverage {
         }
     }
 
-    /// Applies worker-proved selections in coordinator order, then proves
-    /// their union once. Ordinary conflict components were evaluated in one
-    /// worker; an oversized component may have been split to keep lanes busy.
-    /// The final build remains the authority, and adaptive integration divides
-    /// a union that exposes either kind of interaction.
-    fn integrate_proven(
+    /// Chooses locally applicable alternatives in order, then proves their
+    /// union once. Stale neighbours are known before a build; trying another
+    /// alternative or deferring that candidate does not need a link. Only a
+    /// failure of the combined build goes back to adaptive bisection.
+    fn integrate_locally(
         &self,
         ctx: &BuildContext,
         prepared: &Prepared,
         candidates: &[Candidate],
         preferred: &Selections,
         baseline: &Report,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Outcome> {
         let names: BTreeSet<&str> = candidates.iter().map(|c| c.name.as_str()).collect();
         if names.len() != candidates.len() {
@@ -972,52 +943,68 @@ impl Coverage {
         let mut splits = Splits::parse(&String::from_utf8(splits_owned.original().to_vec())?)?;
         let starting_complete = baseline.measures.complete_code;
         let mut observations = Observations::default();
+        let mut accepted = Vec::new();
+        let mut deferred = Vec::new();
         let mut selections = Selections::new();
         let mut applied = Vec::new();
         let mut events = Vec::new();
         let mut tried = Tried::new();
 
-        for (selection_index, candidate) in candidates.iter().enumerate() {
+        for candidate in candidates {
             let proposal = proposal_of(candidate)?;
-            let selected = preferred.get(&candidate.name).ok_or_else(|| {
-                ValidationError(format!(
-                    "Worker did not select an alternative for {}",
-                    candidate.name
-                ))
-            })?;
-            let alternative = proposal
-                .alternatives
-                .iter()
-                .find(|alternative| &alternative.id == selected)
-                .ok_or_else(|| {
-                    ValidationError(format!(
-                        "Worker selected an unknown alternative for {}",
-                        candidate.name
-                    ))
-                })?;
-            tried.entry(candidate.name.clone()).or_default().insert(alternative.retry_key());
-
             let index = observations.load(&proposal.observation, ctx)?;
-            let required = transaction_extracts(
-                &candidate.name,
-                &proposal.required_extracts,
-                &proposal.unit_extracts,
-                &alternative.transaction,
-            )?;
-            let current = String::from_utf8(config_owned.current().to_vec())?;
-            let rendered = extracts::render(&current, &required)?;
-            config_owned.write(rendered.as_bytes())?;
-            Trial {
-                candidate,
-                alternative,
-                proposal: &proposal,
-                observations: index,
-                permitted: &prepared.permitted,
+            let config_before = config_owned.current().to_vec();
+            let mut ordered: Vec<&Alternative> = proposal.alternatives.iter().collect();
+            if let Some(wanted) = preferred.get(&candidate.name) {
+                ordered.sort_by_key(|alternative| &alternative.id != wanted);
             }
-            .apply(&mut splits_owned, &mut splits)
-            .with_context(|| SelectedApplyFailure(selection_index))?;
+            let mut chosen = None;
+            for alternative in ordered {
+                tried.entry(candidate.name.clone()).or_default().insert(alternative.retry_key());
+                let restore = splits.clone();
+                let required = transaction_extracts(
+                    &candidate.name,
+                    &proposal.required_extracts,
+                    &proposal.unit_extracts,
+                    &alternative.transaction,
+                )?;
+                let rendered =
+                    extracts::render(&String::from_utf8(config_before.clone())?, &required)?;
+                config_owned.write(rendered.as_bytes())?;
+                let trial = Trial {
+                    candidate,
+                    alternative,
+                    proposal: &proposal,
+                    observations: index,
+                    permitted: &prepared.permitted,
+                };
+                match trial.apply(&mut splits_owned, &mut splits) {
+                    Ok(()) => {
+                        chosen = Some(alternative);
+                        break;
+                    }
+                    Err(error) if is_trial_failure(&error) => {
+                        splits = restore;
+                        write(&mut splits_owned, &splits)?;
+                        config_owned.write(&config_before)?;
+                        let refusal = Refusal::from_error(&error);
+                        events.push(
+                            Event::new(&candidate.name, "rejected")
+                                .because(format!("{}: {error:#}", refusal.kind.legacy_category()))
+                                .about(&alternative.id)
+                                .refused(refusal),
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let Some(alternative) = chosen else {
+                deferred.push(candidate.clone());
+                continue;
+            };
 
             let units: Vec<String> = alternative.transaction.writes().map(str::to_string).collect();
+            accepted.push(candidate.clone());
             selections.insert(candidate.name.clone(), alternative.id.clone());
             applied.push(Applied {
                 unit: candidate.name.clone(),
@@ -1042,30 +1029,35 @@ impl Coverage {
             );
         }
 
-        let final_report = self.validate_selected(
+        // Even an empty selection rebuilds the restored state: a failed union
+        // earlier in adaptive bisection may have left a non-retail DOL behind.
+        let final_report = Self::validate_selected(
             ctx,
-            candidates,
+            &accepted,
             &selections,
             &applied,
             &BTreeSet::new(),
             &mut observations,
+            timeout,
         )?;
         if regresses(baseline, &final_report) {
-            bail!(ValidationError("worker union regresses an existing unit".into()));
+            bail!(ValidationError("coverage union regresses an existing unit".into()));
         }
         if final_report.measures.complete_code < starting_complete {
-            bail!(ValidationError("worker union reduces source-linked code".into()));
+            bail!(ValidationError("coverage union reduces source-linked code".into()));
         }
-        events.push(Event::new("", "worker-union-validated").because(format!(
-            "{} worker-proved selections held in one coordinator build",
-            candidates.len()
-        )));
+        if !accepted.is_empty() {
+            events.push(
+                Event::new("", "selection-union-validated")
+                    .because(format!("{} selections held in one combined build", accepted.len())),
+            );
+        }
 
         splits_owned.commit();
         config_owned.commit();
         Ok(Outcome {
-            accepted: candidates.to_vec(),
-            deferred: Vec::new(),
+            accepted,
+            deferred,
             tried,
             selections,
             events,
@@ -1086,14 +1078,15 @@ impl Coverage {
     /// neighbour narrowed by an earlier round is checked like any other change,
     /// rather than disappearing because no final candidate still carries it.
     fn validate_selected(
-        &self,
         ctx: &BuildContext,
         accepted: &[Candidate],
         selections: &Selections,
         applied: &[Applied],
         final_source_linked: &BTreeSet<String>,
         observations: &mut Observations,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Report> {
+        let started = AwakeInstant::now();
         let expected: BTreeMap<&str, Proposal> = accepted
             .iter()
             .map(|candidate| Ok((candidate.name.as_str(), proposal_of(candidate)?)))
@@ -1163,8 +1156,10 @@ impl Coverage {
             validate_certificate(&entry.unit, &record.observation, &record.alternative, index)?;
         }
         validate_coverage_history(&final_blocks, &transactions)?;
+        let certificates_at = started.elapsed();
 
-        let report = ctx.build(None)?;
+        let report = ctx.build(timeout)?;
+        let built_at = started.elapsed();
         let written: BTreeSet<&str> = applied
             .iter()
             .flat_map(|entry| entry.units.iter().map(String::as_str))
@@ -1176,6 +1171,13 @@ impl Coverage {
             .flat_map(|record| record.alternative.transaction.required_extracts.iter())
             .collect();
         validate_required_extracts(ctx, &required)?;
+        tracing::info!(
+            "coverage: validated {} applied transactions: certificates {:.3}s, build {:.3}s, linkage {:.3}s",
+            applied.len(),
+            certificates_at.as_secs_f64(),
+            (built_at - certificates_at).as_secs_f64(),
+            (started.elapsed() - built_at).as_secs_f64()
+        );
         Ok(report)
     }
 }
@@ -1368,13 +1370,16 @@ fn revisit(
     tried: &BTreeMap<String, BTreeSet<String>>,
     matching_cache: &Mutex<crate::matching::MatchingCache>,
 ) -> Result<Rediscovery> {
+    let started = AwakeInstant::now();
     let source_blocks =
         Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
     let expected_units = source_blocks.keys().cloned().collect();
     let evidence = generate_evidence(ctx, matching_cache)?;
+    let generated_at = started.elapsed();
     let (evidence, observations) =
         validate_evidence(evidence, &expected_units, &ctx.source, &ctx.target)?;
     let observation = persist_observations(ctx, &observations)?;
+    let validated_at = started.elapsed();
     let _ = std::fs::remove_file(ctx.output.join("coverage-evidence.json"));
     let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
     let by_name: BTreeMap<String, &CoverageUnit> = evidence
@@ -1420,6 +1425,13 @@ fn revisit(
         next.push(Candidate { name: name.clone(), evidence: serde_json::to_value(proposal)? });
     }
     next.sort_by(compare_candidates);
+    tracing::info!(
+        "coverage: rediscovery evidence {:.3}s, validation/persistence {:.3}s, proposal generation {:.3}s; {} candidates",
+        generated_at.as_secs_f64(),
+        (validated_at - generated_at).as_secs_f64(),
+        (started.elapsed() - validated_at).as_secs_f64(),
+        next.len()
+    );
     Ok(Rediscovery { candidates: next, skipped_unchanged })
 }
 

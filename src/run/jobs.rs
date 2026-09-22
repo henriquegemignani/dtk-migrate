@@ -399,8 +399,15 @@ fn run_one(
         return Ok(stored);
     }
 
+    let reset_started = Instant::now();
     crate::workspace::reset_workspace(baseline, workspace, manifest)?;
     crate::workspace::seed_objdiff(baseline, workspace)?;
+    tracing::info!(
+        "{}: batch {} workspace reset {:.3}s",
+        spec.stage,
+        spec.job_id,
+        reset_started.elapsed().as_secs_f64()
+    );
     write_json(&output.join("job.json"), spec)?;
     tracing::info!("{}: batch {} ({} candidates)", spec.stage, spec.job_id, spec.candidates.len());
 
