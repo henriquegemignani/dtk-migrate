@@ -532,6 +532,7 @@ pub fn run_stage(
     let integration_started = Instant::now();
     let integrated = dir.integration();
     crate::workspace::reset_workspace(&baseline_dir, &integrated, &manifest)?;
+    crate::workspace::seed_build_cache(&baseline_dir, &integrated, &run.target)?;
     crate::workspace::seed_objdiff(&baseline_dir, &integrated)?;
     let ctx = context(&integrated, run, stage_dir.join("integration-evidence"), cancel.clone());
 

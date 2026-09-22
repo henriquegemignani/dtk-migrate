@@ -401,6 +401,7 @@ fn run_one(
 
     let reset_started = Instant::now();
     crate::workspace::reset_workspace(baseline, workspace, manifest)?;
+    crate::workspace::seed_build_cache(baseline, workspace, &run.target)?;
     crate::workspace::seed_objdiff(baseline, workspace)?;
     tracing::info!(
         "{}: batch {} workspace reset {:.3}s",

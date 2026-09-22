@@ -43,6 +43,12 @@ fn rejected_verify_subtrees_are_pretested_without_serial_leaf_builds() {
     assert_eq!(accepted, ["A.cpp"], "{result:#}");
     assert_eq!(result["deferred"].as_array().unwrap().len(), 16, "{result:#}");
     assert!(describe(&output).contains("verify: 4 of 4 bisection subtrees refused"));
+    let first_build =
+        fixture.read(&format!("build/dtk-migrate/runs/{id}/verify/jobs/00000/process/build.log"));
+    assert!(
+        first_build.matches("fixture_build.py object").count() <= 2,
+        "the worker rebuilt baseline objects instead of reusing them: {first_build}"
+    );
     for i in 0..4 {
         let job = fixture
             .json(&format!("build/dtk-migrate/runs/{id}/verify/pretests-1/{i:05}/result.json"));

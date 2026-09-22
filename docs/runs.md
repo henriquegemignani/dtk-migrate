@@ -220,6 +220,12 @@ Disk is checked before starting, for every copy plus headroom. Both the baseline
 and the job artifacts are kept for inspection and resume, so a long run consumes
 more of it.
 
+Fresh workers and integration workspaces copy the validated stage baseline's
+generated graph, Ninja metadata and target objects as private files. Ninja
+rebuilds only inputs the trial changed. A warm workspace keeps its own
+incremental outputs; restored inputs there receive a fresh timestamp so stale
+objects cannot be treated as current.
+
   New runs bound candidate builds to 60 seconds by default, and reject a
   `--build-timeout` above 60 seconds. A resumed run keeps its recorded bound.
   The bound applies only to

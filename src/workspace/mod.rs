@@ -284,6 +284,7 @@ pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -
     }
     check_ancestors(&workspace)?;
     std::fs::create_dir_all(&workspace)?;
+    let had_build_graph = workspace.join("build.ninja").exists();
 
     // Validate both trees before removing anything, so a bad manifest cannot
     // leave a half-emptied workspace behind.
@@ -309,11 +310,61 @@ pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -
             std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(safe_path(&baseline, relative)?, &target)?;
-        // Cached output may describe a previous trial. Restoring an old
-        // timestamp would let Ninja treat different input bytes as up to date.
-        File::options().write(true).open(&target)?.set_modified(std::time::SystemTime::now())?;
+        // A warm workspace may hold output from a different trial. Restoring
+        // an old timestamp would let Ninja treat different input bytes as up
+        // to date. A fresh workspace has no such output: preserving the
+        // baseline input timestamps lets its validated build cache be seeded.
+        if had_build_graph {
+            File::options().write(true).open(&target)?.set_modified(std::time::SystemTime::now())?;
+        }
         if &hash_file(&target)? != expected {
             bail!("Baseline changed during reset: {relative}");
+        }
+    }
+    Ok(())
+}
+
+/// Seeds a fresh private workspace with generated outputs from a baseline
+/// whose build has already been validated. The files are copied, never linked:
+/// Ninja may overwrite any cached object during a trial. An existing graph
+/// means this workspace has its own incremental state and must keep it.
+pub fn seed_build_cache(baseline: &Path, workspace: &Path, target: &str) -> Result<()> {
+    if !matches!(Path::new(target).components().collect::<Vec<_>>().as_slice(), [
+        Component::Normal(_)
+    ]) {
+        bail!("Unsafe build cache version: {target}");
+    }
+    if workspace.join("build.ninja").exists() {
+        return Ok(());
+    }
+    let source_build = baseline.join("build").join(target);
+    if !baseline.join("build.ninja").is_file() || !source_build.is_dir() {
+        return Ok(());
+    }
+    for name in ["build.ninja", ".ninja_log", ".ninja_deps"] {
+        let from = baseline.join(name);
+        if from.is_file() {
+            reject_link(&from)?;
+            let destination = workspace.join(name);
+            check_ancestors(&destination)?;
+            std::fs::copy(&from, destination)?;
+        }
+    }
+    for entry in WalkDir::new(&source_build).follow_links(false) {
+        let entry = entry?;
+        reject_link(entry.path())?;
+        let relative = entry.path().strip_prefix(&source_build)?;
+        let destination = workspace.join("build").join(target).join(relative);
+        check_ancestors(&destination)?;
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&destination)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(entry.path(), &destination)?;
+        } else {
+            bail!("Build cache contains a non-file: {}", entry.path().display());
         }
     }
     Ok(())
@@ -390,6 +441,25 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seeded_build_cache_is_private_and_a_warm_workspace_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("baseline");
+        let worker = dir.path().join("worker");
+        std::fs::create_dir_all(baseline.join("build/PAL/src")).unwrap();
+        std::fs::create_dir_all(&worker).unwrap();
+        std::fs::write(baseline.join("build.ninja"), "graph").unwrap();
+        std::fs::write(baseline.join(".ninja_log"), "log").unwrap();
+        std::fs::write(baseline.join("build/PAL/src/a.o"), "original").unwrap();
+        seed_build_cache(&baseline, &worker, "PAL").unwrap();
+        assert_eq!(std::fs::read(worker.join("build/PAL/src/a.o")).unwrap(), b"original");
+        std::fs::write(worker.join("build/PAL/src/a.o"), "changed").unwrap();
+        seed_build_cache(&baseline, &worker, "PAL").unwrap();
+        assert_eq!(std::fs::read(worker.join("build/PAL/src/a.o")).unwrap(), b"changed");
+        assert_eq!(std::fs::read(baseline.join("build/PAL/src/a.o")).unwrap(), b"original");
+        assert!(seed_build_cache(&baseline, &worker, "../PAL").is_err());
+    }
 
     fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
