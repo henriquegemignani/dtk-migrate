@@ -167,6 +167,7 @@ fn build_fixture() -> Option<Fixture> {
         std::fs::create_dir_all(root.join(sub)).ok()?;
     }
     std::fs::write(root.join("configure.py"), CONFIGURE).ok()?;
+    std::fs::write(root.join("build/compilers/fixture.exe"), "shared compiler").ok()?;
     std::fs::write(root.join("fixture_build.py"), BUILD).ok()?;
     for name in ["A", "B"] {
         std::fs::write(root.join(format!("src/{name}.cpp")), format!("// {name}\n")).ok()?;
@@ -336,6 +337,11 @@ fn a_run_publishes_only_the_candidate_that_builds_to_retail() {
     // successful state reaches both phases, while a rejected link stops after
     // `ok`.
     let logs = fixture.command_logs();
+    assert!(logs.iter().any(|log| log.contains("--compilers")));
+    for entry in walkdir::WalkDir::new(run) {
+        let entry = entry.unwrap();
+        assert!(entry.file_name() != "fixture.exe", "Compiler copied into run: {:?}", entry.path());
+    }
     let mut invocations = Vec::new();
     for log in &logs {
         let mut linked = false;

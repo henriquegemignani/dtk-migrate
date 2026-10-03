@@ -10,7 +10,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use decomp_toolkit::obj::ObjSymbolKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1974,10 +1974,10 @@ impl ObservationIndex {
 
     pub fn persist(&self, directory: &Path) -> Result<ObservationReference> {
         std::fs::create_dir_all(directory)?;
-        let name = format!("ownership-{}.json", self.digest);
+        let name = format!("ownership-{}.json.zst", self.digest);
         let path = directory.join(&name);
         if path.exists() {
-            let report: IdentificationReport = serde_json::from_slice(&std::fs::read(&path)?)?;
+            let report = read_report(&path)?;
             let existing = ObservationIndex::load_self_contained(
                 report,
                 &self.report.source,
@@ -1987,7 +1987,14 @@ impl ObservationIndex {
                 bail!("Existing ownership observation artifact has the wrong digest");
             }
         } else {
-            std::fs::write(&path, serde_json::to_vec_pretty(&self.report)?)?;
+            // Stream compact JSON into a fast compressor and publish only a
+            // finished frame: interrupted writes must not poison this digest.
+            let temporary = tempfile::NamedTempFile::new_in(directory)?;
+            let encoder = zstd::stream::write::Encoder::new(temporary.as_file(), 3)?;
+            let mut writer = std::io::BufWriter::new(encoder);
+            serde_json::to_writer(&mut writer, &self.report)?;
+            writer.into_inner().map_err(|error| error.into_error())?.finish()?;
+            temporary.persist(&path)?;
         }
         // The reference states the schema of the artifact it names, which is
         // the report's own: a schema 2 report stays schema 2 when it is kept.
@@ -2550,13 +2557,23 @@ pub fn load_reference(
     if !identification_schema_supported(reference.schema) {
         bail!("Ownership reference uses unsupported schema {}", reference.schema);
     }
-    let text = std::fs::read_to_string(&reference.file).map_err(|error| {
-        anyhow::anyhow!("Failed to read ownership observations {}: {error}", reference.file)
-    })?;
-    let report: IdentificationReport = serde_json::from_str(&text)?;
+    let report = read_report(Path::new(&reference.file))?;
     let observations = ObservationIndex::load_self_contained(report, source, target)?;
     observations.verify_reference(reference)?;
     Ok(observations)
+}
+
+/// Reads current compressed artifacts and retained plain JSON observations.
+pub fn read_report(path: &Path) -> Result<IdentificationReport> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to read ownership observations {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    if path.extension().is_some_and(|extension| extension == "zst") {
+        let decoder = zstd::stream::read::Decoder::with_buffer(reader)?;
+        Ok(serde_json::from_reader(std::io::BufReader::new(decoder))?)
+    } else {
+        Ok(serde_json::from_reader(reader)?)
+    }
 }
 
 fn interval_covered(ranges: &[(u32, u32)], start: u32, end: u32) -> bool {
@@ -4757,6 +4774,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut reference = index.persist(directory.path()).unwrap();
         assert_eq!(reference.schema, 2);
+        assert!(reference.file.ends_with(".json.zst"));
+        assert!(
+            std::fs::metadata(&reference.file).unwrap().len()
+                < serde_json::to_vec_pretty(index.report()).unwrap().len() as u64
+        );
         assert!(load_reference(&reference, "source", "target").is_ok());
 
         // The same artifact advertised as the current schema is refused.
@@ -4766,6 +4788,19 @@ mod tests {
             error.to_string().contains(&format!("reference states {IDENTIFICATION_SCHEMA}")),
             "{error}"
         );
+    }
+
+    #[test]
+    fn retained_plain_json_observations_remain_readable() {
+        let (report, expected) = with_helper(&[]);
+        let index = ObservationIndex::load(report, "source", "target", &expected).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut reference = index.persist(directory.path()).unwrap();
+        reference.file = directory.path().join("legacy.json").to_string_lossy().into_owned();
+        std::fs::write(&reference.file, serde_json::to_vec_pretty(index.report()).unwrap())
+            .unwrap();
+        let loaded = load_reference(&reference, "source", "target").unwrap();
+        assert_eq!(loaded.digest, index.digest);
     }
 
     #[test]
@@ -4784,11 +4819,15 @@ mod tests {
         ])]);
         let directory = tempfile::tempdir().unwrap();
         let reference = first.persist(directory.path()).unwrap();
-        std::fs::write(&reference.file, serde_json::to_vec_pretty(second.report()).unwrap())
-            .unwrap();
+        let bytes =
+            zstd::stream::encode_all(serde_json::to_vec(second.report()).unwrap().as_slice(), 3)
+                .unwrap();
+        std::fs::write(&reference.file, bytes).unwrap();
 
         let error = first.persist(directory.path()).unwrap_err();
         assert!(error.to_string().contains("wrong digest"), "{error}");
+        std::fs::write(&reference.file, b"broken compressed frame").unwrap();
+        assert!(load_reference(&reference, "source", "target").is_err());
     }
 
     fn section(

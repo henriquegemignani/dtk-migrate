@@ -36,7 +36,7 @@ baseline and independently verified `ca286f45` oracle, `CGuiFactories` is now
 exact in code and full ownership: 1,184 correct code bytes and 24 correct data
 bytes gained, zero known wrong or lost bytes, and all 424 verified controls
 unchanged. The score is at
-`target/cgui-factories-bounded-data-policy29-score/` on F:. The frozen split
+`artifacts/collected/cgui-factories-bounded-data-policy29-score/` on F:. The frozen split
 was restored to SHA-256 `a59a122d…` after scoring.
 
 All five frozen PAL calibration scenarios have exactly the same aggregate
@@ -44,7 +44,7 @@ measures as policy 28 and no incorrect assignment. The held-out offered
 populations recover 166, 87, 97, 113 and 7 exact units for `everything`,
 `isolated-unit`, `consecutive-units`, `truncated-splits` and
 `misplaced-helper`, respectively. Records are under
-`target/policy29-pal-calibration/` on F:.
+`artifacts/collected/policy29-pal-calibration/` on F:.
 
 ### Policy 28: a bounded weak vtable beside a relocation-linked code run
 
@@ -73,7 +73,7 @@ wrong or lost bytes, and 424 verified controls unchanged. The complete TU is
 still partial: the later split also owns eight bytes of `.rodata` that this
 rule deliberately leaves unclaimed. The focused split was restored to its
 saved SHA-256 `a59a122d…` after scoring; score and manifest are under
-`target/cgui-factories-weak-vtable-policy28-*` on F:.
+`artifacts/collected/cgui-factories-weak-vtable-policy28-*` on F:.
 
 All five PAL calibration scenarios exited with zero incorrect selections and
 exactly the same held-out exact/attributed/missed counts as policy 26. They
@@ -142,7 +142,7 @@ changes a separate `common` allocation.
 Focused discover run `20716-183850` published `.bss 0x803F4390–0x803F43A8`
 together with the earlier jump-table and `.sdata2`
 claims, and rebuilt to the retail SHA-1. The verified score at
-`target/cscript-singleton-bss-schema5-verified-score/` records 180 correct
+`artifacts/collected/cscript-singleton-bss-schema5-verified-score/` records 180 correct
 data bytes gained, 24 more than schema 4, zero known wrong or lost bytes, and
 all 424 verified controls unchanged. The code tail remains unresolved.
 
@@ -151,7 +151,7 @@ allocation. Focused run `20716-184842` published it while preserving that
 TU's existing 128-byte `common` BSS split, and passed the retail check. An
 independent `.sdata` claim added 16 more bytes. The later oracle leaves all
 40 bytes unassigned, so its benchmark at
-`target/ctryclops-singleton-bss-schema5-verified-score/` reports them as
+`artifacts/collected/ctryclops-singleton-bss-schema5-verified-score/` reports them as
 unknown, not proved correct: zero known wrong or lost bytes, with 424 verified
 controls unchanged. Both focused trials restored the old checkout's split to
 its saved SHA-256 `a59a122d…`. No full historical migration was rerun for
@@ -174,7 +174,7 @@ the independent next-symbol pair before certifying the allocation.
 Focused discover run `20716-181506` on the F-drive historical checkout
 published `.data 0x803C9738–0x803C9830` and rebuilt to the retail SHA-1
 `4d3780c77842ae7fddbdd5732b70bed100df5c65`. The verified score at
-`target/cscript-jumptable-schema4-verified-score/` records 156 correct data
+`artifacts/collected/cscript-jumptable-schema4-verified-score/` records 156 correct data
 bytes gained, comprising the 140-byte jump table and a separate 16-byte
 `.sdata2` claim. It records zero wrong or lost bytes and leaves all 424
 verified controls unchanged. The unit remains full-body partial because its
@@ -199,7 +199,7 @@ this complete claim ahead of its supported but shorter caller-only fallback.
 Focused F-drive run `20716-173913` offered the full claim first, extended
 `.text` from `0x80342F60` to `0x803430D4`, and published. The PAL DOL rebuilt
 to retail SHA-1 `4d3780c77842ae7fddbdd5732b70bed100df5c65`. Scored against
-the later verified oracle at `target/cimage-policy26-verified-score/`, the
+the later verified oracle at `artifacts/collected/cimage-policy26-verified-score/`, the
 unit is exact in code and full body: 372 correct bytes gained, zero known
 wrong or lost bytes, and 424 verified controls unchanged. The old checkout's
 split was restored to its pretrial SHA-256 `a59a122d…`. This is a focused
@@ -233,7 +233,7 @@ do not inherit its member certificate.
 The final F-drive focused run `20716-162946` offered only this full code claim,
 published `.text 0x802ADCD8–0x802AE178`, and passed the retail SHA-1 check.
 Its interrupted integration was resumed with the worker result reused. The
-verified benchmark at `target/gui-policy25-final-verified-score/` credits 1,184 correct
+verified benchmark at `artifacts/collected/gui-policy25-final-verified-score/` credits 1,184 correct
 code bytes, no wrong or lost bytes, and all 424 verified controls unchanged.
 The full TU remains partial because its `.rodata` and `.data` ranges are not
 claimed. The saved historical split was restored to SHA-256 `a59a122d…`.
@@ -277,14 +277,14 @@ offered exactly one vtable-head transaction and extended CTeamAiMgr's `.text`
 start to `0x80227D90`. It rebuilt to retail SHA-1 `4d3780c7…`. Against the
 verified later split, the unit is exact in code and full ownership: 276
 correct code bytes gained, zero wrong or lost bytes, and all 424 verified
-controls unchanged (`target/team-head-policy24-final-verified-score/`). The old
+controls unchanged (`artifacts/collected/team-head-policy24-final-verified-score/`). The old
 checkout's split was restored to its pretrial SHA-256 `a59a122d…`. All five
 frozen GM8E01_00→GM8P01_00 calibration scenarios completed at
-`target/policy24-pal-calibration/` with zero incorrect boundaries or
+`artifacts/collected/policy24-pal-calibration/` with zero incorrect boundaries or
 neighbour losses. Their aggregate measures and every material per-unit record
 match policy 23; only content-addressed IDs change. The held-out
 GM8E01_00→GM8E01_02 `everything` scenario at
-`target/policy24-heldout-e02-everything/` likewise has unchanged decisions
+`artifacts/collected/policy24-heldout-e02-everything/` likewise has unchanged decisions
 and zero incorrect boundaries or neighbour losses. These scenarios check for
 collateral changes; the focused historical trial exercises the new proof.
 
@@ -311,7 +311,7 @@ offered both a narrow `reference-placed-prefix` and a full-body
 from `0x8034F45C` to `0x8034F370`. Its one transaction gained 236 code bytes,
 rebuilt to retail SHA-1 `4d3780c7…`, and scored those bytes exact against the
 verified later split. There were zero wrong or lost known bytes and all 424
-verified controls were unchanged (`target/stream-prefix-focused-verified-score/`).
+verified controls were unchanged (`artifacts/collected/stream-prefix-focused-verified-score/`).
 The ordinary 240-byte BSS allocation was deliberately absent from this
 coverage-only run. Combined `coverage,discover` run `20716-141044` started
 from the same saved baseline, accepted the code prefix first and the ordinary
@@ -319,14 +319,14 @@ BSS allocation second, and rebuilt to the retail SHA-1 after both stages.
 Against the verified later split, CStreamAudioManager is exact in both code
 and complete ownership: 476 correct bytes gained, zero wrong or lost bytes,
 and all 424 verified controls unchanged
-(`target/stream-combined-verified-score/`). It still does not prove the old
+(`artifacts/collected/stream-combined-verified-score/`). It still does not prove the old
 compiled source object linkable. All five frozen GM8E01_00→GM8P01_00
-calibration scenarios completed at `target/policy23-pal-calibration/` with
+calibration scenarios completed at `artifacts/collected/policy23-pal-calibration/` with
 zero incorrect boundaries or neighbour losses. Their aggregate measures and
 every material per-unit record match policy 22; transaction IDs differ because
 the policy and observations are content-addressed. The held-out
 GM8E01_00→GM8E01_02 `everything` scenario at
-`target/policy23-heldout-e02-everything/` likewise has unchanged decisions and
+`artifacts/collected/policy23-heldout-e02-everything/` likewise has unchanged decisions and
 zero incorrect boundaries or neighbour losses. These runs test for collateral
 changes; the focused historical migration and verified-oracle score exercise
 the new proof itself.
@@ -355,10 +355,10 @@ one certificate of this kind, for `CStreamAudioManager`. Focused discover run
 `20716-125603` accepted it and rebuilt to retail SHA-1 `4d3780c7…`.
 Scoring against the independently verified later split records 240 correct
 data bytes gained, no known wrong or lost bytes, and 424 unchanged verified
-controls at `target/stream-bss-focused-verified-score/`. After the replay
+controls at `artifacts/collected/stream-bss-focused-verified-score/`. After the replay
 dependency check was added, focused run `20716-130752` accepted the same
 range, rebuilt to the same retail SHA-1, and scored identically at
-`target/stream-bss-replay-verified-score/`. This was a data-only
+`artifacts/collected/stream-bss-replay-verified-score/`. This was a data-only
 trial; the 236-byte code prefix was unresolved at that point, and the old source object
 was not proved linked. Its PAL build report still has only 3,320 of 4,944 code
 bytes matched (67.15%), so verification cannot yet enable its source object.
@@ -372,7 +372,7 @@ uses its two local-static references and same-unit call, without reading the
 later split or an assembly filename as an answer.
 
 All five frozen GM8E01_00→GM8P01_00 calibration scenarios completed at
-`target/data-schema3-pal-calibration/`. Their per-unit records and aggregate
+`artifacts/collected/data-schema3-pal-calibration/`. Their per-unit records and aggregate
 measures are identical to policy 22. Calibration exercises coverage's code
 claims, so this is a regression check, not a test of the new data inference;
 the focused discover runs and verified-oracle score are that test.
@@ -413,7 +413,7 @@ all have zero incorrect alternatives, wrong bytes and revised-neighbour loss.
 The held-out GM8E01_00→GM8E01_02 `everything` scenario also agrees per unit
 with policy 21 and exits 0. These scenarios do not exercise the new suffix
 because their oracle already owns it. Records and the verified focused score
-are under `target/policy22-*` on F:.
+are under `artifacts/collected/policy22-*` on F:.
 
 ### Policy 21: a competing source-order slot vetoes isolated identity
 
@@ -436,13 +436,13 @@ one oracle-unassigned `CScriptSpiderBallWaypoint.cpp` anchor with the same
 pattern. The held-out `everything` rerun now exits 0: both incorrect
 alternatives and both incorrect anchors are gone, with no selected-outcome or
 per-unit ownership-measure change from policy 20. The record is at
-`target/policy21-final-heldout-everything/` on F:. All five frozen PAL
+`artifacts/collected/policy21-final-heldout-everything/` on F:. All five frozen PAL
 scenarios rerun with the final release binary at
-`target/policy21-final-pal-calibration/`: every per-unit selected outcome
+`artifacts/collected/policy21-final-pal-calibration/`: every per-unit selected outcome
 and ownership measure agrees with policy 20, and no wrong known byte or
 revised-neighbour loss appears. Scoring the policy-20 focused Head/Light run
 with the current benchmark reproduces its `score.json` byte-for-byte at
-`target/policy21-head-light-score/`. A broader policy-21 historical migration
+`artifacts/collected/policy21-head-light-score/`. A broader policy-21 historical migration
 has not yet been run; this safety rule changed no PAL alternative in these
 five scenarios.
 
@@ -549,7 +549,7 @@ and anchor disappear. The only unit whose selected outcome or attributed bytes
 change is `CTweakAutoMapper.cpp`: it goes from a correct 188-byte partial claim
 to abstention in `everything` and `isolated-unit`. The other three scenarios
 are byte-for-byte equal in their outcome counts. Evidence is retained under
-`target/destructor-policy18-historical-calibration/` on F:.
+`artifacts/collected/destructor-policy18-historical-calibration/` on F:.
 
 ### Policy 17: independently attributed functions attached to represented units
 
@@ -813,7 +813,7 @@ diagnostic even when incomplete and does not change policy 14.
 I built all 813 `all_source` objects on an isolated F-drive checkout of
 `b65ad2a6` and ran the new matcher against its NTSC/PAL binaries and configs.
 The checkout was removed after the run; its schema-10 report is retained at
-`target/g-historical-complete-identifications.json` on F for opt-in replay.
+`artifacts/collected/g-historical-complete-identifications.json` on F for opt-in replay.
 For the DOL, 801 mapped objects were available and Ninja-clean; 10 configured
 objects were outside the source split inventory and 23 source units had no
 compiled-object mapping. The report has 37 relocation placements in 18 body
@@ -913,7 +913,7 @@ has the opposite problem: its source-version body changed, but its clean PAL
 compiled body matches the target exactly and its symbol name joins it to the
 source-version function. Binary-only identification missed that member.
 The frozen scan is saved at
-`target/b65-policy19-schema18-full-objects-identification.json`; the opt-in
+`artifacts/collected/b65-policy19-schema18-full-objects-identification.json`; the opt-in
 `historical_pal_compiled_bridges_keep_emitted_ownership_separate` test reloads
 and rederives its bridge inventory.
 
@@ -963,14 +963,14 @@ counts were 345 (`everything`), 184 (`isolated-unit`), 221
 (`consecutive-units`), 249 (`truncated-splits`) and 19
 (`misplaced-helper`). No scenario selected wrong known ownership or lost
 ground from a revised neighbour. The records are at
-`target/policy20-pal-calibration/`. This checkout differs from the earlier
+`artifacts/collected/policy20-pal-calibration/`. This checkout differs from the earlier
 policy-19 calibration checkout, so the counts are not a controlled policy
 delta. On the same `ca286f45` checkout, the held-out
 GM8E01_00→GM8E01_02 `everything` scenario has identical selected outcomes
 and per-unit ownership measures to policy 19. The same two pre-existing
 incorrect unselected fallback/anchor hypotheses, `CDrone.cpp` and
 `CMetroid.cpp`, still make that command exit 1. Its record is at
-`target/policy20-heldout-e02-everything/`.
+`artifacts/collected/policy20-heldout-e02-everything/`.
 
 The broader bridge-only rule remains unsafe: on the historical PAL report,
 `CFontImageDef.cpp` has a clean compiled bridge between independently
@@ -1014,7 +1014,7 @@ was exact against the oracle.
 
 The command still exits 1 on the single pre-existing `MetroidPrime/ScriptLoader.cpp` fault
 (`alternative, anchor`) under `everything` and `consecutive-units`; no new incorrect assignment
-appeared. Full per-unit evidence is in `target/joint-calibration-final-ca286/`.
+appeared. Full per-unit evidence is in `artifacts/collected/joint-calibration-final-ca286/`.
 
 ### Frozen historical migration
 
@@ -1023,13 +1023,13 @@ the retail SHA-1 `4d3780c77842ae7fddbdd5732b70bed100df5c65`. Against the same fr
 manifest used for policy 13, the result is unchanged: **7 of 25** changed `.text` bodies
 exact, **4 of 27** changed full bodies exact, 1,824 correct code bytes gained, and zero
 lost or newly wrong bytes. One control acquired 24 bytes of unassigned ground; it has no
-known-owner damage. The scored run is in `target/joint-historical-policy14/score.md`.
+known-owner damage. The scored run is in `artifacts/collected/joint-historical-policy14/score.md`.
 
 The joint rule was exercised: coverage accepted one atomic Pane/SliderGroup transaction,
 extending Pane's `.text` to `0x802B1338–0x802B199C` and SliderGroup's to
 `0x802B199C–0x802B219C`. Both match the later oracle. This does **not** add another
 historical exact TU: policy 13 already recovered both through its individual routes. The
-compact applied record is in `target/joint-historical-policy14/joint-acceptance.json`.
+compact applied record is in `artifacts/collected/joint-historical-policy14/joint-acceptance.json`.
 
 ## Implementation checkpoint after Change D (edges and complete sequences)
 

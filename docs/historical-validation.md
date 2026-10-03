@@ -5,7 +5,7 @@ calibration, not a claim that every later PAL split can be recovered from the
 old binaries. Each migration used only its frozen baseline and NTSC source
 version. Later PAL splits at `ca286f45`
 were used by the benchmark afterward as an oracle. The runs, manifests and
-scores are retained on F: under `target/` and the isolated Prime checkout's
+scores are retained on F: under `artifacts/collected/` and the isolated Prime checkout's
 `build/dtk-migrate/runs/`.
 
 | NTSC→PAL baseline | Run | Changed code exact | Changed full exact | Correct code gained | Known code wrong/lost | Published retail |
@@ -39,9 +39,9 @@ SHA-1. Scored against the frozen later oracle, both are code- and full-body
 exact, with 192 correct bytes gained and no known wrong or lost bytes. This
 focused run does not replace either complete policy-16 run or establish their
 combined result with later stages. Its score is retained at
-`target/attached-policy17-schema15-score/score.json` on F:.
+`artifacts/collected/attached-policy17-schema15-score/score.json` on F:.
 The policy-17 five-scenario calibration is retained under
-`target/attached-policy17-schema15-calibration/`. It adds 24 exact unit
+`artifacts/collected/attached-policy17-schema15-calibration/`. It adds 24 exact unit
 recoveries in the truncated-splits scenario without known wrong or lost bytes;
 its exit remains 1 for the pre-existing unselected `ScriptLoader.cpp`
 alternative/anchor fault in two scenarios.
@@ -54,7 +54,7 @@ complete-body exactness from 0/15 to **2/15**. Correct code gained rises from
 1,320 to **1,792 bytes**, with zero known wrong or lost bytes. The two newly
 exact units are `CColorOverrideInstruction` and `CPopStateInstruction` (96
 bytes each); `CImageInstruction` also gains a correct 280-byte partial body.
-The score is retained at `target/attached-policy17-full-score/score.json` on
+The score is retained at `artifacts/collected/attached-policy17-full-score/score.json` on
 F:. The published checkout was restored to its original `46bd33805` tracked
 files after scoring, so later calibration uses the frozen baseline.
 
@@ -65,13 +65,13 @@ wrong or revised-owner-lost bytes appear. It also withholds one correct partial
 188-byte `CTweakAutoMapper.cpp` destructor claim in `everything` and
 `isolated-unit`, pending positive emitter-placement evidence. The full
 per-scenario comparison is in `docs/pal-split-recovery-plan.md`, with records
-under `target/destructor-policy18-historical-calibration/` on F:.
+under `artifacts/collected/destructor-policy18-historical-calibration/` on F:.
 
 Policy 19 adds two order-based destructor placement routes. On the same frozen
 PAL baseline and oracle, all five calibration scenarios exit 0 with the same
 exact counts and per-unit selected outcomes as policy 18, no incorrect
 alternatives or anchors and zero selected wrong or revised-owner-lost bytes.
-The records are under `target/destructor-policy19-historical-calibration/` on
+The records are under `artifacts/collected/destructor-policy19-historical-calibration/` on
 F:. Its held-out GM8E01_00→GM8E01_02 `everything` scenario restores one
 208-byte exact unit and one 824-byte partial claim lost under policy 18,
 without adding an incorrect hypothesis; the two earlier unrelated wrong
@@ -90,15 +90,15 @@ per-unit selected outcomes and ownership measures to policy 20, with zero
 wrong known bytes and neighbour losses. The current benchmark's score for
 the earlier focused policy-20 run is JSON-identical to its saved score.
 These are calibration and scoring checks, not a new full migration. Records
-are on F: under `target/policy21-final-heldout-everything/`,
-`target/policy21-final-pal-calibration/` and
-`target/policy21-head-light-score/`.
+are on F: under `artifacts/collected/policy21-final-heldout-everything/`,
+`artifacts/collected/policy21-final-pal-calibration/` and
+`artifacts/collected/policy21-head-light-score/`.
 
 Policy 22's focused F-drive run `20716-115833` started from the policy-20
 Head/Light split and extended `CTeamAiMgr.cpp` by its complete three-function
 terminal suffix, `0x8022AFD8–0x8022B3D4`. It rebuilt to the same PAL retail
 SHA-1. The exact-baseline, verified-oracle score at
-`target/policy22-team-ai-focused-verified-score/` records 1,020 correct code
+`artifacts/collected/policy22-team-ai-focused-verified-score/` records 1,020 correct code
 bytes gained, zero known wrong or lost bytes, and 424 unchanged verified
 controls. `CTeamAiMgr` is still partial because its 276-byte prefix is missing.
 All five PAL calibration scenarios and held-out GM8E01_02 `everything` exit 0
@@ -110,25 +110,25 @@ the published Head/Light and TeamAiMgr changes, with `CStreamAudioManager`'s
 ordinary BSS still absent. Its complete compiled-allocation certificate
 added `.bss 0x804025F0–0x804026E0` alongside the unit's existing common BSS
 and rebuilt to the same retail SHA-1. The exact-baseline verified-oracle score
-at `target/stream-bss-focused-verified-score/` records 240 correct data bytes
+at `artifacts/collected/stream-bss-focused-verified-score/` records 240 correct data bytes
 gained, zero known wrong or lost bytes, and 424 unchanged verified controls.
 The old code prefix was still missing in these data-only runs, which are not a
 source-link verification or a full historical migration. The replay-gate rerun
 `20716-130752` accepted the same range and has an identical verified score at
-`target/stream-bss-replay-verified-score/`. All five PAL code-calibration
+`artifacts/collected/stream-bss-replay-verified-score/`. All five PAL code-calibration
 scenarios have per-unit records and measures identical to policy 22; those
 scenarios do not exercise discovery's new BSS route.
 
 Policy 23's focused coverage run `20716-135443` started again from the same
 pretrial split hash and recovered the separate 236-byte CStreamAudioManager
 code prefix. The generated transaction was accepted and rebuilt to the retail
-SHA-1. The verified score at `target/stream-prefix-focused-verified-score/`
+SHA-1. The verified score at `artifacts/collected/stream-prefix-focused-verified-score/`
 rates its code body exact, with 236 correct bytes gained, zero wrong or lost
 bytes, and all 424 verified controls unchanged. The BSS allocation was absent
 from this coverage-only run. Combined `coverage,discover` run `20716-141044`
 started from the same baseline, accepted code and BSS in that order, and
 rebuilt to the retail hash after each stage. The full-body verified score at
-`target/stream-combined-verified-score/` makes CStreamAudioManager exact:
+`artifacts/collected/stream-combined-verified-score/` makes CStreamAudioManager exact:
 476 correct bytes gained, zero wrong or lost bytes, and the same 424 controls
 unchanged. Neither run proves that the old compiled source object may link.
 Policy 23's five frozen PAL calibration scenarios and held-out GM8E01_02
@@ -143,7 +143,7 @@ pretrial split, accepted CTeamAiMgr's two-function destructor head
 The independently verified later split makes CTeamAiMgr exact in code and
 complete ownership: 276 correct bytes gained, no known wrong or lost bytes,
 and all 424 verified controls unchanged at
-`target/team-head-policy24-final-verified-score/`. All five frozen PAL
+`artifacts/collected/team-head-policy24-final-verified-score/`. All five frozen PAL
 calibration scenarios and held-out GM8E01_02 `everything` completed with
 zero incorrect boundaries or neighbour losses and unchanged material per-unit
 decisions against policy 23. This is a focused trial, not the
@@ -156,7 +156,7 @@ five-function source run, one PAL-only insertion, and two corresponding
 class-vtable relocation relationships. Its worker accepted the transaction;
 an interrupted integration was resumed with that worker result reused. The
 published PAL DOL has retail SHA-1 `4d3780c7…`. At
-`target/gui-policy25-final-verified-score/`, the independently verified
+`artifacts/collected/gui-policy25-final-verified-score/`, the independently verified
 later split rates its code exact: 1,184 correct bytes gained, zero wrong or
 lost bytes, and all 424 controls unchanged. The TU's `.rodata` and `.data`
 remain unclaimed, so its complete body is partial. The trial's split was
@@ -172,7 +172,7 @@ matcher only trusts independently confident function pairs. The contextual
 run's matching references point to the expected eight-byte read-only string
 and 16-byte vtable allocation; the source vtable is weak and the string is
 pooled, so those references and equal bytes alone do not settle PAL emission
-ownership. The verified score at `target/gui-policy25-discover-score/` has the
+ownership. The verified score at `artifacts/collected/gui-policy25-discover-score/` has the
 same 1,184 correct code bytes and all 424 verified controls unchanged. The
 historical split was restored to SHA-256 `a59a122d…` after the run.
 
@@ -189,9 +189,9 @@ the already declared source-linked units. Its one new candidate failed the
 hash and was deferred; the run published no file changes. The benchmark now
 accepts Git's deterministic LF↔CRLF checkout conversion and the verify stage's
 deterministic legacy-status rendering when binding that run to the oracle Git
-blobs. The resulting manifest at `target/midcut-policy19-verified-manifest.json`
+blobs. The resulting manifest at `artifacts/collected/midcut-policy19-verified-manifest.json`
 marks 452 of 805 units source-linked and leaves 353 unverified. Rescoring the
-full policy-17 migration at `target/attached-policy17-verified-score/` preserves
+full policy-17 migration at `artifacts/collected/attached-policy17-verified-score/` preserves
 all 805 non-trust unit results byte-for-byte: 4/15 changed-code exact, 1,792
 correct code bytes gained, zero lost or newly wrong bytes, and no verified
 control regression. The remaining unverified splits and unassigned bytes are
@@ -260,8 +260,8 @@ bytes. Together they gain 464 correct code bytes and lose or wrongly assign
 none. The matching record is one of 824 identified units in the old report; a
 single-unit HeadWidget extension still fails the ownership gate. The new
 baseline-specific manifest and score are retained on F: at
-`target/b65-policy20-verified-manifest.json` and
-`target/b65-policy20-head-light-score/score.json`. This focused run does not
+`artifacts/collected/b65-policy20-verified-manifest.json` and
+`artifacts/collected/b65-policy20-head-light-score/score.json`. This focused run does not
 replace the full policy-16 or policy-17 migration results above.
 
 Policy 28's focused coverage-only run `20716-205110` claimed
@@ -272,7 +272,7 @@ verified `ca286f45` oracle scores 1,184 correct code bytes plus 16 correct
 data bytes gained, zero known wrong or lost bytes, and 424 verified controls
 unchanged. The code body is exact; the full body remains partial because this
 rule does not claim the eight-byte `.rodata` string. The manifest and score
-are under `target/cgui-factories-weak-vtable-policy28-*` on F:. The frozen
+are under `artifacts/collected/cgui-factories-weak-vtable-policy28-*` on F:. The frozen
 checkout's split was restored to SHA-256 `a59a122d…` after the trial. This
 focused run does not replace a full multi-stage historical migration.
 
@@ -282,8 +282,8 @@ code, weak vtable and read-only allocation in one transaction and rebuilt to
 the PAL retail SHA-1. The verified oracle now scores `CGuiFactories` exact in
 complete ownership: 1,208 correct bytes gained, zero known wrong or lost
 bytes, and 424 verified controls unchanged. The score is retained at
-`target/cgui-factories-bounded-data-policy29-score/`; the frozen split was
+`artifacts/collected/cgui-factories-bounded-data-policy29-score/`; the frozen split was
 restored afterward. All five frozen PAL calibration scenarios match policy
 28's aggregate measures exactly and contain no incorrect assignment; their
-records are at `target/policy29-pal-calibration/`. This remains a focused
+records are at `artifacts/collected/policy29-pal-calibration/`. This remains a focused
 coverage-only result.

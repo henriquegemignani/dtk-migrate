@@ -280,7 +280,7 @@ pub fn execute_in(
     cancel: Option<Cancel>,
     jobs_dir: &Path,
 ) -> Result<Vec<JobResult>> {
-    crate::run::check_environment(run)?;
+    crate::run::check_job_environment(run)?;
     let baseline_hash = crate::run::baseline_fingerprint(manifest)?;
 
     let specs: Vec<JobSpec> = batches

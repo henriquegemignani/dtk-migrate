@@ -65,9 +65,9 @@ The first run is in
 `F:\programming\decomp\prime-migration-gm8j-12w`. Stage `result.json`
 files under each run directory contain `timing.preparation_seconds`,
 `worker_seconds`, and `integration_seconds`. The latest 32-worker run's log and
-resource samples are `target/gm8j-32w.stderr.log` and
-`target/gm8j-32w-resources.csv` in this repository. The 12-worker run's
-samples are `target/gm8j-optimized-2-resources.csv`. These `target/` files are
+resource samples are `artifacts/collected/gm8j-32w.stderr.log` and
+`artifacts/collected/gm8j-32w-resources.csv` in this repository. The 12-worker run's
+samples are `artifacts/collected/gm8j-optimized-2-resources.csv`. These archived files are
 local artifacts, not committed fixtures; retain the run directories until the
 investigation is finished. The benchmark checkout currently contains the
 latest run's published edits, so restore only its known tracked migration
@@ -132,3 +132,19 @@ run, so do not execute it merely to inspect the current artifacts.
 
 This file is a handoff, not a new policy. Update or remove it as measurements
 supersede the recorded hypotheses.
+
+## Run storage reduction (2026-10-01)
+
+New runs exclude `build/compilers` from every private workspace and pass the
+owner's shared directory through `configure.py --compilers`. Compiler contents
+are hashed separately at start/resume and before/after publication, not for
+every worker job. Resume compatibility is now 8 because workspace manifests
+have changed; existing run directories and evidence are retained.
+
+Ownership observations now use streamed compact JSON with Zstandard level 3,
+stored as `ownership-<digest>.json.zst`. Readers retain plain JSON support and
+validate the same canonical report digest. A read-only compression check of
+one retained Prime observation (run `20726-224231`) reduced 154,039,478 bytes
+to 7,964,018 bytes (5.2% retained) with an exact decompression round trip, even
+before removing JSON whitespace. This measures storage savings, not migration
+runtime; no full migration was run for this change.

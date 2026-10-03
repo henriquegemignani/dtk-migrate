@@ -1030,7 +1030,7 @@ fn referenced_identifications(
     {
         bail!("Coverage observation path must stay inside the coverage artifact directory");
     }
-    let report: IdentificationReport = read_json(&coverage_dir.join(relative))?;
+    let report = crate::analysis::ownership::read_report(&coverage_dir.join(relative))?;
     let index =
         crate::analysis::ownership::ObservationIndex::load_self_contained(report, source, target)?;
     index

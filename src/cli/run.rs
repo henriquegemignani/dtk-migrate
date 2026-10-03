@@ -571,6 +571,25 @@ mod tests {
     }
 
     #[test]
+    fn changing_shared_compilers_invalidates_the_run_environment() {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("original");
+        std::fs::write(&original, "coordinator").unwrap();
+        let compilers = directory.path().join("build/compilers");
+        std::fs::create_dir_all(&compilers).unwrap();
+        let compiler = compilers.join("compiler.exe");
+        std::fs::write(&compiler, "before").unwrap();
+        let record = upgrade_record(directory.path(), &original);
+        crate::run::check_environment(&record).unwrap();
+        std::fs::write(&compiler, "after").unwrap();
+        assert!(crate::run::check_environment(&record).is_err());
+        assert_ne!(
+            Environment::of(&record.tools).unwrap().compilers_sha256,
+            record.environment.compilers_sha256
+        );
+    }
+
+    #[test]
     fn stages_run_in_the_fixed_order_whatever_order_they_are_asked_for() {
         let asked = ["verify".to_string(), "derive".to_string(), "discover".to_string()];
         assert_eq!(resolve_stages(&asked).unwrap(), ["derive", "discover", "verify"]);

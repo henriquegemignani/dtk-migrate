@@ -1917,7 +1917,13 @@ pub fn summarize(prepared: &Prepared, result: &crate::run::StageResult) -> Resul
         selected,
         dispositions,
         observation: ObservationReference {
-            file: format!("preparation/ownership-{}.json", inventory.observation.sha256),
+            file: format!(
+                "preparation/{}",
+                std::path::Path::new(&inventory.observation.file)
+                    .file_name()
+                    .context("Ownership artifact has no filename")?
+                    .to_string_lossy()
+            ),
             ..inventory.observation
         },
         identifications: inventory.identifications,

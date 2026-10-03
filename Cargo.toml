@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 typed-path = "0.9"
 walkdir = "2.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = "0.13"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

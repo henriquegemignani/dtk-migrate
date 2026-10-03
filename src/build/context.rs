@@ -47,7 +47,7 @@ pub struct Toolchain {
     /// Where `build/compilers`, `build/tools` and `build/binutils` are found.
     ///
     /// A worker's private copy of the project does not contain the downloaded
-    /// toolchain; pointing at the frozen copy keeps those out of each worker's
+    /// compilers; the owner's shared directory keeps them out of each worker's
     /// Ninja graph, where they would be download targets rather than inputs.
     pub toolchain_root: Option<PathBuf>,
 }
@@ -124,7 +124,7 @@ impl BuildContext {
         // Existing toolchains are inputs, not things for each worker's Ninja to
         // download again.
         for (flag, path) in self.toolchain_paths() {
-            if path.exists() {
+            if path.exists() || (flag == "--compilers" && self.tools.toolchain_root.is_some()) {
                 args.push(flag.to_string());
                 args.push(path.display().to_string());
             }

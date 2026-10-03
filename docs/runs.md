@@ -44,16 +44,32 @@ freezes nothing.
 The project's own downloaded compilers stay where they are and are passed to each
 worker's configure step as inputs. Copying them per worker would multiply
 gigabytes, and they would otherwise become download targets in each worker's
-build graph.
+build graph. Their contents are hashed separately at start/resume and before/after
+publication, rather than for every job; changing the shared compilers prevents
+resume or publication. Populate `build/compilers` with
+the project's normal configure/build before starting a migration.
 
 ## What a workspace contains
 
 The snapshot covers everything except what a build regenerates: `build.ninja`,
 `objdiff.json`, compile databases and Ninja's own logs are excluded, and under
-`build/` only `compilers`, `tools` and `binutils` are kept. Caches, `.git` and
+`build/` only `tools` and `binutils` are copied; `compilers` is shared through
+`configure.py --compilers`. Caches, `.git` and
 `.agents` directories at any depth are skipped. Git ignore rules are not used
 as a blanket filter: Prime ignores retail DOLs under `orig/` and downloaded
 toolchain files under `build/`, both of which the trial needs.
+
+Ownership observation artifacts are streamed as compact JSON compressed with
+Zstandard (`ownership-<digest>.json.zst`). References retain the digest of the
+canonical report, independent of compression. Readers also accept retained
+plain `.json` artifacts. Existing run directories are left intact; start a new
+run to use the smaller workspace layout.
+
+Collected benchmark reports, calibration evidence and diagnostic measurements
+belong in `artifacts/collected/`, which is ignored by Git. Keep Cargo output
+and disposable diagnostic workspaces under `target/`; retained measurements
+should survive cleaning that directory. Actual migration run directories stay
+in the game project's `build/dtk-migrate/runs/`.
 
 Symlinks and reparse points are refused outright. A snapshot that follows a link
 is not a copy of the project; it is a second name for the original, and a trial

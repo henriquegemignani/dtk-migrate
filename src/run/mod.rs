@@ -45,7 +45,7 @@ pub const SCHEMA: u32 = 9;
 /// Stored preparations and worker results that may be interpreted by the same
 /// coordinator compatibility level. Bump this when a same-schema executable
 /// would prepare, evaluate or integrate an existing artifact differently.
-pub const RESUME_COMPATIBILITY: u32 = 5;
+pub const RESUME_COMPATIBILITY: u32 = 8;
 
 /// Fresh runs keep more work available than there are worker lanes, so a slow
 /// batch cannot leave the rest of the machine idle. Runs created before this
@@ -186,6 +186,9 @@ pub struct FrozenTools {
 /// Everything outside the project that could change a build's result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Environment {
+    /// Digest of the shared compiler directory, excluded from workspace copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compilers_sha256: Option<String>,
     pub dtk_sha256: String,
     pub ninja_sha256: String,
     pub migrate_sha256: String,
@@ -217,7 +220,15 @@ const BUILD_VARIABLES: [&str; 10] = [
 
 impl Environment {
     pub fn of(tools: &FrozenTools) -> Result<Self> {
+        Self::with_compilers(
+            tools,
+            Some(fingerprint(&crate::workspace::compiler_manifest(&tools.toolchain_root)?)?),
+        )
+    }
+
+    fn with_compilers(tools: &FrozenTools, compilers_sha256: Option<String>) -> Result<Self> {
         Ok(Self {
+            compilers_sha256,
             dtk_sha256: crate::workspace::hash_file(&tools.dtk)?,
             ninja_sha256: crate::workspace::hash_file(&tools.ninja)?,
             migrate_sha256: crate::workspace::hash_file(&tools.hook)?,
@@ -356,6 +367,19 @@ pub fn context(
 /// Refuses to continue if a frozen tool has changed since the run started.
 pub fn check_environment(run: &RunRecord) -> Result<()> {
     let current = Environment::of(&run.tools)?;
+    verify_environment(run, current)
+}
+
+/// Shared compiler bytes are checked at start/resume and before/after
+/// publication. Rehashing gigabytes for every worker job defeats sharing;
+/// jobs still validate the frozen executables and process environment.
+pub(crate) fn check_job_environment(run: &RunRecord) -> Result<()> {
+    let current =
+        Environment::with_compilers(&run.tools, run.environment.compilers_sha256.clone())?;
+    verify_environment(run, current)
+}
+
+fn verify_environment(run: &RunRecord, current: Environment) -> Result<()> {
     if current != run.environment {
         bail!(
             "The tools or build environment changed since this run started; \

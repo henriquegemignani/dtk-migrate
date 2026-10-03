@@ -43,7 +43,7 @@ const GENERATED_ROOT: [&str; 5] =
     ["objdiff.json", "build.ninja", "compile_commands.json", ".ninja_log", ".ninja_deps"];
 
 /// Subdirectories of `build/` that hold tools rather than build output.
-const TOOL_DIRS: [&str; 3] = ["compilers", "tools", "binutils"];
+const TOOL_DIRS: [&str; 2] = ["tools", "binutils"];
 
 /// Whether a path relative to the project root is a build input worth copying.
 pub fn included(relative: &Path) -> bool {
@@ -55,7 +55,8 @@ pub fn included(relative: &Path) -> bool {
         return false;
     }
     if parts.first() == Some(&"build") {
-        // Build output is regenerated; the downloaded toolchain is not.
+        // Compilers are shared through configure.py --compilers, not copied.
+        // Other downloaded tools remain workspace inputs.
         return parts.len() == 1 || TOOL_DIRS.contains(&parts[1]);
     }
     true
@@ -168,6 +169,16 @@ pub fn snapshot_manifest(root: &Path) -> Result<Manifest> {
         manifest.insert(key, hash_file(entry.path())?);
     }
     Ok(manifest)
+}
+
+/// Compilers are external shared inputs: hash them once for run provenance,
+/// without putting them in any baseline, worker or integration copy.
+pub fn compiler_manifest(root: &Path) -> Result<Manifest> {
+    let path = root.join("build/compilers");
+    if !path.exists() {
+        return Ok(Manifest::new());
+    }
+    snapshot_manifest(&path)
 }
 
 /// A stable digest of anything serialisable, used to say "the same inputs".
@@ -511,6 +522,10 @@ mod tests {
     #[test]
     fn a_copy_contains_every_input_and_nothing_else() {
         let dir = project();
+        std::fs::create_dir_all(dir.path().join("build/compilers/GC")).unwrap();
+        std::fs::write(dir.path().join("build/compilers/GC/compiler.exe"), "compiler").unwrap();
+        let shared = compiler_manifest(dir.path()).unwrap();
+        assert!(shared.contains_key("GC/compiler.exe"));
         std::fs::create_dir_all(dir.path().join(".agents/state")).unwrap();
         std::fs::write(dir.path().join(".agents/state/continuation.md"), "private notes").unwrap();
         let into = tempfile::tempdir().unwrap();
@@ -519,6 +534,10 @@ mod tests {
         copy_snapshot(dir.path(), &destination, &manifest).unwrap();
         assert_eq!(snapshot_manifest(&destination).unwrap(), manifest);
         assert!(!destination.join(".agents").exists());
+        assert!(!destination.join("build/compilers").exists());
+        std::fs::write(dir.path().join("build/compilers/GC/compiler.exe"), "changed").unwrap();
+        assert_ne!(shared, compiler_manifest(dir.path()).unwrap());
+        assert_eq!(manifest, snapshot_manifest(dir.path()).unwrap());
     }
 
     #[test]
