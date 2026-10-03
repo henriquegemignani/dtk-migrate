@@ -1,5 +1,7 @@
 /target
+/build/
 /artifacts/collected/
+*.etl
 /.cargo/config.toml
 
 # Editor and OS noise
