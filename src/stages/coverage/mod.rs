@@ -1159,7 +1159,7 @@ impl Coverage {
         let written: BTreeSet<&str> = applied
             .iter()
             .flat_map(|entry| entry.units.iter().map(String::as_str))
-            .filter(|unit| !final_source_linked.contains(*unit))
+            .filter(|unit| !is_source_linked(final_source_linked, unit))
             .collect();
         validate_extracted_inputs(ctx, &written, &report)?;
         let required: Vec<&RequiredExtract> = records
@@ -1465,6 +1465,17 @@ pub fn apply_alternative(
         )));
     }
     transaction.apply(blocks)
+}
+
+/// Whether `unit`, named as in `splits.txt`, is among the units verification
+/// linked from source. Verification names a unit by its source path, which
+/// carries an Object's `src_dir` (`extern/rstl/src/rstl/rstl_map.cpp` for the
+/// split `rstl/rstl_map.cpp`), so a whole trailing path component also counts.
+fn is_source_linked(source_linked: &BTreeSet<String>, unit: &str) -> bool {
+    source_linked.contains(unit)
+        || source_linked
+            .iter()
+            .any(|name| name.strip_suffix(unit).is_some_and(|prefix| prefix.ends_with('/')))
 }
 
 /// Requires each named unit to still link from its *extracted* object.
@@ -2213,6 +2224,16 @@ fn stunted_section(stunted: &[Stunted]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_src_dir_prefixed_verification_name_supersedes_its_split() {
+        let linked = BTreeSet::from(["extern/rstl/src/rstl/rstl_map.cpp".to_string()]);
+        assert!(is_source_linked(&linked, "rstl/rstl_map.cpp"));
+        assert!(is_source_linked(&linked, "extern/rstl/src/rstl/rstl_map.cpp"));
+        assert!(!is_source_linked(&linked, "l_map.cpp"));
+        assert!(!is_source_linked(&linked, "rstl/rstl_strings.cpp"));
+    }
+
     use crate::{
         analysis::coverage_fixture::{anchor, report as evidence_report, unit},
         project::ownership_transaction::Provenance,
