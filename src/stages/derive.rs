@@ -33,7 +33,7 @@ use crate::{
 
 pub struct Derive;
 
-const VALIDATION: &str = "objdiff body comparison between compiled source and extracted objects; the build decides only whether a name can be applied";
+const VALIDATION: &str = "objdiff body comparisons against reference-binary and compiled-source functions, with competing identities retained; the build decides only whether a name can be applied";
 
 /// The rename one candidate carries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +132,7 @@ impl Stage for Derive {
         extra.insert("corrections".into(), serde_json::to_value(&corrections)?);
         extra.insert("proposed".into(), serde_json::to_value(result.proposed)?);
         extra.insert("units".into(), serde_json::to_value(result.units)?);
+        extra.insert("symbol_evaluations".into(), serde_json::to_value(result.evaluations)?);
         Ok(Prepared { candidates, baseline, events, extra, permitted: Default::default() })
     }
 

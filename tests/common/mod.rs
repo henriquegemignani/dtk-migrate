@@ -71,6 +71,11 @@ if rejected and workspace.name == "integration":
     splits = Path("config/PAL/splits.txt").read_text()
     if all(("\n" + name + ":\n") in ("\n" + splits) for name in rejected):
         sys.exit("fixture: rejected combined ownership")
+worker_rejected = [name for name in os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_WORKER_COMBINATION", "").split(",") if name]
+if worker_rejected and workspace.name.startswith("worker-"):
+    splits = Path("config/PAL/splits.txt").read_text()
+    if all(("\n" + name + ":\n") in ("\n" + splits) for name in worker_rejected):
+        sys.exit("fixture: rejected worker combination")
 
 units = json.loads(Path("fixture_units.json").read_text())
 source_linked = set(json.loads(Path("build/PAL/fixture_linked.json").read_text()))

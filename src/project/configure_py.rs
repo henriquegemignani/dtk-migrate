@@ -18,9 +18,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 
-use crate::project::pysyntax::{
-    Mask, find_identifier, matching_delimiter, skip_space, split_arguments, string_literal,
-    strip_comments,
+use crate::project::{
+    pysyntax::{
+        Mask, find_identifier, matching_delimiter, skip_space, split_arguments, string_literal,
+        strip_comments,
+    },
+    report::strip_source_root,
 };
 
 const BEGIN: &str = "# BEGIN AUTOMATED SOURCE VERIFICATION";
@@ -173,14 +176,11 @@ impl Configure {
                     bail!("Unsupported matching expression for {name}: {kind}")
                 }
             };
-            for value in &existing {
-                if !rank.contains_key(value.as_str()) {
-                    bail!("Unknown MatchingFor version in {name}: {value}");
-                }
-            }
             let mut values: Vec<&str> =
                 existing.iter().map(String::as_str).chain(add.iter().map(String::as_str)).collect();
-            values.sort_by_key(|value| rank[value]);
+            // Preserve unknown existing versions verbatim. A typo or a future
+            // version in the project should not prevent adding this target.
+            values.sort_by_key(|value| rank.get(value).copied().unwrap_or(usize::MAX));
             values.dedup();
 
             let (start, end) = declaration.status_span;
@@ -245,6 +245,7 @@ fn parse_versions(text: &str, mask: &Mask) -> Result<Vec<String>> {
 }
 
 fn parse_declarations(text: &str, mask: &Mask) -> Result<Vec<Declaration>> {
+    let source_scopes = library_source_scopes(text, mask)?;
     let mut declarations = Vec::new();
     for offset in find_identifier(text, mask, "Object") {
         let Some(open) = skip_space(text, mask, offset + "Object".len()) else { continue };
@@ -268,8 +269,13 @@ fn parse_declarations(text: &str, mask: &Mask) -> Result<Vec<Declaration>> {
                 bail!("Object declaration for {name} gives src_dir more than once");
             }
         }
-        if let Some(src_dir) = src_dir.or_else(|| library_src_dir(text, mask, offset)) {
-            name = resolved_source_name(&src_dir, &name);
+        let library_src_dir = source_scopes
+            .iter()
+            .filter(|scope| scope.start < offset && offset < scope.end)
+            .min_by_key(|scope| scope.end - scope.start)
+            .map(|scope| scope.src_dir.as_str());
+        if let Some(src_dir) = src_dir.as_deref().or(library_src_dir) {
+            name = strip_source_root(&resolved_source_name(src_dir, &name)).to_string();
         }
         let (start, end) = arguments[0];
         declarations.push(Declaration {
@@ -279,6 +285,148 @@ fn parse_declarations(text: &str, mask: &Mask) -> Result<Vec<Declaration>> {
         });
     }
     Ok(declarations)
+}
+
+struct SourceScope {
+    start: usize,
+    end: usize,
+    src_dir: String,
+}
+
+/// Find the literal object lists whose enclosing library supplies `src_dir`.
+/// Libraries can be written as dictionaries or constructed by a helper that
+/// returns a dictionary with its `objects` parameter and a fixed `src_dir`.
+fn library_source_scopes(text: &str, mask: &Mask) -> Result<Vec<SourceScope>> {
+    let bytes = text.as_bytes();
+    let mut scopes = Vec::new();
+    let mut helpers = BTreeMap::new();
+
+    for open in (0..bytes.len()).filter(|&i| mask.is_code(i) && bytes[i] == b'{') {
+        let Some(close) = matching_delimiter(text, mask, open) else { continue };
+        let fields = dictionary_fields(text, mask, open, close);
+        let (Some(&(dir_start, dir_end)), Some(&(objects_start, objects_end))) =
+            (fields.get("src_dir"), fields.get("objects"))
+        else {
+            continue;
+        };
+        let src_dir = string_literal(text, dir_start, dir_end)
+            .context("Library src_dir must be a plain string")?;
+        if bytes[objects_start] == b'['
+            && matching_delimiter(text, mask, objects_start) == Some(objects_end - 1)
+        {
+            scopes.push(SourceScope { start: objects_start, end: objects_end, src_dir });
+            continue;
+        }
+
+        // A helper's return dictionary refers to a parameter instead of a
+        // literal list. Associate that parameter with the helper's call sites.
+        let Some((name, parameters)) = enclosing_function(text, mask, open) else {
+            continue;
+        };
+        let object_parameter = text[objects_start..objects_end].trim();
+        if let Some(index) = parameters.iter().position(|parameter| parameter == object_parameter) {
+            helpers.insert(name, (index, src_dir));
+        }
+    }
+
+    for (helper, (parameter, src_dir)) in helpers {
+        for offset in find_identifier(text, mask, &helper) {
+            let Some(open) = skip_space(text, mask, offset + helper.len()) else { continue };
+            if bytes[open] != b'(' {
+                continue;
+            }
+            let Some(close) = matching_delimiter(text, mask, open) else { continue };
+            let arguments = split_arguments(text, mask, open, close);
+            let Some(&(start, end)) = arguments.get(parameter) else { continue };
+            if bytes[start] == b'[' && matching_delimiter(text, mask, start) == Some(end - 1) {
+                scopes.push(SourceScope { start, end, src_dir: src_dir.clone() });
+            }
+        }
+    }
+    Ok(scopes)
+}
+
+fn dictionary_fields(
+    text: &str,
+    mask: &Mask,
+    open: usize,
+    close: usize,
+) -> BTreeMap<String, (usize, usize)> {
+    let mut fields = BTreeMap::new();
+    let bytes = text.as_bytes();
+    for (start, end) in split_arguments(text, mask, open, close) {
+        let mut depth = 0usize;
+        let colon = (start..end).find(|&i| {
+            if !mask.is_code(i) {
+                return false;
+            }
+            match bytes[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b':' if depth == 0 => return true,
+                _ => {}
+            }
+            false
+        });
+        let Some(colon) = colon else { continue };
+        let key = text[start..colon].trim();
+        let Some(key) = string_literal(key, 0, key.len()) else { continue };
+        let mut value_start = colon + 1;
+        while value_start < end
+            && (bytes[value_start].is_ascii_whitespace() || mask.is_comment(value_start))
+        {
+            value_start += 1;
+        }
+        if value_start == end {
+            continue;
+        }
+        fields.insert(key, (value_start, end));
+    }
+    fields
+}
+
+fn enclosing_function(text: &str, mask: &Mask, offset: usize) -> Option<(String, Vec<String>)> {
+    let bytes = text.as_bytes();
+    for start in find_identifier(text, mask, "def").into_iter().rev() {
+        if start >= offset {
+            continue;
+        }
+        if start != 0 && bytes[start - 1] != b'\n' {
+            continue;
+        }
+        let name_start = skip_space(text, mask, start + 3)?;
+        let open = (name_start..offset).find(|&i| bytes[i] == b'(' && mask.is_code(i))?;
+        let close = matching_delimiter(text, mask, open)?;
+        if close >= offset {
+            continue;
+        }
+        let body_start = text[close..].find('\n').map(|i| close + i + 1)?;
+        let body_end = text[body_start..]
+            .split_inclusive('\n')
+            .scan(body_start, |position, line| {
+                let current = *position;
+                *position += line.len();
+                Some((current, line))
+            })
+            .find_map(|(position, line)| {
+                let trimmed = line.trim();
+                (!trimmed.is_empty() && !trimmed.starts_with('#') && !line.starts_with([' ', '\t']))
+                    .then_some(position)
+            })
+            .unwrap_or(text.len());
+        if offset >= body_end {
+            continue;
+        }
+        let name = text[name_start..open].trim().to_string();
+        let parameters = split_arguments(text, mask, open, close)
+            .into_iter()
+            .map(|(start, end)| {
+                text[start..end].split([':', '=']).next().unwrap_or("").trim().to_string()
+            })
+            .collect();
+        return Some((name, parameters));
+    }
+    None
 }
 
 /// Reads a literal `name="value"` argument. An argument with another name is
@@ -312,32 +460,6 @@ fn string_keyword_argument(
         .flatten()
         .with_context(|| format!("{name} in an Object declaration must be a plain string"))?;
     Ok(Some(value))
-}
-
-/// The `"src_dir"` of the library dict enclosing `offset`, if it sets one.
-/// dtk-template applies it to every Object in that library's `objects` list.
-fn library_src_dir(text: &str, mask: &Mask, offset: usize) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut open = None;
-    for index in (0..offset).rev() {
-        if !mask.is_code(index) {
-            continue;
-        }
-        match bytes[index] {
-            b')' | b']' | b'}' => depth += 1,
-            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
-            b'{' => {
-                open = Some(index);
-                break;
-            }
-            _ => {}
-        }
-    }
-    let open = open?;
-    let close = matching_delimiter(text, mask, open)?;
-    let key = regex::Regex::new(r#""src_dir"\s*:\s*"([^"]*)""#).ok()?;
-    key.captures(&text[open..close]).map(|captures| captures[1].to_string())
 }
 
 fn resolved_source_name(src_dir: &str, name: &str) -> String {
@@ -554,6 +676,43 @@ mod tests {
     }
 
     #[test]
+    fn library_src_dir_resolves_object_names_and_object_override_takes_precedence() {
+        let text = format!(
+            "{VERSIONS}libs = [{{\n\
+             \x20   'src_dir': 'extern',\n\
+             \x20   'objects': [\n\
+             \x20       Object(NonMatching, 'zlib-1.1.3/inflate.c'),\n\
+             \x20       Object(NonMatching, 'other.c', src_dir='special'),\n\
+             \x20   ],\n\
+             }}]\n"
+        );
+        let configure = Configure::parse(&text).unwrap();
+        let names: Vec<_> = configure.declarations().iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["extern/zlib-1.1.3/inflate.c", "special/other.c"]);
+        let out = configure
+            .render("PAL", &BTreeSet::from(["extern/zlib-1.1.3/inflate.c".to_string()]))
+            .unwrap();
+        assert!(out.contains("Object(MatchingFor(\"PAL\"), 'zlib-1.1.3/inflate.c')"));
+    }
+
+    #[test]
+    fn helper_library_src_dir_uses_the_same_report_name_as_its_source_path() {
+        let text = format!(
+            "{VERSIONS}def DolphinLib(name: str, objects: list):\n\
+             \x20   return {{'src_dir': 'extern/sdk', 'objects': objects}}\n\
+             libs = [DolphinLib('ai', [Object(NonMatching, 'dolphin/ai.c')])]\n"
+        );
+        let configure = Configure::parse(&text).unwrap();
+        assert_eq!(configure.declarations()[0].name, "dolphin/ai.c");
+        assert!(
+            configure
+                .render("PAL", &BTreeSet::from(["dolphin/ai.c".to_string()]))
+                .unwrap()
+                .contains("Object(MatchingFor(\"PAL\"), 'dolphin/ai.c')")
+        );
+    }
+
+    #[test]
     fn a_non_literal_src_dir_is_refused() {
         let text = format!(
             "{VERSIONS}objects = [\n    Object(NonMatching, \"a.cpp\", src_dir=SOURCE),\n]\n"
@@ -626,6 +785,14 @@ mod tests {
     fn an_unknown_target_version_is_an_error() {
         let configure = parse("    Object(NonMatching, \"a.cpp\"),\n");
         assert!(configure.render("JP", &BTreeSet::new()).is_err());
+    }
+
+    #[test]
+    fn an_unknown_existing_version_is_preserved_when_adding_the_target() {
+        let out =
+            render("    Object(MatchingFor(\"NTSC\", \"GM801_00\"), \"a.cpp\"),\n", &["a.cpp"])
+                .unwrap();
+        assert!(out.contains("MatchingFor(\"NTSC\", \"PAL\", \"GM801_00\")"), "{out}");
     }
 
     #[test]

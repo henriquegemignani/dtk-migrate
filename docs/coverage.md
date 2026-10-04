@@ -16,8 +16,10 @@ included. Leaving the unit to the next run is far cheaper.
 
 ## derive — symbol names
 
-Names target symbols by comparing each unit's compiled source object with the
-object extracted from the target binary. See
+Names target symbols by comparing compiled source and target objects, and by
+validating binary-matcher candidates with objdiff against reference-binary and
+available compiled-source functions. The latter works before target splits
+exist. Decisive disagreements block automatic renames. See
 [symbol derivation](symbol_derivation.md) for the four methods and how they are
 reconciled.
 

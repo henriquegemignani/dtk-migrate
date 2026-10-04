@@ -42,8 +42,8 @@ pub struct Args {
     /// The version to name.
     #[arg(long)]
     pub target: String,
-    /// Another version's symbols, used to tell a misplaced name apart from a
-    /// unit whose source has not been matched yet.
+    /// Reference version for objdiff validation of binary-matcher candidates
+    /// and checks on suspected misplaced names.
     #[arg(long)]
     pub reference: Option<String>,
     /// The linked module to read, when it is not the main executable.

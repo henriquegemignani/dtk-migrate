@@ -43,11 +43,20 @@ tool got that wrong.
 dtk-migrate run --project-root ../prime --source GM8E01_00 --target GM8P01_00 --stages all
 ```
 
-Stages run in a fixed order — `derive`, `coverage`, `discover`, `verify` — and
-`--stages` selects which of them to run. `--workers` sets how many candidate
-batches are evaluated at once, each in its own copy of the project. Workers pull
-from a shared queue, and fresh runs keep enough independent batches available to
-avoid waiting behind one slow linker. Evidence lands in
+Stages run in a fixed order, and `--stages` selects which to run:
+
+- `derive` validates symbol names using binary and compiled-source function comparisons.
+- `coverage` assigns target ranges to source units using binary ownership
+  evidence; it does not claim the source matches.
+- `discover` adds code splits that improve matched code and supported data
+  splits, while preserving retail bytes.
+- `verify` links compiled source objects and marks files matching only when
+  the linked result equals retail byte for byte.
+
+`--workers` sets how many candidate batches are evaluated at once, each in its
+own copy of the project. Workers pull from a shared queue, and fresh runs keep
+enough independent batches available to avoid waiting behind one slow linker.
+Evidence lands in
 `build/dtk-migrate/runs/<id>/`, and `--resume <id>` continues an interrupted run
 without redoing finished work.
 
@@ -77,10 +86,11 @@ See [matching](docs/matching.md).
 dtk-migrate derive --project-root ../prime --target GM8P01_00 --reference GM8E01_00
 ```
 
-Compares each unit's compiled source object with the object extracted from the
-target binary. Both already exist after a build, so this costs seconds. It is a
-different signal from `match`, which compares two binaries: here the source
-object states what the unit is *supposed* to contain. See
+Compares compiled source objects with extracted target objects. With
+`--reference`, it also evaluates names proposed by the binary matcher using
+objdiff, including functions without target splits. Compiled target-version
+source objects provide an additional comparison when available. Ambiguous
+results and disagreements stay in the report. See
 [symbol derivation](docs/symbol_derivation.md).
 
 ## Other commands

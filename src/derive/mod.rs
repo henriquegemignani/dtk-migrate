@@ -19,6 +19,7 @@ pub mod body;
 pub mod objects;
 pub mod ordering;
 pub mod propose;
+pub mod validate;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -158,6 +159,9 @@ pub struct Report {
     pub rejected: Vec<Rejected>,
     pub failures: Vec<Failure>,
     pub corrections: Vec<Correction>,
+    /// Objdiff checks of cross-version nominees, including unresolved evidence.
+    #[serde(default)]
+    pub evaluations: Vec<validate::Evaluation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,9 +231,11 @@ pub fn resolve(
         // rather than silent, so it is worth refusing up front. The symbols
         // file cannot answer this: it describes the extracted objects, and the
         // competing definition comes from the compiler.
+        // Without established target ownership, leave this to the build gate:
+        // unsplit functions can still earn names from binary body evidence.
         if let (Some(owners), Some(claimants)) = (owners, defined_by.get(&new)) {
             let here = owners.at(&placement.0, placement.1);
-            if !here.is_some_and(|unit| claimants.contains(unit)) {
+            if here.is_some_and(|unit| !claimants.contains(unit)) {
                 rejected.push(Rejected {
                     old: old.to_string(),
                     reason: "name defined by another unit's source".into(),
@@ -396,7 +402,18 @@ impl Request {
 
 /// Collects, reconciles and reports every rename the object pairs imply.
 pub fn derive(request: &Request) -> Result<Report> {
-    let mut units = unit_objects(&request.root, &request.version, &request.module)?;
+    let (mut units, inventory_failure) =
+        match unit_objects(&request.root, &request.version, &request.module) {
+            Ok(units) => (units, None),
+            Err(error) if request.reference.is_some() => (
+                Vec::new(),
+                Some(Failure {
+                    unit: "<compiled-object-inventory>".into(),
+                    error: format!("{error:#}"),
+                }),
+            ),
+            Err(error) => return Err(error),
+        };
     if !request.only.is_empty() {
         let wanted: BTreeSet<&str> = request.only.iter().map(String::as_str).collect();
         units.retain(|(name, _, _)| {
@@ -425,7 +442,7 @@ pub fn derive(request: &Request) -> Result<Report> {
         .collect();
 
     let mut proposals = Vec::new();
-    let mut failures = Vec::new();
+    let mut failures: Vec<_> = inventory_failure.into_iter().collect();
     let mut defined_by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (found, failure, key, defines) in results {
         proposals.extend(found);
@@ -437,10 +454,37 @@ pub fn derive(request: &Request) -> Result<Report> {
         }
     }
 
+    let evaluations = match validate::evaluate(request) {
+        Ok((found, evaluations)) => {
+            proposals.extend(found);
+            evaluations
+        }
+        Err(error) => {
+            failures.push(Failure {
+                unit: "<binary-body-validation>".into(),
+                error: format!("{error:#}"),
+            });
+            Vec::new()
+        }
+    };
+    let conflicting: BTreeSet<&str> = evaluations
+        .iter()
+        .filter(|evaluation| evaluation.verdict == "conflicting-evidence")
+        .map(|evaluation| evaluation.old.as_str())
+        .collect();
+    proposals.retain(|proposal| !conflicting.contains(proposal.old.as_str()));
+
     let module = config::find(&request.root, &request.version, &request.module)?;
     let symbols = load_symbols(&module.symbols)?;
     let owners = Owners::read(&request.root, &request.version, &request.module)?;
-    let (accepted, rejected) = resolve(&proposals, &symbols, &defined_by, Some(&owners));
+    let (accepted, mut rejected) = resolve(&proposals, &symbols, &defined_by, Some(&owners));
+    rejected.extend(conflicting.into_iter().map(|old| Rejected {
+        old: old.into(),
+        reason: "binary and compiled body evidence disagree".into(),
+        new: None,
+        names: Vec::new(),
+        defined_in: Vec::new(),
+    }));
     let corrections = corrections(&accepted, &rejected);
 
     Ok(Report {
@@ -450,6 +494,7 @@ pub fn derive(request: &Request) -> Result<Report> {
         rejected,
         failures,
         corrections,
+        evaluations,
     })
 }
 
@@ -685,6 +730,19 @@ mod tests {
         assert!(accepted.is_empty());
         assert_eq!(rejected[0].reason, "name defined by another unit's source");
         assert_eq!(rejected[0].defined_in, ["b"]);
+    }
+
+    #[test]
+    fn an_unsplit_symbol_can_be_named_before_its_source_owner_is_established() {
+        let proposals =
+            [proposal("fn_1", "OurFunction", "a.cpp", "binary-body-match", Tier::Confident)];
+        let defined_by =
+            BTreeMap::from([("OurFunction".to_string(), BTreeSet::from(["a".to_string()]))]);
+        let owners = Owners { spans: Vec::new() };
+        let (accepted, rejected) =
+            resolve(&proposals, &symbols(&[("fn_1", 0x1000)]), &defined_by, Some(&owners));
+        assert!(accepted.contains_key("fn_1"));
+        assert!(rejected.is_empty());
     }
 
     #[test]

@@ -8,6 +8,38 @@ normal build, so this costs seconds and no compilation of its own.
 The same code runs as the pipeline's first stage, where the names it proposes
 also have to survive a build; see [coverage](coverage.md).
 
+## Evaluating cross-version candidates
+
+With `--reference`, derivation also collects the binary matcher's function-name
+candidates at every confidence tier. The pipeline supplies its source version
+as the reference automatically. Each candidate is compared through objdiff
+against the reference function, its reported runner-up, and size-compatible
+functions in the reference translation unit. When the target-version compiled
+source object exists, its functions provide another candidate field.
+
+These comparisons use relocation-aware function objects constructed in memory;
+the target function need not already have a split or an extracted TU object.
+Source objects are cached per unit. Scoring writes no project inputs and runs
+neither Ninja nor a linker. The usual pipeline build gate runs afterwards.
+
+The full JSON report's `evaluations` records both comparison channels, their
+scores, alternatives, availability, and the nomination's disposition. Pipeline
+evidence keeps the same records in preparation's `symbol_evaluations`. A
+decisive conflicting identity blocks automatic naming, including an otherwise
+accepted proposal from the existing source-object methods. A missing object or
+an inconclusive score remains an unavailable or ambiguous channel, rather than
+being treated as disagreement.
+
+The existing body-score and margin rules apply. An incomplete reference
+candidate field cannot promote a tentative match. Thin matcher evidence needs
+a unique near-exact binary comparison or supporting compiled-source evidence;
+tiny bodies additionally need independent confident matching. Local symbols
+and names identifying multiple source functions are reported without automatic
+renames because the rename format does not identify their individual instances.
+The binary comparison currently covers the main executable's function symbols;
+RELs and data symbols retain their existing evidence paths. Without
+`--reference`, derivation retains the source-object-only behavior.
+
 ## Why this is a different signal from `match`
 
 `dtk-migrate match` compares two versions of the same binary, so its evidence is

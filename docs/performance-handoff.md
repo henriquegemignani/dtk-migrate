@@ -18,7 +18,8 @@ time, not just faster individual linker calls.
 
 ## Repository state
 
-`main` is at `8fe64eb` after these committed changes:
+The performance code is at `8fe64eb`; `98d31e9` added this handoff document.
+The commits leading to that code are:
 
 | Commit | Change |
 | --- | --- |
@@ -85,37 +86,105 @@ of 3.2 and at least 11.8 GB free RAM. Those samples do not prove a hard
 hardware limit.
 
 Repeated 60-second candidate timeouts are a likely source of wasted bisection.
-One example is
-`20718-140420/coverage/rediscovery-workers-3/00000/process/build.log`:
-the timed-out `ninja build/GM8J01_00/ok` invocation had already completed a
-roughly 18-second split and started `RUN configure.py`; the next operation is
-not exposed clearly by Ninja's buffered output. A successful trial nearby
-took 34 s total. Do not assume the linker itself hung. Identify the active
-child process or add phase timing before changing timeout or bisection policy.
+Ninja and the process runner buffer command output, so the last printed edge
+does not establish which child was running at the deadline. Keep the existing
+run artifacts, but do not capture traces of future runs: they take too long and
+too much disk space. The targeted process sampling below sufficed for this
+case.
+
+### Targeted timeout replay (2026-09-22)
+
+The saved `coverage/jobs/00010/job.json` and `coverage/baseline` from run
+`20718-140420` provided an exact narrow replay. In a disposable F-drive copy,
+apply the job's accepted `CPlayerCameraBob.cpp` transaction, then the first
+`OSRtc.c` alternative (`f096e448`, `.text 0x8036F604..0x803701C0`). Run the
+frozen configure hook and `ninja -j 2 build/GM8J01_00/ok` with a 60-second
+deadline. The replay timed out at 60.17 seconds. Process samples put `dtk.exe`
+split at about 0.3–2.3 seconds, Python graph regeneration at 2.3–3.1 seconds,
+and `mwldeppc.exe` link from 3.4 seconds through the deadline. The linker
+accumulated 56.6 CPU seconds and was still active; neither split nor configure
+was the stalled phase in this example.
+
+Replacing that alternative with the job's accepted `OSRtc.c` range
+(`8bfd6234`, `.text 0x8036F90C..0x8036FC70`) completed the same Ninja
+link/DOL/check target in 6.67 seconds. Linker activity was about 3 seconds;
+the DOL matched retail bytes and SHA-1
+`f7fc8f599c8632aafe543cb071eef6df45e4a886`. A separate Ninja report
+took 0.26 seconds. No source compilation was triggered by either transaction.
+The replay script, process samples, and small logs are in
+`artifacts/collected/timeout-diagnostic/`, ignored by Git. The disposable
+project copy remains in `target/timeout-diagnostic/workspace/`. The saved coverage results
+report five distinct timeout alternatives across the initial job and
+rediscovery workers. Four produce the same full `OSRtc.c` range above, from
+different starting boundaries. The fifth inserts `OSSync.c` at
+`.text 0x803701C0..0x80370244`; replaying it after the job's three accepted
+changes also timed out at 60.27 seconds. Split finished around 2.4 seconds, graph
+regeneration around 3.2 seconds, and `mwldeppc.exe` ran through the deadline
+with 56.6 CPU seconds. All five alternatives were rejected, and none was the
+alternative selected for acceptance. Both distinct timeout patterns reproduced
+in an isolated single-worker replay, so concurrent contention is not needed
+to explain these coverage timeouts. The evidence does not quantify the savings
+from changing trial order or rule out contention elsewhere.
+
+### Targeted workspace reset measurements (2026-09-22)
+
+`reset_workspace` now reports separate worker-manifest, baseline-verification,
+and restoration times; build-cache seeding reports its copy time and volume.
+The batch log includes these numbers and objdiff seeding in one compact line.
+`examples/profile_workspace_reset.rs` reruns only these operations against a
+saved baseline, without evaluating candidates or collecting traces.
+
+The F-drive benchmark used `20718-140420/coverage/baseline` and its 2,203-entry
+manifest. Each fresh worker restored 227.0 MB of inputs and seeded 97.6 MB of
+generated output in 3,779 files. Results in seconds:
+
+| Trial | Total | Worker manifest | Baseline verify | Restore | Cache seed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One fresh worker | 20.36 | 0.00 | 5.28 | 7.65 | 7.43 |
+| Same worker, unchanged | 6.23 | 0.46 | 5.77 | 0.00 | 0.00 |
+| Same worker, one changed split file | 6.20 | 0.46 | 5.73 | 0.01 | 0.00 |
+| Two fresh workers concurrently | 21.92 each | 0.00 | 5.92 | 8.34 | 7.65 |
+| Three warm workers concurrently | 7.35 each | 0.52 | 6.82 | 0.00 | 0.00 |
+
+The warm reset spends over 90% of its time verifying the same unchanged
+baseline, even when it copies no inputs. Restoring the changed split file gave
+it a fresh timestamp, and Ninja's dry run correctly scheduled `SPLIT` and
+`RUN configure.py`. The 32-worker full run's roughly 135-second first resets
+and 20–40-second later resets are much slower than these one-to-three-worker
+measurements. Its old logs lack phase timings, so these experiments do not
+isolate the high-concurrency slowdown or establish a resource floor. Many
+simultaneous hash passes and private copies are a plausible cause; the new
+per-phase log will distinguish them in a later comparable run.
 
 ## Next work
 
-1. Instrument `reset_workspace` and cache seeding separately (manifest scan,
-   baseline verification, copies, generated-output seeding). Use a targeted
-   F-drive benchmark on a few existing worker workspaces to find what made
-   32 concurrent first resets take 135 s and repeated resets take 20–40 s.
-   Preserve manifest validation and Ninja timestamp correctness.
-2. Diagnose the timed-out Ninja process tree and measure split, graph
-   regeneration, compilation, link, checksum, and report phases separately.
-   Test a narrow reproducer from saved candidate/job artifacts rather than
-   another full migration. Determine whether contention turns otherwise valid
-   candidates into timeout-driven bisection trees.
-3. Use those measurements to choose a scheduling change. Candidate batch size
-   currently shrinks to provide four jobs per worker (`src/run/jobs.rs`); at 32
-   workers this produced 118 coverage and 116 discovery batches, with costly
-   resets. Consider a bound based on measured reset cost and slow-job tails,
-   while keeping deterministic ordering and resume compatibility. A batching
-   algorithm change needs a new version and tests.
-4. Run targeted integration tests and the repository's full Rust checks. Only
-   after a substantial change survives those checks, run one complete F-drive
-   migration at fixed settings against a comparable baseline. Wait for it to
-   exit, then compare stage and command timing, accepted/deferred units, and
-   retail hash. Do not claim the 30-minute objective from a partial run.
+1. Reset profiling is complete at one-to-three-worker scale. Investigate
+   whether a stage-owned immutable baseline can be verified once before its
+   parallel jobs, rather than rehashed for every batch. Preserve validation
+   across resume and external edits, and keep warm-workspace timestamp
+   correctness. Use the new phase timings in a later comparable run to explain
+   the 32-worker slowdown before claiming a hardware limit.
+2. Timeout diagnosis is complete for the saved coverage examples: two distinct
+   rejected transaction patterns are CPU-bound inside the linker even without
+   competing workers. Examine candidate ordering and repeated broad `OSRtc.c`
+   trials before changing the 60-second cap. Any shortcut must preserve the
+   chance to accept valid coverage and still require a retail link/hash for
+   accepted candidates. Do not collect another trace for this investigation.
+3. Coverage scheduling version 5 moves retry and bisection decisions to the
+   coordinator. Build lanes now receive fixed alternatives, mutate only their
+   private workspace and return the result; failed union halves can occupy
+   separate idle lanes. A fixture verifies the halves run in different lanes,
+   and coordinator integration remains the ordered proof. This changes fresh
+   run behavior, so resume compatibility is 6 and older runs retain their
+   recorded scheduling version. The change has not had a full Prime benchmark;
+   compare worker-tail and rediscovery-round time before claiming improvement.
+4. The scheduling change passes all 604 library tests, every integration and
+   example target, `cargo +nightly fmt --all -- --check`, and
+   `cargo +nightly clippy --all-targets -- -D warnings`. The remaining
+   performance proof is one complete F-drive migration at fixed settings
+   against a comparable baseline. Wait for it to exit, then compare stage and
+   command timing, accepted/deferred units, and retail hash. Do not claim the
+   30-minute objective from a partial run.
 
 The previous 12-worker settings, for a later justified comparison, were:
 

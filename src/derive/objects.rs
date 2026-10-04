@@ -12,7 +12,11 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
+use decomp_toolkit::{
+    obj::{ObjInfo, ObjKind, ObjRelocations, ObjSymbolFlags, ObjSymbolKind, SymbolIndex},
+    util::elf::write_elf,
+};
 use objdiff_core::{
     diff::{DiffObjConfig, DiffSide},
     obj::{Object, SectionKind, SymbolKind},
@@ -45,6 +49,82 @@ pub struct Compiled {
 }
 
 impl Compiled {
+    /// A relocation-aware function view without assigning any target splits.
+    /// References into this function become offsets from its own symbol;
+    /// references elsewhere remain undefined symbols with their original names.
+    pub fn from_function(obj: &ObjInfo, index: SymbolIndex, side: DiffSide) -> Result<Self> {
+        let original = &obj.symbols[index];
+        let section_index = original.section.context("Function has no section")?;
+        let original_section = &obj.sections[section_index];
+        let start = original.address;
+        let end = start.checked_add(original.size).context("Function range overflow")?;
+        let offset =
+            start.checked_sub(original_section.address).context("Function before section")?;
+        let data = original_section
+            .data
+            .get(offset as usize..(offset + original.size) as usize)
+            .context("Function outside section data")?
+            .to_vec();
+        ensure!(!data.is_empty(), "Function has no bytes");
+
+        let mut function = original.clone();
+        function.name = "__dtk_candidate".into();
+        function.address = 0;
+        function.section = Some(0);
+        function.flags.0 = ObjSymbolFlags::Global.into();
+        let mut symbols = vec![function];
+        let mut references = std::collections::BTreeMap::new();
+        let mut relocations = Vec::new();
+        for (address, original_relocation) in original_section.relocations.iter() {
+            if u64::from(address) < start || u64::from(address) >= end {
+                continue;
+            }
+            ensure!(original_relocation.module.is_none(), "External module relocation unavailable");
+            let referred = &obj.symbols[original_relocation.target_symbol];
+            let mut relocation = original_relocation.clone();
+            if referred.section == Some(section_index)
+                && referred.address >= start
+                && referred.address < end
+            {
+                relocation.target_symbol = 0;
+                relocation.addend += (referred.address - start) as i64;
+            } else {
+                relocation.target_symbol =
+                    *references.entry(original_relocation.target_symbol).or_insert_with(|| {
+                        let index = symbols.len() as SymbolIndex;
+                        let mut external = referred.clone();
+                        external.address = 0;
+                        external.section = None;
+                        external.size = 0;
+                        external.kind = ObjSymbolKind::Unknown;
+                        external.flags.0 = ObjSymbolFlags::Global.into();
+                        symbols.push(external);
+                        index
+                    });
+            }
+            relocations.push(((u64::from(address) - start) as u32, relocation));
+        }
+        let mut section = original_section.clone();
+        section.address = 0;
+        section.size = original.size;
+        section.data = data;
+        section.relocations = ObjRelocations::new(relocations)?;
+        section.splits = Default::default();
+        section.virtual_address = None;
+        section.file_offset = 0;
+        let extracted = ObjInfo::new(
+            ObjKind::Relocatable,
+            obj.architecture,
+            original.name.clone(),
+            symbols,
+            vec![section],
+        );
+        let bytes = write_elf(&extracted, true)?;
+        let object = objdiff_core::obj::read::parse(&bytes, &DiffObjConfig::default(), side)?;
+        let functions = functions_of(&object);
+        Ok(Self { object, functions })
+    }
+
     /// `side` says which half of a comparison this object is: the extracted
     /// original is the target, the compiled source is the base.
     pub fn read(path: &Path, side: DiffSide) -> Result<Self> {

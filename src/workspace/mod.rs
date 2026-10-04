@@ -14,6 +14,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     path::{Component, Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
@@ -287,6 +288,26 @@ pub fn copy_snapshot(source: &Path, destination: &Path, manifest: &Manifest) -> 
 /// output from the last one is still there, and Ninja rebuilds just the units
 /// whose inputs moved.
 pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -> Result<()> {
+    reset_workspace_profiled(baseline, workspace, manifest).map(|_| ())
+}
+
+/// Timings for one worker reset, excluding generated-output seeding.
+#[derive(Debug, Default)]
+pub struct ResetProfile {
+    pub manifest_seconds: f64,
+    pub baseline_verify_seconds: f64,
+    pub restore_seconds: f64,
+    pub removed_files: usize,
+    pub restored_files: usize,
+    pub restored_bytes: u64,
+}
+
+/// Resets a worker and reports where the time went without weakening validation.
+pub fn reset_workspace_profiled(
+    baseline: &Path,
+    workspace: &Path,
+    manifest: &Manifest,
+) -> Result<ResetProfile> {
     let baseline = std::path::absolute(baseline)?;
     let workspace = std::path::absolute(workspace)?;
     if baseline == workspace || workspace.starts_with(&baseline) || baseline.starts_with(&workspace)
@@ -296,10 +317,14 @@ pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -
     check_ancestors(&workspace)?;
     std::fs::create_dir_all(&workspace)?;
     let had_build_graph = workspace.join("build.ninja").exists();
+    let mut profile = ResetProfile::default();
 
     // Validate both trees before removing anything, so a bad manifest cannot
     // leave a half-emptied workspace behind.
+    let started = Instant::now();
     let current = snapshot_manifest(&workspace)?;
+    profile.manifest_seconds = started.elapsed().as_secs_f64();
+    let started = Instant::now();
     for (relative, expected) in manifest {
         let source = safe_path(&baseline, relative)?;
         if &hash_file(&source)? != expected {
@@ -307,9 +332,12 @@ pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -
         }
         safe_path(&workspace, relative)?;
     }
+    profile.baseline_verify_seconds = started.elapsed().as_secs_f64();
+    let started = Instant::now();
     for relative in current.keys() {
         if !manifest.contains_key(relative) {
             std::fs::remove_file(safe_path(&workspace, relative)?)?;
+            profile.removed_files += 1;
         }
     }
     for (relative, expected) in manifest {
@@ -320,7 +348,8 @@ pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(safe_path(&baseline, relative)?, &target)?;
+        profile.restored_bytes += std::fs::copy(safe_path(&baseline, relative)?, &target)?;
+        profile.restored_files += 1;
         // A warm workspace may hold output from a different trial. Restoring
         // an old timestamp would let Ninja treat different input bytes as up
         // to date. A fresh workspace has no such output: preserving the
@@ -332,7 +361,8 @@ pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -
             bail!("Baseline changed during reset: {relative}");
         }
     }
-    Ok(())
+    profile.restore_seconds = started.elapsed().as_secs_f64();
+    Ok(profile)
 }
 
 /// Seeds a fresh private workspace with generated outputs from a baseline
@@ -340,17 +370,35 @@ pub fn reset_workspace(baseline: &Path, workspace: &Path, manifest: &Manifest) -
 /// Ninja may overwrite any cached object during a trial. An existing graph
 /// means this workspace has its own incremental state and must keep it.
 pub fn seed_build_cache(baseline: &Path, workspace: &Path, target: &str) -> Result<()> {
+    seed_build_cache_profiled(baseline, workspace, target).map(|_| ())
+}
+
+/// Time and volume spent seeding validated generated outputs.
+#[derive(Debug, Default)]
+pub struct SeedProfile {
+    pub seconds: f64,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+pub fn seed_build_cache_profiled(
+    baseline: &Path,
+    workspace: &Path,
+    target: &str,
+) -> Result<SeedProfile> {
+    let started = Instant::now();
+    let mut profile = SeedProfile::default();
     if !matches!(Path::new(target).components().collect::<Vec<_>>().as_slice(), [
         Component::Normal(_)
     ]) {
         bail!("Unsafe build cache version: {target}");
     }
     if workspace.join("build.ninja").exists() {
-        return Ok(());
+        return Ok(profile);
     }
     let source_build = baseline.join("build").join(target);
     if !baseline.join("build.ninja").is_file() || !source_build.is_dir() {
-        return Ok(());
+        return Ok(profile);
     }
     for name in ["build.ninja", ".ninja_log", ".ninja_deps"] {
         let from = baseline.join(name);
@@ -358,7 +406,8 @@ pub fn seed_build_cache(baseline: &Path, workspace: &Path, target: &str) -> Resu
             reject_link(&from)?;
             let destination = workspace.join(name);
             check_ancestors(&destination)?;
-            std::fs::copy(&from, destination)?;
+            profile.bytes += std::fs::copy(&from, destination)?;
+            profile.files += 1;
         }
     }
     for entry in WalkDir::new(&source_build).follow_links(false) {
@@ -373,12 +422,14 @@ pub fn seed_build_cache(baseline: &Path, workspace: &Path, target: &str) -> Resu
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(entry.path(), &destination)?;
+            profile.bytes += std::fs::copy(entry.path(), &destination)?;
+            profile.files += 1;
         } else {
             bail!("Build cache contains a non-file: {}", entry.path().display());
         }
     }
-    Ok(())
+    profile.seconds = started.elapsed().as_secs_f64();
+    Ok(profile)
 }
 
 /// A non-blocking lock on a project directory, released if the holder dies.

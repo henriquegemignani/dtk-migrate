@@ -51,7 +51,7 @@ pub const RESUME_COMPATIBILITY: u32 = 8;
 /// batch cannot leave the rest of the machine idle. Runs created before this
 /// was introduced retain version 1 and therefore their exact stored job
 /// partition when resumed with a newer coordinator.
-pub const BATCHING_VERSION: u32 = 4;
+pub const BATCHING_VERSION: u32 = 5;
 
 fn legacy_resume_compatibility() -> u32 { 0 }
 
@@ -535,19 +535,41 @@ pub fn run_stage(
             candidates.len(),
             batches.len()
         );
-        jobs::execute(
-            dir,
-            run,
-            stage.as_ref(),
-            stage_name,
-            &baseline_dir,
-            &manifest,
-            &prepared.prepared,
-            &batches,
-            cancel.clone(),
-        )?
+        if stage_name == "coverage" && run.batching_version >= 5 {
+            jobs::execute_coverage(
+                dir,
+                run,
+                &baseline_dir,
+                &manifest,
+                &prepared.prepared,
+                &batches,
+                cancel.clone(),
+                &dir.stage(stage_name).join("jobs"),
+            )?
+        } else {
+            jobs::execute(
+                dir,
+                run,
+                stage.as_ref(),
+                stage_name,
+                &baseline_dir,
+                &manifest,
+                &prepared.prepared,
+                &batches,
+                cancel.clone(),
+            )?
+        }
     };
     let worker_seconds = worker_started.elapsed().as_secs_f64();
+    // Integration fixtures use this to model a process dying after every
+    // worker result is durable. Keep the interruption at the coordinator
+    // boundary now that coverage lanes no longer decide their own retry tree.
+    if stage_name == "coverage"
+        && crate::stages::coverage::injected_evidence_dir().is_some()
+        && std::env::var_os("DTK_MIGRATE_FIXTURE_ABORT").is_some()
+    {
+        bail!("fixture: interrupted during integration");
+    }
 
     // Integration proves the union in one workspace, then retries what the
     // workers deferred — but only after something was accepted, since a
@@ -655,18 +677,32 @@ pub fn run_stage(
                 run.workers,
                 run.batching_version,
             )?;
-            let trials = jobs::execute_in(
-                dir,
-                run,
-                stage.as_ref(),
-                stage_name,
-                &integrated,
-                &snapshot.manifest,
-                &prepared.prepared,
-                &batches,
-                cancel.clone(),
-                &stage_dir.join(format!("rediscovery-workers-{round}")),
-            )?;
+            let trials_dir = stage_dir.join(format!("rediscovery-workers-{round}"));
+            let trials = if run.batching_version >= 5 {
+                jobs::execute_coverage(
+                    dir,
+                    run,
+                    &integrated,
+                    &snapshot.manifest,
+                    &prepared.prepared,
+                    &batches,
+                    cancel.clone(),
+                    &trials_dir,
+                )?
+            } else {
+                jobs::execute_in(
+                    dir,
+                    run,
+                    stage.as_ref(),
+                    stage_name,
+                    &integrated,
+                    &snapshot.manifest,
+                    &prepared.prepared,
+                    &batches,
+                    cancel.clone(),
+                    &trials_dir,
+                )?
+            };
             let mut selected = 0;
             for trial in &trials {
                 events.extend(trial.events.clone());

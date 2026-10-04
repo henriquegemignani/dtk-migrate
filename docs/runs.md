@@ -228,6 +228,14 @@ batches spread those slow linker refusals across lanes. Ordinary conflict compon
 batch. A component larger than the computed batch size is split into ordered
 chunks: worker results are proposals against the same frozen baseline, and the
 coordinator re-proves their ordered combination before keeping it.
+Coverage additionally keeps its adaptive retry tree in the coordinator. A lane
+receives exact alternative IDs, applies only that assigned trial in its private
+workspace, runs the bounded build, and returns the outcome. If a union fails,
+the coordinator queues its halves independently so idle lanes can run them at
+the same time; a singleton failure queues its next alternative. Lanes never
+choose a fallback or continue a bisection on their own. Their results remain
+proposals against the frozen baseline, and ordered integration still re-proves
+the combined state before acceptance.
 Derivation goes straight to integration: its evaluator already trials the full
 union of names and bisects a failed union, so worker screening would repeat the
 same retail builds without strengthening the final proof.

@@ -108,7 +108,7 @@ pub struct Proposal {
 }
 
 impl Proposal {
-    fn new(old: &str, new: &str, unit: &str, method: &str, tier: Tier) -> Self {
+    pub(crate) fn new(old: &str, new: &str, unit: &str, method: &str, tier: Tier) -> Self {
         Self {
             old: old.to_string(),
             new: new.to_string(),
@@ -341,7 +341,7 @@ pub fn positional(source: &Compiled, target: &Compiled, unit: &str) -> Vec<Propo
 /// candidate so close to exact that the rest of the field is not competing with
 /// it at all — the case a fixed margin misjudges, because it measures the
 /// runner-up rather than the winner.
-fn decide(best: &Ranked, limits: &Limits) -> Option<(&'static str, Tier)> {
+pub(crate) fn decide(best: &Ranked, limits: &Limits) -> Option<(&'static str, Tier)> {
     if best.percent >= limits.exact_percent && best.exact == 1 {
         return Some(("sole-exact", Tier::Confident));
     }

@@ -1,8 +1,10 @@
 //! Splitting candidates into batches and evaluating them in parallel lanes.
 //!
-//! Each lane owns a private copy of the project and evaluates whole batches in
-//! it. Nothing is shared between lanes but the frozen baseline they all reset
-//! from, which is read-only for the duration.
+//! Each lane owns a private project copy. Most stages evaluate a whole batch in
+//! one lane. Coverage uses a coordinator-owned adaptive queue: a lane receives
+//! one fully specified trial, updates its copy, runs Ninja, and returns the
+//! result without choosing the next trial. Nothing is shared between lanes but
+//! the frozen baseline they all reset from, which is read-only for the duration.
 //!
 //! A completed batch writes its result next to its evidence. On `--resume`
 //! those results are reused, but only when the job they describe is identical:
@@ -10,11 +12,12 @@
 //! result that does not match is rerun rather than trusted.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     time::Instant,
 };
@@ -23,9 +26,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    build::process::Cancel,
+    build::{context::is_trial_failure, process::Cancel},
     run::{RunDir, RunRecord, context, read_json, write_json},
-    stages::{Candidate, Event, Footprint, Prepared, Selections, Stage},
+    stages::{
+        Candidate, Event, Footprint, Outcome, Prepared, Selections, Stage, Tried,
+        coverage::{self, Coverage},
+        refusal::Refusal,
+    },
     workspace::{Manifest, fingerprint},
 };
 
@@ -50,7 +57,7 @@ pub fn batches(
     version: u32,
 ) -> Result<Vec<Vec<Candidate>>> {
     assert_eq!(candidates.len(), footprints.len(), "one footprint per candidate");
-    if !matches!(version, 1..=4) {
+    if !matches!(version, 1..=5) {
         bail!("Unsupported batching version {version}");
     }
     if size == 0 || candidates.is_empty() {
@@ -58,7 +65,7 @@ pub fn batches(
     }
     let size = match version {
         1 => size,
-        2..=4 => {
+        2..=5 => {
             // Keep four jobs ready per lane. The expensive outliers are whole
             // candidate batches: a batch with several slow linker refusals
             // held one lane for twenty minutes after its eleven siblings had
@@ -97,6 +104,357 @@ pub fn batches(
         result.push(current.iter().map(|&index| candidates[index].clone()).collect());
     }
     Ok(result)
+}
+
+#[derive(Clone, Serialize)]
+struct CoverageTask {
+    batch: usize,
+    path: String,
+    candidates: Vec<Candidate>,
+    selections: Selections,
+}
+
+struct CoverageBatch {
+    spec: JobSpec,
+    started: Instant,
+    accepted: BTreeMap<String, (Candidate, String)>,
+    tried: Tried,
+    events: BTreeMap<String, Vec<Event>>,
+    pending: usize,
+}
+
+enum CoverageMessage {
+    Done(CoverageTask, Box<Result<Outcome>>),
+    LaneFailed(String),
+}
+
+fn first_coverage_task(
+    batch: usize,
+    path: String,
+    candidates: Vec<Candidate>,
+) -> Result<CoverageTask> {
+    let mut selections = Selections::new();
+    for candidate in &candidates {
+        let first = coverage::trial_choices(candidate)?.into_iter().next().with_context(|| {
+            format!("Coverage candidate {} has no alternatives", candidate.name)
+        })?;
+        selections.insert(candidate.name.clone(), first.0);
+    }
+    Ok(CoverageTask { batch, path, candidates, selections })
+}
+
+/// Screens coverage with a coordinator-owned adaptive queue.
+///
+/// Lanes receive complete trial descriptions and only mutate their private
+/// workspace and run the build. Failed groups and candidate fallbacks return to
+/// this coordinator, so newly exposed trials can use any idle lane.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_coverage(
+    dir: &RunDir,
+    run: &RunRecord,
+    baseline: &Path,
+    manifest: &Manifest,
+    prepared: &Prepared,
+    batches: &[Vec<Candidate>],
+    cancel: Option<Cancel>,
+    jobs_dir: &Path,
+) -> Result<Vec<JobResult>> {
+    crate::run::check_job_environment(run)?;
+    let baseline_hash = crate::run::baseline_fingerprint(manifest)?;
+    let specs: Vec<JobSpec> = batches
+        .iter()
+        .enumerate()
+        .map(|(index, batch)| {
+            Ok(JobSpec {
+                schema: crate::run::SCHEMA,
+                stage: "coverage".into(),
+                job_id: format!("{index:05}"),
+                baseline_fingerprint: baseline_hash.clone(),
+                fingerprint: job_fingerprint(&baseline_hash, batch, "coverage", run)?,
+                candidates: batch.clone(),
+            })
+        })
+        .collect::<Result<_>>()?;
+    let mut complete = vec![None; specs.len()];
+    let mut states: Vec<Option<CoverageBatch>> = Vec::with_capacity(specs.len());
+    let mut initial = Vec::new();
+    for (index, spec) in specs.into_iter().enumerate() {
+        let result_path = jobs_dir.join(&spec.job_id).join("result.json");
+        if let Ok(stored) = read_json::<JobResult>(&result_path)
+            && accept_stored(&stored, &spec).is_ok()
+        {
+            tracing::info!("coverage: batch {} reused from a previous run", spec.job_id);
+            complete[index] = Some(stored);
+            states.push(None);
+            continue;
+        }
+        write_json(&jobs_dir.join(&spec.job_id).join("job.json"), &spec)?;
+        initial.push(first_coverage_task(index, "root".into(), spec.candidates.clone())?);
+        states.push(Some(CoverageBatch {
+            spec,
+            started: Instant::now(),
+            accepted: BTreeMap::new(),
+            tried: Tried::new(),
+            events: BTreeMap::new(),
+            pending: 1,
+        }));
+    }
+    if initial.is_empty() {
+        return complete
+            .into_iter()
+            .enumerate()
+            .map(|(index, result)| {
+                result.with_context(|| format!("Batch {index} produced no result"))
+            })
+            .collect();
+    }
+
+    let cancel = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+    let candidate_count: usize =
+        states.iter().filter_map(Option::as_ref).map(|state| state.spec.candidates.len()).sum();
+    let lanes = run.workers.max(1).min(candidate_count.max(1));
+    let coverage = Coverage::default();
+    let (task_tx, task_rx) = mpsc::channel::<CoverageTask>();
+    let task_rx = Arc::new(Mutex::new(task_rx));
+    let (result_tx, result_rx) = mpsc::channel::<CoverageMessage>();
+    let mut pending = initial.len();
+
+    std::thread::scope(|scope| -> Result<()> {
+        for lane in 0..lanes {
+            let task_rx = task_rx.clone();
+            let result_tx = result_tx.clone();
+            let panic_tx = result_tx.clone();
+            let cancel = cancel.clone();
+            let coverage = &coverage;
+            scope.spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let workspace = dir.pool().join(format!("worker-{lane}"));
+                    if let Err(error) = (|| -> Result<()> {
+                        let started = Instant::now();
+                        let reset = crate::workspace::reset_workspace_profiled(
+                            baseline,
+                            &workspace,
+                            manifest,
+                        )?;
+                        let cache = crate::workspace::seed_build_cache_profiled(
+                            baseline,
+                            &workspace,
+                            &run.target,
+                        )?;
+                        let objdiff_started = Instant::now();
+                        crate::workspace::seed_objdiff(baseline, &workspace)?;
+                        tracing::info!(
+                            "coverage: lane {lane} workspace reset {:.3}s (manifest {:.3}s, baseline verify {:.3}s, restore {:.3}s / {} files / {} bytes, cache {:.3}s / {} files / {} bytes, objdiff {:.3}s)",
+                            started.elapsed().as_secs_f64(),
+                            reset.manifest_seconds,
+                            reset.baseline_verify_seconds,
+                            reset.restore_seconds,
+                            reset.restored_files,
+                            reset.restored_bytes,
+                            cache.seconds,
+                            cache.files,
+                            cache.bytes,
+                            objdiff_started.elapsed().as_secs_f64(),
+                        );
+                        Ok(())
+                    })() {
+                        let _ = result_tx.send(CoverageMessage::LaneFailed(format!(
+                            "coverage lane {lane} setup failed: {error:#}"
+                        )));
+                        return;
+                    }
+                    loop {
+                        let task = match task_rx.lock().unwrap().recv() {
+                            Ok(task) => task,
+                            Err(_) => return,
+                        };
+                        if cancel.load(Ordering::SeqCst) {
+                            let _ = result_tx
+                                .send(CoverageMessage::LaneFailed("coverage cancelled".into()));
+                            return;
+                        }
+                        let output = jobs_dir
+                            .join(format!("{:05}", task.batch))
+                            .join("trials")
+                            .join(&task.path);
+                        let result = (|| {
+                            write_json(&output.join("task.json"), &task)?;
+                            std::fs::write(output.join("lane.txt"), lane.to_string())?;
+                            let ctx = context(
+                                &workspace,
+                                run,
+                                output.join("process"),
+                                Some(cancel.clone()),
+                            );
+                            coverage.evaluate_fixed(
+                                &ctx,
+                                prepared,
+                                &task.candidates,
+                                &task.selections,
+                                &prepared.baseline,
+                            )
+                        })();
+                        if result_tx.send(CoverageMessage::Done(task, Box::new(result))).is_err() {
+                            return;
+                        }
+                    }
+                }));
+                if result.is_err() {
+                    let _ = panic_tx.send(CoverageMessage::LaneFailed(format!(
+                        "coverage lane {lane} panicked"
+                    )));
+                }
+            });
+        }
+        drop(result_tx);
+        for task in initial.drain(..) {
+            task_tx.send(task)?;
+        }
+
+        while pending > 0 {
+            match result_rx.recv()? {
+                CoverageMessage::LaneFailed(error) => {
+                    cancel.store(true, Ordering::SeqCst);
+                    bail!(error);
+                }
+                CoverageMessage::Done(task, result) => {
+                    pending -= 1;
+                    let state =
+                        states[task.batch].as_mut().context("Coverage task lost its batch")?;
+                    state.pending -= 1;
+                    for candidate in &task.candidates {
+                        let selected = &task.selections[&candidate.name];
+                        let retry = coverage::trial_choices(candidate)?
+                            .into_iter()
+                            .find(|choice| &choice.0 == selected)
+                            .with_context(|| {
+                                format!("Unknown coverage selection for {}", candidate.name)
+                            })?
+                            .1;
+                        state.tried.entry(candidate.name.clone()).or_default().insert(retry);
+                    }
+                    match *result {
+                        Ok(outcome) => {
+                            state.events.insert(task.path.clone(), outcome.events);
+                            for candidate in outcome.accepted {
+                                let id = task.selections[&candidate.name].clone();
+                                state.accepted.insert(candidate.name.clone(), (candidate, id));
+                            }
+                        }
+                        Err(error) if is_trial_failure(&error) && task.candidates.len() > 1 => {
+                            let middle = task.candidates.len() / 2;
+                            for (suffix, candidates) in [
+                                ("L", task.candidates[..middle].to_vec()),
+                                ("R", task.candidates[middle..].to_vec()),
+                            ] {
+                                let next = first_coverage_task(
+                                    task.batch,
+                                    format!("{}-{suffix}", task.path),
+                                    candidates,
+                                )?;
+                                task_tx.send(next)?;
+                                pending += 1;
+                                state.pending += 1;
+                            }
+                            state.events.entry(task.path.clone()).or_default().push(
+                                Event::new("", "selection-union-rejected").because(format!(
+                                    "{} selections did not hold: {error:#}",
+                                    task.candidates.len()
+                                )),
+                            );
+                        }
+                        Err(error) if is_trial_failure(&error) => {
+                            let candidate = &task.candidates[0];
+                            let choices = coverage::trial_choices(candidate)?;
+                            let current = choices
+                                .iter()
+                                .position(|choice| choice.0 == task.selections[&candidate.name])
+                                .context("Coverage fallback lost its current selection")?;
+                            let refusal = Refusal::from_error(&error);
+                            state.events.entry(task.path.clone()).or_default().push(
+                                Event::new(&candidate.name, "rejected")
+                                    .because(format!(
+                                        "{}: {error:#}",
+                                        refusal.kind.legacy_category()
+                                    ))
+                                    .about(&choices[current].0)
+                                    .refused(refusal),
+                            );
+                            if let Some(next) = choices.get(current + 1) {
+                                let mut selections = Selections::new();
+                                selections.insert(candidate.name.clone(), next.0.clone());
+                                task_tx.send(CoverageTask {
+                                    batch: task.batch,
+                                    path: format!("{}-A{}", task.path, current + 1),
+                                    candidates: task.candidates,
+                                    selections,
+                                })?;
+                                pending += 1;
+                                state.pending += 1;
+                            }
+                        }
+                        Err(error) => {
+                            cancel.store(true, Ordering::SeqCst);
+                            bail!("Coverage trial failed outside the proof boundary: {error:#}");
+                        }
+                    }
+                    if state.pending == 0 {
+                        let accepted: Vec<Candidate> = state
+                            .spec
+                            .candidates
+                            .iter()
+                            .filter_map(|candidate| {
+                                state.accepted.get(&candidate.name).map(|entry| entry.0.clone())
+                            })
+                            .collect();
+                        let selections: Selections = state
+                            .accepted
+                            .iter()
+                            .map(|(name, entry)| (name.clone(), entry.1.clone()))
+                            .collect();
+                        let accepted_names: BTreeSet<&str> =
+                            accepted.iter().map(|candidate| candidate.name.as_str()).collect();
+                        let deferred = state
+                            .spec
+                            .candidates
+                            .iter()
+                            .filter(|candidate| !accepted_names.contains(candidate.name.as_str()))
+                            .cloned()
+                            .collect();
+                        let result = JobResult {
+                            schema: crate::run::SCHEMA,
+                            job_id: state.spec.job_id.clone(),
+                            fingerprint: state.spec.fingerprint.clone(),
+                            accepted,
+                            deferred,
+                            events: std::mem::take(&mut state.events)
+                                .into_values()
+                                .flatten()
+                                .collect(),
+                            validation: coverage::VALIDATION.into(),
+                            selections,
+                            tried: std::mem::take(&mut state.tried),
+                            seconds: state.started.elapsed().as_secs_f64(),
+                        };
+                        accept_stored(&result, &state.spec)?;
+                        write_json(
+                            &jobs_dir.join(&state.spec.job_id).join("result.json"),
+                            &result,
+                        )?;
+                        complete[task.batch] = Some(result);
+                    }
+                }
+            }
+        }
+        drop(task_tx);
+        Ok(())
+    })?;
+
+    complete
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| result.with_context(|| format!("Batch {index} produced no result")))
+        .collect()
 }
 
 /// Candidate indices grouped by conflict, each group ascending, groups ordered
@@ -400,14 +758,25 @@ fn run_one(
     }
 
     let reset_started = Instant::now();
-    crate::workspace::reset_workspace(baseline, workspace, manifest)?;
-    crate::workspace::seed_build_cache(baseline, workspace, &run.target)?;
+    let reset = crate::workspace::reset_workspace_profiled(baseline, workspace, manifest)?;
+    let cache = crate::workspace::seed_build_cache_profiled(baseline, workspace, &run.target)?;
+    let objdiff_started = Instant::now();
     crate::workspace::seed_objdiff(baseline, workspace)?;
+    let objdiff_seconds = objdiff_started.elapsed().as_secs_f64();
     tracing::info!(
-        "{}: batch {} workspace reset {:.3}s",
+        "{}: batch {} workspace reset {:.3}s (manifest {:.3}s, baseline verify {:.3}s, restore {:.3}s / {} files / {} bytes, cache {:.3}s / {} files / {} bytes, objdiff {:.3}s)",
         spec.stage,
         spec.job_id,
-        reset_started.elapsed().as_secs_f64()
+        reset_started.elapsed().as_secs_f64(),
+        reset.manifest_seconds,
+        reset.baseline_verify_seconds,
+        reset.restore_seconds,
+        reset.restored_files,
+        reset.restored_bytes,
+        cache.seconds,
+        cache.files,
+        cache.bytes,
+        objdiff_seconds,
     );
     write_json(&output.join("job.json"), spec)?;
     tracing::info!("{}: batch {} ({} candidates)", spec.stage, spec.job_id, spec.candidates.len());

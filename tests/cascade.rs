@@ -272,9 +272,7 @@ fn independent_worlds() -> Vec<CoverageReport> {
     (0..=2).map(|_| report("NTSC", "PAL", units())).collect()
 }
 
-#[test]
-fn a_worker_proves_independent_first_choices_in_one_build() {
-    let units = ["A.cpp", "B.cpp", "C.cpp", "D.cpp", "E.cpp"];
+fn independent_fixture(units: &[&str]) -> Option<Fixture> {
     let source_splits = format!(
         "{}{}",
         common::SPLITS_HEADER,
@@ -287,7 +285,7 @@ fn a_worker_proves_independent_first_choices_in_one_build() {
             })
             .collect::<String>()
     );
-    let worlds = (0..=5)
+    let worlds = (0..=units.len())
         .map(|_| {
             report(
                 "NTSC",
@@ -304,13 +302,19 @@ fn a_worker_proves_independent_first_choices_in_one_build() {
         })
         .map(Some)
         .collect();
-    let Some(fixture) = common::build(&Layout {
+    common::build(&Layout {
         units: units.iter().map(|name| (*name).to_string()).collect(),
         source_splits,
         target_splits: format!("{}\n", common::SPLITS_HEADER.trim_end()),
         worlds,
         discover: None,
-    }) else {
+    })
+}
+
+#[test]
+fn a_worker_proves_independent_first_choices_in_one_build() {
+    let units = ["A.cpp", "B.cpp", "C.cpp", "D.cpp", "E.cpp"];
+    let Some(fixture) = independent_fixture(&units) else {
         eprintln!("skipped: needs ninja and python on PATH");
         return;
     };
@@ -329,6 +333,28 @@ fn a_worker_proves_independent_first_choices_in_one_build() {
     }));
     let result = fixture.json(&format!("{stage}/result.json"));
     assert_eq!(names(&result["accepted"]).len(), 5, "{result:#}");
+}
+
+#[test]
+fn the_coordinator_sends_failed_union_halves_to_different_lanes() {
+    let units = ["A.cpp", "B.cpp", "C.cpp", "D.cpp", "E.cpp", "F.cpp", "G.cpp", "H.cpp", "I.cpp"];
+    let Some(fixture) = independent_fixture(&units) else {
+        eprintln!("skipped: needs ninja and python on PATH");
+        return;
+    };
+    let output = fixture.migrate_with_settings("2", "40", &[], &[
+        "DTK_MIGRATE_FIXTURE_REJECT_WORKER_COMBINATION",
+        "A.cpp,B.cpp",
+    ]);
+    assert!(output.status.success(), "{}", describe(&output));
+    let id = fixture.run_id();
+    let trials = format!("build/dtk-migrate/runs/{id}/coverage/jobs/00000/trials");
+    let left = fixture.read(&format!("{trials}/root-L/lane.txt"));
+    let right = fixture.read(&format!("{trials}/root-R/lane.txt"));
+    assert!(!left.is_empty() && !right.is_empty(), "missing split trial lane records");
+    assert_ne!(left, right, "the coordinator should use both idle build lanes");
+    let job = fixture.json(&format!("build/dtk-migrate/runs/{id}/coverage/jobs/00000/result.json"));
+    assert_eq!(names(&job["accepted"]).len(), 2, "{job:#}");
 }
 
 #[test]

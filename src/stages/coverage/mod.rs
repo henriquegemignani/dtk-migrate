@@ -67,7 +67,7 @@ pub struct Coverage {
 pub const EVIDENCE_SCHEMA: u32 = 13;
 pub const POLICY_VERSION: u32 = crate::analysis::policy::POLICY_VERSION;
 
-const VALIDATION: &str = "atomic-ownership-transactions-with-exact-preconditions-and-canonical-attributed-ownership-and-unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-or-composed-independent-edges-or-decisive-joint-unit-runs-required-extracts-and-extracted-link-inputs-and-retail-bytes";
+pub(crate) const VALIDATION: &str = "atomic-ownership-transactions-with-exact-preconditions-and-canonical-attributed-ownership-and-unique-exact-or-corroborated-layout-or-boundary-sequence-or-bounded-layout-or-vtable-helper-or-ownership-transition-or-adjacent-owner-transition-or-composed-independent-edges-or-decisive-joint-unit-runs-required-extracts-and-extracted-link-inputs-and-retail-bytes";
 
 const CODE_SECTIONS: [&str; 2] = [".text", ".init"];
 const OTHER_LINES: &str = "<unparsed>";
@@ -876,6 +876,122 @@ fn merge_outcomes(mut left: Outcome, right: Outcome) -> Outcome {
 }
 
 impl Coverage {
+    /// Executes exactly the alternatives selected by the coordinator.
+    ///
+    /// Worker lanes own only the mutable project copy and build process. They
+    /// neither choose fallbacks nor split a failed group; a failure returns to
+    /// the coordinator, which decides the next explicit trial. Input files are
+    /// restored on return, while generated Ninja state stays warm in the lane.
+    pub(crate) fn evaluate_fixed(
+        &self,
+        ctx: &BuildContext,
+        prepared: &Prepared,
+        candidates: &[Candidate],
+        selected: &Selections,
+        baseline: &Report,
+    ) -> Result<Outcome> {
+        let names: BTreeSet<&str> =
+            candidates.iter().map(|candidate| candidate.name.as_str()).collect();
+        if names.len() != candidates.len() || names != selected.keys().map(String::as_str).collect()
+        {
+            bail!("A fixed coverage trial needs one selection for every candidate");
+        }
+
+        let mut splits_owned = Owned::take(&splits_path(ctx))?;
+        let mut config_owned = Owned::take(&config_path(ctx))?;
+        let mut splits = Splits::parse(&String::from_utf8(splits_owned.original().to_vec())?)?;
+        let mut observations = Observations::default();
+        let mut accepted = Vec::new();
+        let mut applied = Vec::new();
+        let mut tried = Tried::new();
+        let mut events = Vec::new();
+
+        for candidate in candidates {
+            let proposal = proposal_of(candidate)?;
+            let id = &selected[&candidate.name];
+            let alternative = proposal
+                .alternatives
+                .iter()
+                .find(|alternative| &alternative.id == id)
+                .with_context(|| {
+                    format!("Unknown coverage alternative {id} for {}", candidate.name)
+                })?;
+            tried.entry(candidate.name.clone()).or_default().insert(alternative.retry_key());
+            let required = transaction_extracts(
+                &candidate.name,
+                &proposal.required_extracts,
+                &proposal.unit_extracts,
+                &alternative.transaction,
+            )?;
+            let rendered =
+                extracts::render(&String::from_utf8(config_owned.current().to_vec())?, &required)?;
+            config_owned.write(rendered.as_bytes())?;
+            let index = observations.load(&proposal.observation, ctx)?;
+            Trial {
+                candidate,
+                alternative,
+                proposal: &proposal,
+                observations: index,
+                permitted: &prepared.permitted,
+            }
+            .apply(&mut splits_owned, &mut splits)?;
+            accepted.push(candidate.clone());
+            applied.push(Applied {
+                unit: candidate.name.clone(),
+                id: alternative.id.clone(),
+                units: alternative.transaction.writes().map(str::to_string).collect(),
+                record: serde_json::to_value(AppliedRecord {
+                    observation: proposal.observation.clone(),
+                    alternative: alternative.clone(),
+                    unit_extracts: proposal.unit_extracts.clone(),
+                })?,
+            });
+            events.push(
+                Event::new(&candidate.name, "accepted")
+                    .because(format!(
+                        "{} gaining {} bytes; transaction {} writes {}",
+                        alternative.evidence,
+                        alternative.gained_bytes,
+                        short(&alternative.transaction.id),
+                        alternative.transaction.writes().collect::<Vec<_>>().join(", ")
+                    ))
+                    .about(&alternative.id),
+            );
+        }
+
+        let report = Self::validate_selected(
+            ctx,
+            &accepted,
+            selected,
+            &applied,
+            &BTreeSet::new(),
+            &mut observations,
+            ctx.build_timeout,
+        )?;
+        if regresses(baseline, &report) {
+            bail!(ValidationError("coverage union regresses an existing unit".into()));
+        }
+        if report.measures.complete_code < baseline.measures.complete_code {
+            bail!(ValidationError("coverage union reduces source-linked code".into()));
+        }
+        if !accepted.is_empty() {
+            events.push(
+                Event::new("", "selection-union-validated")
+                    .because(format!("{} selections held in one combined build", accepted.len())),
+            );
+        }
+        Ok(Outcome {
+            accepted,
+            selections: selected.clone(),
+            deferred: Vec::new(),
+            tried,
+            events,
+            report,
+            validation: VALIDATION.to_string(),
+            applied,
+        })
+    }
+
     /// Proves selections in the largest groups the current
     /// coordinator state can sustain. A failed union is split in candidate
     /// order; a passing left half is committed before the right half is tried,
@@ -1652,6 +1768,15 @@ fn generate_evidence(
 fn proposal_of(candidate: &Candidate) -> Result<Proposal> {
     serde_json::from_value(candidate.evidence.clone())
         .with_context(|| format!("Missing coverage proposal for {}", candidate.name))
+}
+
+/// Choices the coordinator may issue for one candidate, in evidence order.
+pub(crate) fn trial_choices(candidate: &Candidate) -> Result<Vec<(String, String)>> {
+    Ok(proposal_of(candidate)?
+        .alternatives
+        .iter()
+        .map(|alternative| (alternative.id.clone(), alternative.retry_key()))
+        .collect())
 }
 
 fn splits_path(ctx: &BuildContext) -> std::path::PathBuf {
