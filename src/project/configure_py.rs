@@ -268,7 +268,7 @@ fn parse_declarations(text: &str, mask: &Mask) -> Result<Vec<Declaration>> {
                 bail!("Object declaration for {name} gives src_dir more than once");
             }
         }
-        if let Some(src_dir) = src_dir {
+        if let Some(src_dir) = src_dir.or_else(|| library_src_dir(text, mask, offset)) {
             name = resolved_source_name(&src_dir, &name);
         }
         let (start, end) = arguments[0];
@@ -312,6 +312,32 @@ fn string_keyword_argument(
         .flatten()
         .with_context(|| format!("{name} in an Object declaration must be a plain string"))?;
     Ok(Some(value))
+}
+
+/// The `"src_dir"` of the library dict enclosing `offset`, if it sets one.
+/// dtk-template applies it to every Object in that library's `objects` list.
+fn library_src_dir(text: &str, mask: &Mask, offset: usize) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut open = None;
+    for index in (0..offset).rev() {
+        if !mask.is_code(index) {
+            continue;
+        }
+        match bytes[index] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+            b'{' => {
+                open = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+    let close = matching_delimiter(text, mask, open)?;
+    let key = regex::Regex::new(r#""src_dir"\s*:\s*"([^"]*)""#).ok()?;
+    key.captures(&text[open..close]).map(|captures| captures[1].to_string())
 }
 
 fn resolved_source_name(src_dir: &str, name: &str) -> String {
@@ -579,6 +605,15 @@ mod tests {
             "{VERSIONS}objects = [\n    Object(NonMatching, \"a.cpp\"),\n    Object(Matching, \"a.cpp\"),\n]\n"
         );
         assert!(Configure::parse(&text).unwrap_err().to_string().contains("Multiple Object"));
+    }
+
+    #[test]
+    fn a_library_src_dir_prefixes_its_objects() {
+        let configure = parse(
+            "libs = [\n    {\n        \"lib\": \"zlib\",\n        \"src_dir\": \"extern\",\n        \"objects\": [\n            Object(NonMatching, \"zlib/a.c\"),\n            Object(NonMatching, \"zlib/b.c\", src_dir=\"other\"),\n        ],\n    },\n    {\n        \"lib\": \"game\",\n        \"objects\": [Object(NonMatching, \"c.cpp\")],\n    },\n]\n",
+        );
+        let names: Vec<&str> = configure.declarations().iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["extern/zlib/a.c", "other/zlib/b.c", "c.cpp"]);
     }
 
     #[test]
