@@ -33,7 +33,7 @@ use crate::{
     project::analyze::with_working_directory,
 };
 
-pub const SCHEMA: u32 = 5;
+pub const SCHEMA: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -166,6 +166,11 @@ pub enum DataSizeBasis {
     FixedWidth,
     StringContent,
     ExistingSplit,
+    /// The target symbol's bytes, with relocated words masked, equal the
+    /// paired source symbol's bytes over the source's own known size. Unlike a
+    /// size guessed from the next symbol, that agreement is a content witness
+    /// for both edges of the member.
+    ByteIdentical,
     Inferred,
 }
 
@@ -223,6 +228,95 @@ fn size_basis(symbol: &ObjSymbol, section: &ObjSection, split_exact: bool) -> Da
         return DataSizeBasis::ExistingSplit;
     }
     DataSizeBasis::Inferred
+}
+
+/// Smallest member whose bytes can witness its own extent. Shorter members
+/// match too many unrelated objects.
+const MIN_IDENTICAL_BYTES: u64 = 8;
+
+/// Whether `target` holds exactly the bytes `source` does, so that the target's
+/// extent (which dtk only guessed) can be read from the source's known size.
+///
+/// Words under a relocation are masked on both sides, since a pointer's value
+/// legitimately differs between versions; what remains must be identical and
+/// must not be one repeated byte, which would equal any zero-filled or
+/// padding object. Relocation presence and kind have to agree at every
+/// offset.
+fn byte_identical(
+    source_section: &ObjSection,
+    source: &ObjSymbol,
+    target_section: &ObjSection,
+    target: &ObjSymbol,
+) -> bool {
+    let data_like = |section: &ObjSection| {
+        matches!(section.kind, ObjSectionKind::Data | ObjSectionKind::ReadOnlyData)
+    };
+    if !data_like(source_section)
+        || !data_like(target_section)
+        || !source.size_known
+        || source.size < MIN_IDENTICAL_BYTES
+        || target.size != source.size
+    {
+        return false;
+    }
+    let (Ok(source_bytes), Ok(target_bytes)) = (
+        source_section.symbol_data(&ObjSymbol { size: source.size, ..source.clone() }),
+        target_section.symbol_data(&ObjSymbol { size: source.size, ..target.clone() }),
+    ) else {
+        return false;
+    };
+    let relocations = |section: &ObjSection, symbol: &ObjSymbol| -> Vec<(u32, ObjRelocKind)> {
+        let start = symbol.address as u32;
+        section
+            .relocations
+            .range(start..start + source.size as u32)
+            .map(|(address, reloc)| (address - start, reloc.kind))
+            .collect()
+    };
+    let source_relocations = relocations(source_section, source);
+    if source_relocations != relocations(target_section, target) {
+        return false;
+    }
+    let mut masked = vec![false; source_bytes.len()];
+    for &(offset, _) in &source_relocations {
+        for slot in masked.iter_mut().skip(offset as usize).take(4) {
+            *slot = true;
+        }
+    }
+    let mut first = None;
+    let mut varied = false;
+    for (index, (&a, &b)) in source_bytes.iter().zip(target_bytes).enumerate() {
+        if masked[index] {
+            continue;
+        }
+        if a != b {
+            return false;
+        }
+        match first {
+            None => first = Some(a),
+            Some(value) if value != a => varied = true,
+            _ => {}
+        }
+    }
+    varied
+}
+
+fn identical_basis(
+    basis: DataSizeBasis,
+    source_symbol: &ObjSymbol,
+    source: &MatchTarget,
+    target_symbol: &ObjSymbol,
+    target_section: &ObjSection,
+) -> DataSizeBasis {
+    if basis == DataSizeBasis::Inferred
+        && source_symbol.section.and_then(|index| source.obj.sections.get(index)).is_some_and(
+            |section| byte_identical(section, source_symbol, target_section, target_symbol),
+        )
+    {
+        DataSizeBasis::ByteIdentical
+    } else {
+        basis
+    }
 }
 
 impl DataRangeEvidence {
@@ -1037,7 +1131,13 @@ impl DataEvidenceReport {
                             .address
                             .checked_add(section.size)
                             .is_some_and(|section_end| u64::from(target_end) <= section_end),
-                    target_size_basis: size_basis(target_symbol, section, split_exact),
+                    target_size_basis: identical_basis(
+                        size_basis(target_symbol, section, split_exact),
+                        source_symbol,
+                        source,
+                        target_symbol,
+                        section,
+                    ),
                     source_wholly_owned,
                     source_weak: source_symbol.flags.is_weak(),
                     target_weak: target_symbol.flags.is_weak(),
@@ -1455,6 +1555,45 @@ mod tests {
         let mut same_next_owner = range;
         same_next_owner.compiled_jump_table.as_mut().unwrap().next_unit = "owner.cpp".into();
         assert!(!same_next_owner.eligible());
+    }
+
+    #[test]
+    fn identical_bytes_witness_an_unknown_target_extent_but_zeros_and_differences_do_not() {
+        let build = |source_data: [u8; 8], target_data: [u8; 8]| {
+            let mut source = target("source", 0x1000, Some("unit.cpp"));
+            source.obj.sections[0].data = source_data.to_vec();
+            let mut guessed = target("target", 0x2000, None);
+            guessed.obj.sections[0].data = target_data.to_vec();
+            let mut symbol = guessed.obj.symbols[0].clone();
+            symbol.data_kind = ObjDataKind::Unknown;
+            guessed.obj.symbols.replace(0, symbol).unwrap();
+            let proposal = UnitProposal {
+                unit: "unit.cpp".into(),
+                section: 0,
+                start: 0x2000,
+                end: 0x2008,
+                members: vec![0],
+                tier: UnitTier::Candidate,
+                reasons: vec!["target is missing functions the source unit has"],
+            };
+            DataEvidenceReport::build(
+                &source,
+                &guessed,
+                &[DataMatch { source: 0, target: 0, evidence: 2 }],
+                std::slice::from_ref(&proposal),
+                "NTSC",
+                "PAL",
+            )
+        };
+        let same = build([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(same.ranges[0].members[0].target_size_basis, DataSizeBasis::ByteIdentical);
+        assert!(same.ranges[0].eligible());
+        let differs = build([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 9]);
+        assert_eq!(differs.ranges[0].members[0].target_size_basis, DataSizeBasis::Inferred);
+        assert!(!differs.ranges[0].eligible());
+        let zeros = build([0; 8], [0; 8]);
+        assert_eq!(zeros.ranges[0].members[0].target_size_basis, DataSizeBasis::Inferred);
+        assert!(!zeros.ranges[0].eligible());
     }
 
     fn target(name: &str, address: u32, owner: Option<&str>) -> MatchTarget {

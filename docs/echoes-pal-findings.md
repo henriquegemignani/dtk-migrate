@@ -16,9 +16,14 @@ from thousands to single digits (derive 10295 -> 5209 -> 524 -> 30; verify
    "target is missing functions the source unit has" / "edge borders an
    unmatched function", which are properties of the *text* run, not of the
    data bytes.
-   *Proposal:* a byte-identity witness (relocation-masked equality of the
-   target range with the source unit's range) that promotes a data range to
-   supported when the unit's text is represented.
+   *Implemented:* `DataSizeBasis::ByteIdentical`. A member whose target bytes,
+   with relocated words masked, equal the paired source symbol's bytes over the
+   source's known size (at least 8 bytes, not one repeated byte) has a witnessed
+   extent, so it no longer counts as a guessed size. Re-running from the state
+   before the hand-applied splits, one `run --stages all` accepted 171 discover
+   candidates (192 data ranges) with a passing build and retail hash, reaching
+   8100 matched functions against 8084 from the manual work. The evidence
+   schema moved from 5 to 6.
 2. **Range ends are symbol ends, not alignment-valid ends.** The split step
    rejects `ends within symbol`, `Unsplit data ... to next split` and
    `Invalid alignment for split`. These were fixed with a loop that reads
