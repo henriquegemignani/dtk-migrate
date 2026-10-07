@@ -64,6 +64,13 @@ See [runs](docs/runs.md) for the run directory, isolation and resource guidance,
 and [coverage](docs/coverage.md) for what each stage will and will not accept.
 The current performance investigation has a [continuation handoff](docs/performance-handoff.md).
 
+## Carrying renames over
+
+When the source's symbols are renamed after the target was migrated from it,
+`dtk-migrate symbols sync --source G2ME01 --target G2MP01 --range A..B` applies
+those renames to the target without rerunning a migration. See
+[symbol sync](docs/symbol-sync.md).
+
 ## Matching two versions directly
 
 ```sh

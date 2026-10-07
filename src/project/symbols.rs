@@ -59,6 +59,12 @@ impl Renames {
         Ok(())
     }
 
+    /// Adds one pair decided in memory; refuses, like a parsed file, when
+    /// `from` is already being renamed to something else.
+    pub fn add(&mut self, from: &str, to: &str, local: bool) -> Result<()> {
+        self.insert(from, to, local, "rename sync")
+    }
+
     /// Builds a set from pairs already decided in memory.
     ///
     /// Used by symbol derivation, which produces its renames rather than
@@ -243,7 +249,7 @@ fn ensure_scope_local(rest: &str) -> String {
 /// The symbol name a symbols-file line declares, if it declares one.
 ///
 /// Lines look like `name = .section:0x80000000; // attrs`.
-fn symbol_name(line: &str) -> Option<&str> {
+pub(crate) fn symbol_name(line: &str) -> Option<&str> {
     let name = line.split_once('=')?.0.trim_end();
     // Preserve leading whitespace by requiring the name to start the line;
     // symbols files don't indent, and anything that does isn't a symbol.
