@@ -148,6 +148,12 @@ fn sync(args: SyncArgs) -> Result<()> {
             count(|s| matches!(s, Skipped::AmbiguousInTarget(_))),
             count(|s| matches!(s, Skipped::DuplicateNewName(_))),
         );
+        let derived = count(|s| matches!(s, Skipped::AddressDerived(_)));
+        if derived > 0 {
+            info!(
+                "{file}: {derived} renames start from address-derived names and were left to a migration run"
+            );
+        }
         if !plan.ambiguous_places.is_empty() {
             warn!(
                 "{file}: {} places hold several symbols and changed names; none was paired",
@@ -168,6 +174,7 @@ fn sync(args: SyncArgs) -> Result<()> {
                 Skipped::NotInTarget(r) => ("not in target", r),
                 Skipped::AmbiguousInTarget(r) => ("ambiguous in target", r),
                 Skipped::DuplicateNewName(r) => ("duplicate new name", r),
+                Skipped::AddressDerived(r) => ("address-derived name", r),
                 Skipped::AlreadyApplied(_) => continue,
             };
             unresolved.push_str(&format!(
