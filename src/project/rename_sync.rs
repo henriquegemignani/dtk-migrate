@@ -124,6 +124,10 @@ pub enum Skipped {
     /// Another source rename wants the same new name for a different old name,
     /// so applying either would collide.
     DuplicateNewName(SourceRename),
+    /// The old name is derived from an address (`lbl_8041E6E8`, `fn_80003100`).
+    /// Each version derives it from its own addresses, so another version's
+    /// symbol of that name is a coincidence, not the same symbol.
+    AddressDerived(SourceRename),
 }
 
 impl Skipped {
@@ -132,7 +136,8 @@ impl Skipped {
             Self::AlreadyApplied(r)
             | Self::NotInTarget(r)
             | Self::AmbiguousInTarget(r)
-            | Self::DuplicateNewName(r) => r,
+            | Self::DuplicateNewName(r)
+            | Self::AddressDerived(r) => r,
         }
     }
 }
@@ -143,6 +148,21 @@ pub struct SyncPlan {
     pub applied: Vec<SourceRename>,
     pub skipped: Vec<Skipped>,
     pub ambiguous_places: Vec<(String, u32)>,
+}
+
+/// Whether a name is one dtk generates from the symbol's address, such as
+/// `lbl_8041E6E8`, `fn_80003100` or `__dt__800057EC`.
+pub fn is_address_derived(name: &str) -> bool {
+    let Some((stem, address)) = name
+        .len()
+        .checked_sub(8)
+        .and_then(|at| name.is_char_boundary(at).then(|| name.split_at(at)))
+    else {
+        return false;
+    };
+    stem.ends_with('_')
+        && stem.len() > 1
+        && address.bytes().all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
 }
 
 /// Resolves source renames against the target's current names.
@@ -159,7 +179,9 @@ pub fn plan(changes: SourceChanges, target: &str) -> Result<SyncPlan> {
     let mut result = SyncPlan { ambiguous_places: changes.ambiguous.clone(), ..Default::default() };
     for rename in &changes.renames {
         let count = |name: &str| held.get(name).copied().unwrap_or(0);
-        let skip = if wanted[rename.new.as_str()] > 1 {
+        let skip = if is_address_derived(&rename.old) {
+            Some(Skipped::AddressDerived(rename.clone()))
+        } else if wanted[rename.new.as_str()] > 1 {
             Some(Skipped::DuplicateNewName(rename.clone()))
         } else if count(&rename.new) > 0 && count(&rename.old) == 0 {
             Some(Skipped::AlreadyApplied(rename.clone()))
@@ -225,7 +247,9 @@ Stable = .text:0x80100020; // type:function size:0x10
 ";
         let plan = plan(source_renames(BEFORE, AFTER), target).unwrap();
         assert_eq!(plan.applied.len(), 1);
-        assert!(matches!(plan.skipped.as_slice(), [Skipped::NotInTarget(r)] if r.new == "Named"));
+        assert!(
+            matches!(plan.skipped.as_slice(), [Skipped::AddressDerived(r)] if r.new == "Named")
+        );
         let (text, report) = render_renames(target, &plan.renames);
         assert_eq!(report.applied, 1);
         assert!(
@@ -260,6 +284,25 @@ OldName = .text:0x80100050; // type:function size:0x10 scope:local
         let plan = plan(source_renames(before, after), target).unwrap();
         assert!(plan.applied.is_empty());
         assert_eq!(plan.skipped.len(), 2);
+    }
+
+    #[test]
+    fn a_name_derived_from_an_address_does_not_identify_a_target_symbol() {
+        assert!(is_address_derived("lbl_8041E6E8"));
+        assert!(is_address_derived("fn_80003100"));
+        assert!(is_address_derived("__dt__800057EC"));
+        assert!(!is_address_derived("skCosX2"));
+        assert!(!is_address_derived("lbl_"));
+        let before = "lbl_8041E6E8 = .sdata2:0x8041E6E8; // x
+";
+        let after = "skCosX2 = .sdata2:0x8041E6E8; // x
+";
+        // The target's own lbl_8041E6E8 is at an unrelated place.
+        let target = "lbl_8041E6E8 = .sdata2:0x8041E6E8; // x
+";
+        let plan = plan(source_renames(before, after), target).unwrap();
+        assert!(plan.applied.is_empty());
+        assert!(matches!(plan.skipped.as_slice(), [Skipped::AddressDerived(_)]));
     }
 
     #[test]
