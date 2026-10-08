@@ -202,9 +202,75 @@ fn canonical_name(symbols: &BTreeMap<String, crate::derive::Placement>, name: &s
     name.into()
 }
 
+/// A DTK gap embeds its configured binary location, unlike the section-relative
+/// address in a relocatable ELF. Do not infer a section base from an alias.
+fn gap_placement(name: &str) -> Option<crate::derive::Placement> {
+    let mut parts = name.strip_prefix("gap_")?.split('_');
+    let ordinal = parts.next()?;
+    let address = parts.next()?;
+    let section = parts.next()?;
+    if ordinal.is_empty()
+        || !ordinal.bytes().all(|c| c.is_ascii_digit())
+        || address.len() != 8
+        || section.is_empty()
+        || parts.next().is_some()
+    {
+        return None;
+    }
+    Some((format!(".{section}"), u64::from_str_radix(address, 16).ok()?))
+}
+
+fn configured_gap_aliases(
+    target: &Compiled,
+    symbols: &BTreeMap<String, crate::derive::Placement>,
+) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for function in &target.functions {
+        let Some(place) = gap_placement(&function.name) else { continue };
+        // The gap itself must have one concrete ELF location.
+        let locations: BTreeSet<_> = target
+            .object
+            .symbols
+            .iter()
+            .filter(|s| s.name == function.name && s.address == function.address)
+            .filter_map(|s| s.section.map(|section| (section, s.address)))
+            .collect();
+        if locations.len() != 1 {
+            continue;
+        }
+        let (section, address) = *locations.first().unwrap();
+        if target.object.sections.get(section).is_none_or(|s| s.name != place.0)
+            || symbols.get(&function.name).is_some_and(|p| p != &place)
+        {
+            continue;
+        }
+        let candidates: BTreeSet<_> = target
+            .object
+            .symbols
+            .iter()
+            .filter(|s| {
+                s.size == 0
+                    && meaningful(&s.name)
+                    && s.section == Some(section)
+                    && s.address == address
+            })
+            .map(|s| canonical_name(symbols, &s.name))
+            .filter(|name| symbols.get(name) == Some(&place))
+            .collect();
+        if candidates.len() == 1 {
+            aliases.insert(function.name.clone(), candidates.into_iter().next().unwrap());
+        }
+    }
+    aliases
+}
+
 fn canonicalize_view(target: &mut Compiled, symbols: &BTreeMap<String, crate::derive::Placement>) {
+    let aliases = configured_gap_aliases(target, symbols);
     for function in &mut target.functions {
-        function.name = canonical_name(symbols, &function.name);
+        function.name = aliases
+            .get(&function.name)
+            .cloned()
+            .unwrap_or_else(|| canonical_name(symbols, &function.name));
         for reference in &mut function.relocations {
             reference.target = canonical_name(symbols, &reference.target);
         }
@@ -440,7 +506,7 @@ fn scan(
         .filter(|f| is_derivable(&f.name))
         .map(|f| Unresolved {
             name: f.name.clone(),
-            placement: placement_for_name(symbols, &f.name),
+            placement: placement_for_name(symbols, &f.name).or_else(|| gap_placement(&f.name)),
             size: f.size,
             scored_pairs: 0,
             size_filtered_pairs: 0,
@@ -565,12 +631,17 @@ fn changes(previous: &Report, current: &[Unit]) -> Progress {
         .units
         .iter()
         .flat_map(|u| {
-            u.unresolved.iter().map(|f| (format!("{}:{}", u.name, f.name), f.placement.as_ref()))
+            u.unresolved.iter().map(|f| {
+                (
+                    format!("{}:{}", u.name, f.name),
+                    f.placement.clone().or_else(|| gap_placement(&f.name)),
+                )
+            })
         })
         .collect();
     let mut result = Progress::default();
     for old in before.difference(&after) {
-        if old_locations.get(old).and_then(|p| *p).is_some_and(|p| named.contains(p)) {
+        if old_locations.get(old).and_then(|p| p.as_ref()).is_some_and(|p| named.contains(p)) {
             result.resolved.push(old.clone());
         } else {
             result.no_longer_observed.push(old.clone());
@@ -756,7 +827,9 @@ mod tests {
         assert!(table_hints(&target, &source).contains_key(&("fn_State".into(), "State".into())));
     }
 
-    fn write_object(path: &Path, names: &[&str]) {
+    fn write_object(path: &Path, names: &[&str]) { write_object_with_aliases(path, names, &[]); }
+
+    fn write_object_with_aliases(path: &Path, names: &[&str], aliases: &[(&str, usize)]) {
         use decomp_toolkit::obj::{
             ObjArchitecture, ObjInfo, ObjKind, ObjSection, ObjSectionKind, ObjSymbol,
             ObjSymbolFlagSet, ObjSymbolFlags, ObjSymbolKind,
@@ -765,7 +838,7 @@ mod tests {
             .iter()
             .flat_map(|_| [0x3863_0001u32, 0x4e80_0020].into_iter().flat_map(u32::to_be_bytes))
             .collect();
-        let symbols = names
+        let mut symbols: Vec<ObjSymbol> = names
             .iter()
             .enumerate()
             .map(|(i, n)| ObjSymbol {
@@ -779,6 +852,13 @@ mod tests {
                 ..Default::default()
             })
             .collect();
+        for (name, index) in aliases {
+            let mut alias = symbols[*index].clone();
+            alias.name = (*name).into();
+            alias.size = 0;
+            alias.kind = ObjSymbolKind::Unknown;
+            symbols.push(alias);
+        }
         let obj = ObjInfo::new(
             ObjKind::Relocatable,
             ObjArchitecture::PowerPc,
@@ -988,6 +1068,111 @@ mod tests {
             vec![Evidence::SharedReference { name: "Local".into() }]
         );
         assert_eq!(canonical_name(&symbols, "Local_80518609"), "Local_80518609");
+    }
+
+    #[test]
+    fn configured_unknown_alias_claims_gap_inventory_and_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut unit = blank_unit(temp.path());
+        let gap = "gap_03_80491108_text";
+        write_object_with_aliases(&unit.target_path, &[gap], &[("Trigger", 0)]);
+        write_object(&unit.source_path, &["Other"]);
+        let request = Request {
+            root: temp.path().into(),
+            version: "TEST".into(),
+            module: "main".into(),
+            prefixes: vec![],
+            alternatives: 5,
+            min_percent: 25.0,
+            size_ratio: 3.5,
+            cache: None,
+            previous: None,
+            workers: 1,
+        };
+        scan(&mut unit, &request, &BTreeMap::new()).unwrap();
+        assert_eq!(unit.unresolved[0].name, gap); // raw objdiff identity survives
+        assert_eq!(unit.unresolved[0].placement, gap_placement(gap));
+        let mut current = blank_unit(temp.path());
+        let symbols = BTreeMap::from([("Trigger".into(), (".text".into(), 0x80491108))]);
+        scan(&mut current, &request, &symbols).unwrap();
+        assert_eq!(current.native_functions, 1);
+        assert_eq!(current.named_functions, 1);
+        assert!(current.unresolved.is_empty());
+        assert_eq!(current.status, "no_unresolved_functions");
+        assert!(current.named_locations.contains(&(".text".into(), 0x80491108)));
+        unit.unresolved[0].placement = None; // reports from before gap location support
+        let previous = Report {
+            schema: SCHEMA,
+            scorer_fingerprint: SCORER_FINGERPRINT.clone(),
+            version: "TEST".into(),
+            module: "main".into(),
+            root: temp.path().into(),
+            search_limits: SearchLimits {
+                size_ratio: 3.5,
+                min_percent: 25.0,
+                alternatives: 5,
+                scope: String::new(),
+            },
+            unresolved: 1,
+            with_candidates: 0,
+            unavailable_units: 0,
+            cache_hits: 0,
+            progress: None,
+            units: vec![unit],
+        };
+        let progress = changes(&previous, &[current]);
+        assert_eq!(progress.resolved, [format!("Unit.o:{gap}")]);
+        assert!(progress.no_longer_observed.is_empty());
+        assert!(progress.newly_unresolved.is_empty());
+    }
+
+    #[test]
+    fn gap_alias_requires_unambiguous_same_elf_and_configured_location() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("target.o");
+        let gap = "gap_03_80491108_text";
+        write_object_with_aliases(&path, &[gap, "OtherBody"], &[("Trigger", 0), ("Conflict", 0)]);
+        let (original, _) = read_object(&path, DiffSide::Target).unwrap();
+        let placement = (".text".into(), 0x80491108);
+        let symbols = BTreeMap::from([("Trigger".into(), placement.clone())]);
+        assert_eq!(
+            configured_gap_aliases(&original, &symbols).get(gap).map(String::as_str),
+            Some("Trigger")
+        );
+        let conflict =
+            BTreeMap::from([("Trigger".into(), placement.clone()), ("Conflict".into(), placement)]);
+        assert!(configured_gap_aliases(&original, &conflict).is_empty());
+        for bad in [(".data".into(), 0x80491108), (".text".into(), 0x8049110c)] {
+            assert!(
+                configured_gap_aliases(&original, &BTreeMap::from([("Trigger".into(), bad)]))
+                    .is_empty()
+            );
+        }
+        let wrong_gap_config = BTreeMap::from([
+            ("Trigger".into(), (".text".into(), 0x80491108)),
+            (gap.into(), (".text".into(), 0x8049110c)),
+        ]);
+        assert!(configured_gap_aliases(&original, &wrong_gap_config).is_empty());
+        assert!(gap_placement("gap_bad_80491108_text").is_none());
+        assert!(gap_placement("gap_03_80491108_text_extra").is_none());
+        let mut target = original;
+        let alias = target.object.symbols.iter_mut().find(|s| s.name == "Trigger").unwrap();
+        alias.size = 8;
+        assert!(configured_gap_aliases(&target, &symbols).is_empty());
+        target.object.symbols.iter_mut().find(|s| s.name == "Trigger").unwrap().size = 0;
+        target.functions[0].name = "fn_80491108".into();
+        assert!(configured_gap_aliases(&target, &symbols).is_empty());
+        target.functions[0].name = gap.into();
+        let alias = target.object.symbols.iter_mut().find(|s| s.name == "Trigger").unwrap();
+        alias.address += 4;
+        assert!(configured_gap_aliases(&target, &symbols).is_empty());
+        let alias = target.object.symbols.iter_mut().find(|s| s.name == "Trigger").unwrap();
+        alias.address -= 4;
+        alias.section = Some(target.object.sections.len());
+        let mut other_section = target.object.sections[0].clone();
+        other_section.name = ".data".into();
+        target.object.sections.push(other_section);
+        assert!(configured_gap_aliases(&target, &symbols).is_empty());
     }
 
     #[test]
