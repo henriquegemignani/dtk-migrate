@@ -111,12 +111,22 @@ pub fn score_matrix(
     size_ratio: f64,
 ) -> Result<BTreeMap<String, BTreeMap<String, f32>>> {
     let pairs = candidate_pairs(targets, sources, size_ratio);
+    score_pairs(target, source, &pairs)
+}
+
+/// Score an explicit candidate set, including graph-supported pairs whose
+/// sizes differ too much for the ordinary body-search filter.
+pub fn score_pairs(
+    target: &Compiled,
+    source: &Compiled,
+    pairs: &[(&str, &str)],
+) -> Result<BTreeMap<String, BTreeMap<String, f32>>> {
     let mut scores: BTreeMap<String, BTreeMap<String, f32>> = BTreeMap::new();
     if pairs.is_empty() {
         return Ok(scores);
     }
     let config = DiffObjConfig::default();
-    for round in permutations(&pairs) {
+    for round in permutations(pairs) {
         let mapping = MappingConfig {
             // objdiff's "left" is the object being explained, which here is the
             // one carrying the placeholder names.

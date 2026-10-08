@@ -16,6 +16,7 @@
 //! already taken at another address.
 
 pub mod body;
+pub mod explore;
 pub mod objects;
 pub mod ordering;
 pub mod propose;

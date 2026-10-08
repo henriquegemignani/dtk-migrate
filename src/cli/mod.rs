@@ -12,6 +12,7 @@ pub mod benchmark;
 pub mod calibrate;
 pub mod configure_hook;
 pub mod derive;
+pub mod explore;
 pub mod match_cmd;
 pub mod run;
 pub mod splits;

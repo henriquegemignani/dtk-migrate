@@ -27,6 +27,8 @@ enum Command {
     Match(cli::match_cmd::Args),
     /// Name target symbols by comparing a unit's two compiled objects.
     Derive(cli::derive::Args),
+    /// Explore unresolved names with objdiff, caller evidence, and a per-unit inventory.
+    Explore(cli::explore::Args),
     /// Report what the existing splits already get wrong.
     Audit(cli::audit::Args),
     /// Score the coverage policy against a version that already has the answers.
@@ -65,6 +67,7 @@ fn main() {
         Command::Run(c_args) => cli::run::run(c_args),
         Command::Match(c_args) => cli::match_cmd::run(c_args),
         Command::Derive(c_args) => cli::derive::run(c_args),
+        Command::Explore(c_args) => cli::explore::run(c_args),
         Command::Audit(c_args) => cli::audit::run(c_args),
         Command::Calibrate(c_args) => cli::calibrate::run(c_args),
         Command::Benchmark(c_args) => cli::benchmark::run(c_args),

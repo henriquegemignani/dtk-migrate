@@ -49,6 +49,14 @@ pub struct Compiled {
 }
 
 impl Compiled {
+    /// Parse the same bytes used for a content-addressed measurement key.
+    /// Reading an object again to hash it can race a concurrent rebuild.
+    pub fn parse(bytes: &[u8], side: DiffSide) -> Result<Self> {
+        let object = objdiff_core::obj::read::parse(bytes, &DiffObjConfig::default(), side)?;
+        let functions = functions_of(&object);
+        Ok(Self { object, functions })
+    }
+
     /// A relocation-aware function view without assigning any target splits.
     /// References into this function become offsets from its own symbol;
     /// references elsewhere remain undefined symbols with their original names.
