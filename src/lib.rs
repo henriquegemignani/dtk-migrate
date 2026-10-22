@@ -28,6 +28,7 @@ pub mod build;
 pub mod cli;
 pub mod derive;
 pub mod matching;
+pub mod profile;
 pub mod project;
 pub mod run;
 pub mod stages;

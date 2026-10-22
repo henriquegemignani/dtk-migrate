@@ -76,6 +76,7 @@ fn main() {
         init!(format.without_time());
     }
 
+    dtk_migrate::profile::init();
     let result = match args.command {
         Command::Run(c_args) => cli::run::run(c_args),
         Command::Match(c_args) => cli::match_cmd::run(c_args),
@@ -88,6 +89,7 @@ fn main() {
         Command::Splits(c_args) => cli::splits::run(c_args),
         Command::ConfigureHook(c_args) => cli::configure_hook::run(c_args),
     };
+    dtk_migrate::profile::finish();
     if let Err(e) = result {
         eprintln!("Failed: {e:?}");
         exit(1);

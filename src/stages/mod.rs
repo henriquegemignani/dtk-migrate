@@ -795,6 +795,7 @@ impl Lap {
     /// Reports the time since the previous mark (or since `new`).
     pub fn mark(&mut self, phase: &str) {
         tracing::info!("{}: {phase} took {:.3}s", self.step, self.last.elapsed().as_secs_f64());
+        crate::profile::record(|| format!("phase\t{}: {phase}", self.step), self.last);
         self.last = std::time::Instant::now();
     }
 }

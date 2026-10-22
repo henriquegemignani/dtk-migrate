@@ -152,6 +152,7 @@ pub fn run(spec: &Spec) -> Result<String, CommandError> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let started = AwakeInstant::now();
+    let wall = std::time::Instant::now();
     let mut tree = Tree::new(&mut command)?;
     let mut output = String::new();
     let mut errors = String::new();
@@ -166,6 +167,20 @@ pub fn run(spec: &Spec) -> Result<String, CommandError> {
         (status, out.join().unwrap_or_default(), err.join().unwrap_or_default())
     });
     let (status, out, err) = reader;
+    crate::profile::record(
+        || {
+            let name = spec
+                .program
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            format!(
+                "exec\t{name} {} @ {}",
+                spec.args.first().map_or("", String::as_str),
+                spec.cwd.display()
+            )
+        },
+        wall,
+    );
     output.push_str(&out);
     errors.push_str(&err);
 

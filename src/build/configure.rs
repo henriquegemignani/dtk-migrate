@@ -96,6 +96,27 @@ pub fn patch_build_ninja(text: &str, jobs: usize, hook: &str) -> Result<String> 
     Ok(out.concat())
 }
 
+/// Whether Ninja regenerates this graph by itself once a split changes the
+/// project's config: the generator edge for `build.ninja` lists the split
+/// output (`config.json`) among its inputs, as dtk-template's does.
+pub fn regenerates_after_split(text: &str) -> bool {
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if !line.starts_with("build build.ninja") {
+            continue;
+        }
+        let mut statement = line.to_string();
+        let mut current = line;
+        while current.trim_end().ends_with('$') {
+            let Some(next) = lines.next() else { break };
+            statement.push_str(next);
+            current = next;
+        }
+        return statement.contains("config.json");
+    }
+    false
+}
+
 /// Joins Ninja's `$`-continued lines, keeping the original text alongside.
 ///
 /// dtk-template's writer wraps anything past 78 columns, and a run's frozen dtk
@@ -179,6 +200,22 @@ mod tests {
                          \n\
                          rule progress\n  \
                            command = $python configure.py $configure_args progress\n";
+
+    #[test]
+    fn only_a_generator_edge_that_lists_the_split_output_regenerates_after_a_split() {
+        let listed = "build build.ninja objdiff.json: configure | configure.py $
+    build/G2MP01/config.json
+";
+        assert!(regenerates_after_split(listed));
+        assert!(!regenerates_after_split(
+            "build build.ninja: configure | configure.py
+"
+        ));
+        assert!(!regenerates_after_split(
+            "rule split
+"
+        ));
+    }
 
     #[test]
     fn the_split_rule_gains_no_update_and_a_job_bound() {
