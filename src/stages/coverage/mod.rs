@@ -430,15 +430,30 @@ impl Stage for Coverage {
 
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared> {
         std::fs::create_dir_all(&ctx.output)?;
+        let mut lap = super::Lap::new("coverage prepare");
         let baseline = ctx.build(None)?;
+        lap.mark("baseline build");
 
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let expected_units = source_blocks.keys().cloned().collect();
         let evidence = generate_evidence(ctx, &self.matching_cache)?;
+        lap.mark("generate evidence");
         let (evidence, observations) =
             validate_evidence(evidence, &expected_units, &ctx.source, &ctx.target)?;
+        lap.mark("validate evidence");
         let observation = persist_observations(ctx, &observations)?;
+        lap.mark("persist observations");
+        // Trials need exactly this index; sharing it spares every lane a parse
+        // of the report just written.
+        let observations = std::sync::Arc::new(observations);
+        shared_observations()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Ownership observation cache was poisoned"))?
+            .insert(
+                format!("{}|{}|{}", observation.sha256, ctx.source, ctx.target),
+                observations.clone(),
+            );
         let _ = std::fs::remove_file(ctx.output.join("coverage-evidence.json"));
 
         let target_blocks = Splits::read(&splits_path(ctx))?.blocks;
@@ -450,6 +465,7 @@ impl Stage for Coverage {
             source_units.iter().map(|unit| (unit.name.clone(), *unit)).collect();
         let (mut joint, run_diagnostics) =
             alternatives::joint_runs(&by_name, &target_blocks, &observations);
+        lap.mark("joint runs");
         let identification_by_name: BTreeMap<&str, &UnitIdentification> = evidence
             .identifications
             .units
@@ -469,9 +485,26 @@ impl Stage for Coverage {
         let mut dispositions = BTreeMap::new();
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut refinements = 0;
-        for unit in &source_units {
-            let mut found =
-                alternatives::build(unit, &target_blocks, &by_name, &source_blocks, &observations);
+        // Building a unit's alternatives reads shared evidence and nothing else,
+        // and takes seconds across every unit, so it runs across threads. The
+        // results are consumed in unit order below.
+        let mut built: Vec<Vec<_>> = {
+            use rayon::prelude::*;
+            source_units
+                .par_iter()
+                .map(|unit| {
+                    alternatives::build(
+                        unit,
+                        &target_blocks,
+                        &by_name,
+                        &source_blocks,
+                        &observations,
+                    )
+                })
+                .collect()
+        };
+        for (unit, found) in source_units.iter().zip(built.drain(..)) {
+            let mut found = found;
             alternatives::add_joint(&mut found, joint.remove(&unit.name).unwrap_or_default());
             let represented = target_blocks.contains_key(&unit.name);
             dispositions
@@ -497,6 +530,7 @@ impl Stage for Coverage {
                 evidence: serde_json::to_value(proposal)?,
             });
         }
+        lap.mark("alternatives");
         candidates.sort_by(compare_candidates);
         let mut chosen = candidates;
         if let Some(limit) = limit {
@@ -533,11 +567,13 @@ impl Stage for Coverage {
             audit::STUNTED_RATIO,
         );
 
+        lap.mark("inventory and audit");
         let mut extra = serde_json::Map::new();
         extra.insert("inventory".into(), serde_json::to_value(&inventory)?);
         extra.insert("policy".into(), serde_json::to_value(&evidence.policy)?);
         extra.insert("stunted_splits".into(), serde_json::to_value(&stunted)?);
         extra.insert("joint_run_diagnostics".into(), serde_json::to_value(run_diagnostics)?);
+        lap.mark("serialise extras");
         Ok(Prepared {
             candidates: chosen,
             baseline,
@@ -833,8 +869,21 @@ impl Stage for Coverage {
 
 /// Observation reports already loaded, by digest. A report is tens of
 /// megabytes and every candidate in a round refers to the same one.
+///
+/// Each trial used to build its own `Observations` and read the compressed
+/// report again, which cost several seconds per trial in every lane. Loaded
+/// reports are now shared by every lane of the process, keyed by the report's
+/// digest and the version pair it was verified against; the digest is checked
+/// on the first load only.
 #[derive(Default)]
-struct Observations(BTreeMap<String, ObservationIndex>);
+struct Observations(BTreeMap<String, std::sync::Arc<ObservationIndex>>);
+
+type SharedObservations = std::sync::Mutex<BTreeMap<String, std::sync::Arc<ObservationIndex>>>;
+
+fn shared_observations() -> &'static SharedObservations {
+    static SHARED: std::sync::OnceLock<SharedObservations> = std::sync::OnceLock::new();
+    SHARED.get_or_init(Default::default)
+}
 
 /// A single adaptive proof keeps its parsed observations across failed unions
 /// and their subgroups.
@@ -852,7 +901,16 @@ impl Observations {
         ctx: &BuildContext,
     ) -> Result<&ObservationIndex> {
         if !self.0.contains_key(&reference.sha256) {
-            let index = load_reference(reference, &ctx.source, &ctx.target)?;
+            let key = format!("{}|{}|{}", reference.sha256, ctx.source, ctx.target);
+            let mut shared = shared_observations()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Ownership observation cache was poisoned"))?;
+            if !shared.contains_key(&key) {
+                let index = load_reference(reference, &ctx.source, &ctx.target)?;
+                shared.insert(key.clone(), std::sync::Arc::new(index));
+            }
+            let index = shared[&key].clone();
+            drop(shared);
             self.0.insert(reference.sha256.clone(), index);
         }
         Ok(&self.0[&reference.sha256])

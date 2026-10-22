@@ -248,3 +248,43 @@ Next candidates, not done: cache matching and coverage evidence by the stage's
 input fingerprint when the previous stage accepted nothing; skip the repeated
 `configure.py` when a trial changes no configure input; use fewer lanes when
 batches are single candidates.
+
+## Second pass: the remaining work, measured and trimmed
+
+With `DTK_MIGRATE_LOG_TIME=1` and per-phase "took" lines in each stage's
+`prepare`, the 299 s run broke down as follows (seconds, run `20748-155542`
+and the following runs; owner build configured with `--portable-build-ninja`):
+
+| phase | before | after |
+|---|---:|---:|
+| coverage `alternatives` loop (per source unit, independent) | 20.3 | 2.7 |
+| coverage workers: each trial re-read and re-parsed the 150 MB observation report (~8–12 s per trial) | 58–66 | 35 |
+| discover workers: the same report parsed a second time after prepare had just built it | ~8 | 0 |
+| discover: coverage evidence written as pretty JSON and parsed back | (not separable) | taken from memory |
+| **whole run** | **299** | **253–257** |
+
+What changed: the alternatives loop runs on rayon; observation indexes are
+shared by every lane of the process (and handed over from the prepare step that
+built them) instead of reloaded per trial; discover takes the matcher's coverage
+report from memory. The remaining wall time, 253 s:
+
+| phase | seconds |
+|---|---:|
+| derive: baseline check 6.7, `derive::derive` 18.5, 2-candidate integration ~24 | ~55 |
+| coverage: evidence 18.5 (report building 11), validate 7.3, workers 35, integration 5 | ~70 |
+| discover: matcher 18, rename batch 3.6 + rebuild 9, load evidence 7.4, workers ~55 | ~95 |
+| verify: 5 one-candidate batches | ~25 |
+| final validation and start-up | ~10 |
+
+What is left is either real trial work (each trial is a `configure.py` of 1.8–2.9 s
+plus a split/link/hash of 5–9 s; about 140 s in total across the stages) or
+single-threaded analysis that is computed twice because coverage and discover
+each run the matcher (18 s each) and each validate the same 150 MB observation
+report (7 s each). Further cuts need that analysis shared between stages, or
+split inside (`build_coverage_report` is ~11 s of one thread; so is
+`derive::derive`'s ~18 s), which is more than an easy change.
+
+`tests/historical_recall.rs::the_fixture_is_readable_project_data_rather_than_a_saved_verdict`
+fails in this worktree because `tests/fixtures/ownership/baseline.splits.txt` is
+LF in the index and CRLF on disk (autocrlf), so its SHA-256 differs; it is
+unrelated to these changes.

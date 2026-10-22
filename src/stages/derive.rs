@@ -74,7 +74,9 @@ impl Stage for Derive {
     }
 
     fn prepare(&self, ctx: &BuildContext, limit: Option<usize>) -> Result<Prepared> {
+        let mut lap = super::Lap::new("derive prepare");
         let baseline = ctx.build(None)?;
+        lap.mark("baseline build");
 
         let mut request = derive::Request::new(ctx.root.clone(), ctx.target.clone());
         // The version being migrated from is the check on a misplaced name: if
@@ -82,6 +84,7 @@ impl Stage for Derive {
         // source is the likelier explanation and nothing is renamed.
         request.reference = Some(ctx.source.clone());
         let result = derive::derive(&request)?;
+        lap.mark("derive");
 
         let mut candidates: Vec<Candidate> = Vec::new();
         for (old, proposal) in &result.accepted {

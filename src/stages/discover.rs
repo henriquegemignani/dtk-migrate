@@ -584,7 +584,9 @@ impl Stage for Discover {
         let splits_path = ctx.root.join("config").join(&ctx.target).join("splits.txt");
         let symbols_path = splits_path.with_file_name("symbols.txt");
 
+        let mut lap = super::Lap::new("discover prepare");
         let starting = ctx.build(None)?;
+        lap.mark("starting build");
         let mut symbols = Owned::take(&symbols_path)?;
         let mut events: Vec<Event> = Vec::new();
 
@@ -605,6 +607,7 @@ impl Stage for Discover {
             coverage: Some(coverage_path.clone()),
             ..Default::default()
         };
+        let mut captured = None;
         if let Some(directory) = crate::stages::coverage::injected_evidence_dir() {
             // The same frozen directory as coverage's coordinator fixture.
             // Its digest is recorded in the run environment, including these
@@ -619,9 +622,18 @@ impl Stage for Discover {
             let named = Splits::read(&splits_path)?.blocks.len();
             std::fs::copy(directory.join(format!("{named}.json")), &coverage_path)?;
         } else {
-            crate::matching::run(&request)?;
+            // Taken from memory: writing the report as pretty JSON and parsing
+            // it straight back cost more than computing it.
+            request.outputs.coverage = None;
+            request.capture_coverage = true;
+            captured = crate::matching::run_with_cache(
+                &request,
+                &mut crate::matching::MatchingCache::default(),
+            )?
+            .coverage;
         }
 
+        lap.mark("matcher");
         // Confident renames are applied once, up front: `dtk match` anchors its
         // proposals on symbol names, so a name established here widens what
         // every later candidate can be. The batch is kept only if it builds and
@@ -659,8 +671,10 @@ impl Stage for Discover {
             events.push(Event::new("", "rename-batch-reverted").because(reason).refused(refusal));
         }
         symbols.commit();
+        lap.mark("rename batch");
 
         let baseline = ctx.build(None)?;
+        lap.mark("baseline build");
         let blocks = Splits::read(&splits_path)?.blocks;
         let proposals = Splits::read(&proposals_path)?.blocks;
         let data_evidence =
@@ -671,7 +685,10 @@ impl Stage for Discover {
         let jump_tables = jump_table_proofs(&data_report);
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
-        let evidence: CoverageReport = serde_json::from_slice(&std::fs::read(&coverage_path)?)?;
+        let evidence: CoverageReport = match captured {
+            Some(report) => report,
+            None => serde_json::from_slice(&std::fs::read(&coverage_path)?)?,
+        };
         let expected: BTreeSet<String> = source_blocks.keys().cloned().collect();
         let observations = ObservationIndex::load_enclosed_for_run(
             evidence.identifications,
@@ -681,7 +698,25 @@ impl Stage for Discover {
             &ctx.target,
             &expected,
         )?;
+        lap.mark("load evidence");
         let observation = observations.persist(&ctx.output)?;
+        lap.mark("persist observations");
+        // The workers need exactly this index. Handing it over spares each run
+        // a second parse of the report just written.
+        let observations = Arc::new(observations);
+        self.observations
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Ownership observation cache was poisoned"))?
+            .insert(
+                (
+                    observation.schema,
+                    observation.sha256.clone(),
+                    observation.file.clone(),
+                    ctx.source.clone(),
+                    ctx.target.clone(),
+                ),
+                observations.clone(),
+            );
         let _ = std::fs::remove_file(&coverage_path);
 
         let mut candidates: Vec<Candidate> = code_proposals(&proposals, &blocks)

@@ -782,3 +782,19 @@ mod tests {
         assert!(accepted.is_empty() && deferred.is_empty() && events.is_empty());
     }
 }
+
+/// Logs how long each named phase of a long step took, for profiling a run.
+pub struct Lap {
+    step: &'static str,
+    last: std::time::Instant,
+}
+
+impl Lap {
+    pub fn new(step: &'static str) -> Self { Self { step, last: std::time::Instant::now() } }
+
+    /// Reports the time since the previous mark (or since `new`).
+    pub fn mark(&mut self, phase: &str) {
+        tracing::info!("{}: {phase} took {:.3}s", self.step, self.last.elapsed().as_secs_f64());
+        self.last = std::time::Instant::now();
+    }
+}
