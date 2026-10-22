@@ -30,13 +30,15 @@ pub fn run(args: Args) -> Result<()> {
     let Some((program, rest)) = args.command.split_first() else {
         bail!("configure-hook needs the configure command after `--`");
     };
+    // Ninja runs a generator rule in the project root.
+    let root = std::env::current_dir()?;
+    let mut rest: Vec<String> = rest.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    crate::build::configure::skip_compile_commands(&root, &mut rest);
     let status = Command::new(program).args(rest).status()?;
     if !status.success() {
         bail!("configure.py failed with {status}");
     }
-    // Ninja runs a generator rule in the project root, which is where the file
-    // it just regenerated lives.
-    let root = std::env::current_dir()?;
+    // The file it just regenerated lives in that same root.
     let hook = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dtk-migrate"));
     crate::build::configure::patch_in_place(&root, args.jobs, &hook.display().to_string())
 }

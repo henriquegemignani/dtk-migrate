@@ -169,6 +169,7 @@ impl BuildContext {
                 args.push(path.display().to_string());
             }
         }
+        configure::skip_compile_commands(&self.root, &mut args);
         self.run(&self.tools.python.clone(), &args, false, None)
             .map_err(|e| anyhow::anyhow!(e))
             .context("configure.py failed")?;

@@ -96,6 +96,32 @@ pub fn patch_build_ninja(text: &str, jobs: usize, hook: &str) -> Result<String> 
     Ok(out.concat())
 }
 
+/// Python that runs `configure.py` with the clangd database turned off.
+const WITHOUT_COMPILE_COMMANDS: &str = "import runpy,sys;import tools.project as p;    p.generate_compile_commands=lambda *a,**k:None;sys.argv[0]='configure.py';    runpy.run_path('configure.py',run_name='__main__')";
+
+/// Rewrites a `configure.py <args>` command (the interpreter excluded) so it
+/// skips `compile_commands.json`.
+///
+/// Trials never read that file, and writing it costs about a second per
+/// configure. The project's sources stay untouched: its generator function is
+/// replaced in the interpreter, so the owner's own configure still writes it.
+/// Projects whose `tools/project.py` has no such generator are left alone.
+pub fn skip_compile_commands(root: &Path, args: &mut Vec<String>) {
+    if args.first().map(String::as_str) != Some("configure.py") {
+        return;
+    }
+    let generates = std::fs::read_to_string(root.join("tools").join("project.py"))
+        .is_ok_and(|text| text.contains("def generate_compile_commands"));
+    if generates {
+        // `-c` takes the place of the script; `sys.argv[0]` is restored above.
+        let rest: Vec<String> = args.drain(1..).collect();
+        *args = ["-c".to_string(), WITHOUT_COMPILE_COMMANDS.to_string()]
+            .into_iter()
+            .chain(rest)
+            .collect();
+    }
+}
+
 /// Whether Ninja regenerates this graph by itself once a split changes the
 /// project's config: the generator edge for `build.ninja` lists the split
 /// output (`config.json`) among its inputs, as dtk-template's does.
@@ -200,6 +226,28 @@ mod tests {
                          \n\
                          rule progress\n  \
                            command = $python configure.py $configure_args progress\n";
+
+    #[test]
+    fn configure_skips_the_clangd_database_only_when_the_project_writes_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = || vec!["configure.py".to_string(), "configure".into(), "-v".into(), "X".into()];
+        let mut plain = args();
+        skip_compile_commands(dir.path(), &mut plain);
+        assert_eq!(plain, args(), "no tools/project.py: left alone");
+
+        std::fs::create_dir(dir.path().join("tools")).unwrap();
+        std::fs::write(
+            dir.path().join("tools/project.py"),
+            "def generate_compile_commands(): pass
+",
+        )
+        .unwrap();
+        let mut patched = args();
+        skip_compile_commands(dir.path(), &mut patched);
+        assert_eq!(patched[0], "-c");
+        assert!(patched[1].contains("runpy.run_path('configure.py'"));
+        assert_eq!(patched[2..], args()[1..], "the project's own arguments follow");
+    }
 
     #[test]
     fn only_a_generator_edge_that_lists_the_split_output_regenerates_after_a_split() {
