@@ -31,7 +31,16 @@ use crate::{
     },
 };
 
-pub struct Derive;
+/// The weakest tier a run applies. Probable is the default; Candidate also
+/// builds the proposals that disagree with a size or a competing identity, and
+/// the build and matched-code checks remain the only gate on them.
+pub struct Derive {
+    pub max_tier: Tier,
+}
+
+impl Default for Derive {
+    fn default() -> Self { Self { max_tier: Tier::Probable } }
+}
 
 const VALIDATION: &str = "objdiff body comparisons against reference-binary and compiled-source functions, with competing identities retained; the build decides only whether a name can be applied";
 
@@ -76,8 +85,8 @@ impl Stage for Derive {
 
         let mut candidates: Vec<Candidate> = Vec::new();
         for (old, proposal) in &result.accepted {
-            // Only what is safe to apply unreviewed reaches a build.
-            if proposal.tier > Tier::Probable {
+            // Only what the run was told to trust reaches a build.
+            if proposal.tier > self.max_tier {
                 continue;
             }
             candidates.push(Candidate {

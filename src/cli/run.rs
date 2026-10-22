@@ -76,6 +76,11 @@ pub struct Args {
     /// The interpreter that runs the project's `configure.py`.
     #[arg(long)]
     pub python: Option<PathBuf>,
+    /// Weakest tier of derived name to build. `candidate` also tries names
+    /// whose size or competing identity disagrees; the build and matched-code
+    /// checks still decide, and each such rename is recorded with its tier.
+    #[arg(long, value_enum, default_value_t = crate::cli::derive::TierArg::Probable)]
+    pub derive_tier: crate::cli::derive::TierArg,
     /// Continue the run with this id instead of starting a new one.
     #[arg(long, value_name = "RUN_ID")]
     pub resume: Option<String>,
@@ -278,6 +283,7 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
         limit: args.limit,
         only: args.only.clone(),
         build_timeout_seconds: Some(args.build_timeout),
+        derive_tier: args.derive_tier.into(),
         environment: Environment::of(&tools)?,
         artifact_environment: None,
         coordinator_upgrades: Vec::new(),
@@ -561,6 +567,7 @@ mod tests {
             limit: None,
             only: Vec::new(),
             build_timeout_seconds: Some(120.0),
+            derive_tier: crate::derive::propose::Tier::Probable,
             environment: Environment::of(&tools).unwrap(),
             artifact_environment: None,
             coordinator_upgrades: Vec::new(),

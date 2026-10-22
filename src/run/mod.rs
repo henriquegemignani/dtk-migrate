@@ -91,11 +91,19 @@ fn parallel_subtrees(candidates: &[Candidate], workers: usize) -> Vec<Vec<Candid
 }
 
 pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
+    stage_for_tier(name, crate::derive::propose::Tier::Probable)
+}
+
+/// [`stage_for`] with the weakest derive tier the run applies.
+pub fn stage_for_tier(
+    name: &str,
+    derive_tier: crate::derive::propose::Tier,
+) -> Result<Box<dyn Stage + Send + Sync>> {
     Ok(match name {
         "coverage" => Box::new(Coverage::default()),
         "discover" => Box::new(Discover::default()),
         "verify" => Box::new(Verify),
-        "derive" => Box::new(Derive),
+        "derive" => Box::new(Derive { max_tier: derive_tier }),
         other => bail!("Unknown stage: {other}"),
     })
 }
@@ -104,6 +112,8 @@ pub fn stage_for(name: &str) -> Result<Box<dyn Stage + Send + Sync>> {
 ///
 /// Written to `run.json` before any work starts. `--resume` reads it back and
 /// refuses to continue if anything it describes has changed.
+fn default_derive_tier() -> crate::derive::propose::Tier { crate::derive::propose::Tier::Probable }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRecord {
     pub schema: u32,
@@ -131,6 +141,9 @@ pub struct RunRecord {
     #[serde(default)]
     pub only: Vec<String>,
     pub build_timeout_seconds: Option<f64>,
+    /// The weakest tier of derived name this run builds.
+    #[serde(default = "default_derive_tier")]
+    pub derive_tier: crate::derive::propose::Tier,
     pub tools: FrozenTools,
     pub environment: Environment,
     /// The environment used to fingerprint worker jobs before the first
@@ -405,7 +418,7 @@ pub fn run_stage(
     cancel: Option<Cancel>,
 ) -> Result<(PathBuf, StageResult)> {
     let started = Instant::now();
-    let stage = stage_for(stage_name)?;
+    let stage = stage_for_tier(stage_name, run.derive_tier)?;
     let stage_dir = dir.stage(stage_name);
     let baseline_dir = dir.baseline(stage_name);
     let prepared_path = stage_dir.join("prepared.json");
@@ -1163,21 +1176,22 @@ mod tests {
             timing: StageTiming::default(),
             seconds: 0.0,
         };
-        let reserved = result.changed_scopes(&Derive).unwrap();
+        let reserved = result.changed_scopes(&Derive::default()).unwrap();
         assert_eq!(reserved, BTreeSet::from([MutationScope::Symbol("A.cpp".into())]));
-        assert!(is_reserved(&Derive, &symbol, &reserved).unwrap());
+        assert!(is_reserved(&Derive::default(), &symbol, &reserved).unwrap());
         assert!(!is_reserved(&stage(), &Candidate::new("A.cpp"), &reserved).unwrap());
         let focused = focus(&stage(), &candidates(), &only(&["A.cpp"]), &reserved).unwrap();
         assert_eq!(focused.roots.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["A.cpp"]);
         assert_eq!(focused.resolved, BTreeSet::from(["A.cpp".into()]));
 
         // `--only` names units: a same-spelling symbol is not itself a root.
-        let derive = focus(&Derive, &[symbol], &only(&["A.cpp"]), &none()).unwrap();
+        let derive = focus(&Derive::default(), &[symbol], &only(&["A.cpp"]), &none()).unwrap();
         assert!(derive.roots.is_empty());
         assert!(derive.resolved.is_empty());
 
         let symbol_for_b = result.accepted[0].clone();
-        let derive_for_b = focus(&Derive, &[symbol_for_b], &only(&["B.cpp"]), &none()).unwrap();
+        let derive_for_b =
+            focus(&Derive::default(), &[symbol_for_b], &only(&["B.cpp"]), &none()).unwrap();
         assert_eq!(derive_for_b.roots.len(), 1);
         assert_eq!(derive_for_b.resolved, BTreeSet::from(["B.cpp".into()]));
     }

@@ -214,6 +214,15 @@ reinterpreted. Schema 9 requires coverage's extract inventories and the stage's
 selection and applied-transaction history; missing safety data cannot silently
 be read as empty. The read-only benchmark retains a separate legacy adapter.
 
+## Derive tier
+
+`run --derive-tier candidate` also builds derived names whose evidence is a
+positional match with a disagreeing size (the default, `probable`, stops short
+of those). The tier is recorded in `run.json`, each rename keeps its tier in the
+stage evidence, and the build and matched-code checks gate them exactly as
+they gate stronger names. Review the accepted candidate-tier renames from
+`derive/prepared.json` before keeping them.
+
 ## Resource settings
 
 The default worker count is one per four available logical CPUs, capped at six;
