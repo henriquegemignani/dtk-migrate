@@ -76,6 +76,12 @@ pub struct Args {
     /// The interpreter that runs the project's `configure.py`.
     #[arg(long)]
     pub python: Option<PathBuf>,
+    /// Runs the project's compilers through this wrapper, as `configure.py
+    /// --wrapper` does (for example a copy of `mwcc-tools` named `mwcc-run`,
+    /// which runs the compiler's WebAssembly build in process). One path: the
+    /// project's graph writes it back unquoted.
+    #[arg(long)]
+    pub wrapper: Option<PathBuf>,
     /// Weakest tier of derived name to build. `candidate` also tries names
     /// whose size or competing identity disagrees; the build and matched-code
     /// checks still decide, and each such rename is recorded with its tier.
@@ -267,6 +273,7 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
         // The downloaded compilers stay where they are: copying them into every
         // worker would multiply gigabytes, and they are inputs, not outputs.
         toolchain_root: root.to_path_buf(),
+        wrapper: args.wrapper.as_deref().map(std::path::absolute).transpose()?,
     };
     let record = RunRecord {
         schema: SCHEMA,
@@ -551,6 +558,7 @@ mod tests {
             python: PathBuf::from("python"),
             hook,
             toolchain_root: directory.to_path_buf(),
+            wrapper: None,
         };
         RunRecord {
             schema: SCHEMA,

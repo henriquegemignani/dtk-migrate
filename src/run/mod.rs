@@ -194,6 +194,10 @@ pub struct FrozenTools {
     pub hook: PathBuf,
     /// Where the downloaded compilers and tools live.
     pub toolchain_root: PathBuf,
+    /// What `configure.py --wrapper` runs the compilers through, when given.
+    /// Not copied: a wrapper such as `mwcc-run` finds its own checkout.
+    #[serde(default)]
+    pub wrapper: Option<PathBuf>,
 }
 
 /// Everything outside the project that could change a build's result.
@@ -369,6 +373,7 @@ pub fn context(
             python: run.tools.python.clone(),
             hook: run.tools.hook.clone(),
             toolchain_root: Some(run.tools.toolchain_root.clone()),
+            wrapper: run.tools.wrapper.clone(),
         },
         output,
         build_jobs: run.build_jobs,

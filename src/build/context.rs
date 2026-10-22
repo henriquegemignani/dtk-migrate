@@ -50,6 +50,8 @@ pub struct Toolchain {
     /// compilers; the owner's shared directory keeps them out of each worker's
     /// Ninja graph, where they would be download targets rather than inputs.
     pub toolchain_root: Option<PathBuf>,
+    /// The compiler wrapper `configure.py --wrapper` is given.
+    pub wrapper: Option<PathBuf>,
 }
 
 /// Everything one build needs to know.
@@ -157,6 +159,12 @@ impl BuildContext {
         // is also what lets the owner's own portable build be reused.
         if self.supports_portable_graph() {
             args.push("--portable-build-ninja".into());
+        }
+        // The regenerated graphs Ninja asks for later reuse these arguments,
+        // since dtk-template writes them into `build.ninja`.
+        if let Some(wrapper) = &self.tools.wrapper {
+            args.push("--wrapper".into());
+            args.push(wrapper.display().to_string());
         }
         // Existing toolchains are inputs, not things for each worker's Ninja to
         // download again.
