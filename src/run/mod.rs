@@ -447,6 +447,44 @@ pub fn run_stage(
             crate::workspace::copy_snapshot(source_root, &baseline_dir, &source.manifest)?;
         }
         crate::workspace::seed_objdiff(source_root, &baseline_dir)?;
+        // The previous stage's integration workspace has already built these
+        // inputs. Starting from its outputs makes the baseline build a check
+        // that nothing is stale instead of a second compile of the project.
+        // The owner's checkout is not trusted this way: its build state was
+        // not produced by this run's frozen tools.
+        if source_root == dir.integration() {
+            let cache = crate::workspace::seed_build_cache_profiled(
+                source_root,
+                &baseline_dir,
+                &run.target,
+            )?;
+            tracing::info!(
+                "{stage_name}: baseline seeded from the previous stage in {:.3}s ({} files / {} bytes)",
+                cache.seconds,
+                cache.files,
+                cache.bytes
+            );
+        } else if crate::workspace::owner_build_is_current(
+            source_root,
+            &run.tools.toolchain_root,
+            &run.target,
+        ) {
+            // The owner's own build of this version is the closest thing to a
+            // warm baseline. Ninja still rebuilds whatever its commands or
+            // timestamps say is stale, and the baseline's retail hash and
+            // report are measured as usual.
+            let cache = crate::workspace::seed_build_cache_profiled(
+                source_root,
+                &baseline_dir,
+                &run.target,
+            )?;
+            tracing::info!(
+                "{stage_name}: baseline seeded from the project's existing build in {:.3}s ({} files / {} bytes)",
+                cache.seconds,
+                cache.files,
+                cache.bytes
+            );
+        }
         let ctx = context(&baseline_dir, run, stage_dir.join("preparation"), cancel.clone());
         let limit = if run.only.is_empty() { run.limit } else { None };
         let mut prepared = stage.prepare(&ctx, limit)?;

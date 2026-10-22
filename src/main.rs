@@ -47,20 +47,33 @@ enum Command {
 fn main() {
     let args = Cli::parse();
 
-    let format = tracing_subscriber::fmt::format().with_target(false).without_time();
+    // Set DTK_MIGRATE_LOG_TIME to stamp each line with seconds since start,
+    // which is how a run's phases are timed from its log.
+    let timed = std::env::var_os("DTK_MIGRATE_LOG_TIME").is_some();
+    let format = tracing_subscriber::fmt::format().with_target(false);
     // Logs go to stderr so stdout stays free for anything a command prints as
     // data, and so a caller can separate the two.
-    let builder = tracing_subscriber::fmt().event_format(format).with_writer(std::io::stderr);
-    if let Some(level) = args.log_level {
-        builder.with_max_level(level).init();
+    macro_rules! init {
+        ($format:expr) => {{
+            let builder =
+                tracing_subscriber::fmt().event_format($format).with_writer(std::io::stderr);
+            if let Some(level) = args.log_level {
+                builder.with_max_level(level).init();
+            } else {
+                builder
+                    .with_env_filter(
+                        EnvFilter::builder()
+                            .with_default_directive(LevelFilter::INFO.into())
+                            .from_env_lossy(),
+                    )
+                    .init();
+            }
+        }};
+    }
+    if timed {
+        init!(format.with_timer(tracing_subscriber::fmt::time::uptime()));
     } else {
-        builder
-            .with_env_filter(
-                EnvFilter::builder()
-                    .with_default_directive(LevelFilter::INFO.into())
-                    .from_env_lossy(),
-            )
-            .init();
+        init!(format.without_time());
     }
 
     let result = match args.command {

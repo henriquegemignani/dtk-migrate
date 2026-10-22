@@ -121,10 +121,21 @@ impl BuildContext {
             "--ninja".into(),
             self.tools.ninja.display().to_string(),
         ];
+        // A graph that records absolute paths (the interpreter, header
+        // dependencies) ties a build directory to the checkout that made it, so
+        // outputs seeded into a worker would be tracked against the donor's
+        // headers. Projects that offer a portable graph get it everywhere, which
+        // is also what lets the owner's own portable build be reused.
+        if self.supports_portable_graph() {
+            args.push("--portable-build-ninja".into());
+        }
         // Existing toolchains are inputs, not things for each worker's Ninja to
         // download again.
         for (flag, path) in self.toolchain_paths() {
-            if path.exists() || (flag == "--compilers" && self.tools.toolchain_root.is_some()) {
+            if path.is_relative()
+                || path.exists()
+                || (flag == "--compilers" && self.tools.toolchain_root.is_some())
+            {
                 args.push(flag.to_string());
                 args.push(path.display().to_string());
             }
@@ -156,15 +167,73 @@ impl BuildContext {
         Ok(())
     }
 
+    /// Whether this project's `configure.py` can emit a relocatable graph.
+    fn supports_portable_graph(&self) -> bool {
+        std::fs::read_to_string(self.root.join("configure.py"))
+            .is_ok_and(|text| text.contains("--portable-build-ninja"))
+    }
+
+    /// The project-relative tool paths a plain `configure.py` run would use.
+    ///
+    /// Passing the same strings the owner's own build used keeps Ninja's
+    /// command lines identical to the owner's, so outputs the owner already
+    /// built are not "changed" merely because a worker spelled a compiler path
+    /// absolutely. A private copy gets a link to the shared compilers instead
+    /// of a copy of them (see [`Self::link_compilers`]).
     fn toolchain_paths(&self) -> Vec<(&'static str, PathBuf)> {
         let suffix = if cfg!(windows) { ".exe" } else { "" };
-        let tools = self.tools.toolchain_root.clone().unwrap_or_else(|| self.root.clone());
+        let shared = self.tools.toolchain_root.clone().unwrap_or_else(|| self.root.clone());
+        let linked = self.link_compilers(&shared);
+        let tool = |relative: String| -> PathBuf {
+            if self.root.join(&relative).exists() {
+                PathBuf::from(relative)
+            } else {
+                shared.join(relative)
+            }
+        };
         vec![
-            ("--compilers", tools.join("build/compilers")),
-            ("--objdiff", tools.join(format!("build/tools/objdiff-cli{suffix}"))),
-            ("--sjiswrap", tools.join("build/tools/sjiswrap.exe")),
-            ("--binutils", tools.join("build/binutils")),
+            (
+                "--compilers",
+                if linked {
+                    PathBuf::from("build/compilers")
+                } else {
+                    shared.join("build/compilers")
+                },
+            ),
+            ("--objdiff", tool(format!("build/tools/objdiff-cli{suffix}"))),
+            ("--sjiswrap", tool("build/tools/sjiswrap.exe".into())),
+            ("--binutils", tool("build/binutils".into())),
         ]
+    }
+
+    /// Makes `build/compilers` resolve inside this project copy.
+    ///
+    /// The directory is a junction (symlink on Unix) to the shared compilers,
+    /// not a copy: snapshots skip `build/compilers`, so it is never copied,
+    /// hashed or written, and it stays one frozen, separately hashed input.
+    /// Returns whether the relative path now works.
+    fn link_compilers(&self, shared: &Path) -> bool {
+        // mklink rejects mixed separators, so rebuild both paths from components.
+        let link: PathBuf = self.root.join("build").join("compilers").components().collect();
+        if link.exists() {
+            return true;
+        }
+        let target: PathBuf = shared.join("build").join("compilers").components().collect();
+        if !target.is_dir() || std::fs::create_dir_all(self.root.join("build")).is_err() {
+            return false;
+        }
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&target, &link).is_ok();
+        made && link.exists()
     }
 
     /// Configures, links and checks retail bytes before generating the report.

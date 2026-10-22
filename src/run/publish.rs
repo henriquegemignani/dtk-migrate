@@ -253,7 +253,17 @@ pub fn publish(
         }
 
         // Prove it again here. The worker proved it in a copy; this is the
-        // project that will keep it.
+        // project that will keep it. The integration workspace already
+        // compiled exactly these inputs, so its outputs stand in for a cold
+        // compile; Ninja still rebuilds whatever their timestamps or commands
+        // say is stale, and the link, retail hash and report run regardless.
+        let cache = crate::workspace::adopt_build_cache(integrated, root, &run.target)?;
+        tracing::info!(
+            "final validation: adopted {} build files / {} bytes in {:.3}s",
+            cache.files,
+            cache.bytes,
+            cache.seconds
+        );
         let mut report = ctx.build(None)?;
         let mut certificates = FinalCertificates::default();
         // A source-link proof is a fact about the *final* graph. Establish it

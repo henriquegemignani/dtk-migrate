@@ -11,14 +11,19 @@
 //! whether the thing it measured is still the thing on disk.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     fs::File,
     path::{Component, Path, PathBuf},
-    time::Instant,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::{Instant, SystemTime},
 };
 
 use anyhow::{Context, Result, bail};
 use fs4::fs_std::FileExt;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -74,6 +79,10 @@ pub type Manifest = BTreeMap<String, String>;
 fn reject_link(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("Failed to stat {}", path.display()))?;
+    reject_link_metadata(path, &metadata)
+}
+
+fn reject_link_metadata(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() {
         bail!("Snapshot paths cannot be symlinks or reparse points: {}", path.display());
     }
@@ -88,13 +97,33 @@ fn reject_link(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn checked_dirs() -> &'static Mutex<HashSet<PathBuf>> {
+    static CHECKED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    CHECKED.get_or_init(Default::default)
+}
+
+/// Refuses a link at `path` if one exists there. A directory that passes is
+/// remembered for the life of the process: copying thousands of files under
+/// the same few directories used to repeat the same dozen metadata calls per
+/// file, which on Windows cost more than the copies themselves. Files are
+/// always checked.
+fn check_component(path: &Path) -> Result<()> {
+    if checked_dirs().lock().unwrap().contains(path) {
+        return Ok(());
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else { return Ok(()) };
+    reject_link_metadata(path, &metadata)?;
+    if metadata.is_dir() {
+        checked_dirs().lock().unwrap().insert(path.to_path_buf());
+    }
+    Ok(())
+}
+
 fn check_ancestors(path: &Path) -> Result<()> {
     let mut prefix = PathBuf::new();
     for component in path.components() {
         prefix.push(component);
-        if prefix.exists() {
-            reject_link(&prefix)?;
-        }
+        check_component(&prefix)?;
     }
     Ok(())
 }
@@ -119,9 +148,7 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
     check_ancestors(&current)?;
     for part in relative.split('/') {
         current.push(part);
-        if current.exists() {
-            reject_link(&current)?;
-        }
+        check_component(&current)?;
     }
     Ok(current)
 }
@@ -134,6 +161,45 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+type Stamp = (u64, SystemTime);
+
+fn verified() -> &'static Mutex<HashMap<PathBuf, (Stamp, String)>> {
+    static VERIFIED: OnceLock<Mutex<HashMap<PathBuf, (Stamp, String)>>> = OnceLock::new();
+    VERIFIED.get_or_init(Default::default)
+}
+
+/// Hashes a file of a frozen baseline, remembering the answer for this process.
+///
+/// A baseline is read again for every worker reset and every integration, and
+/// on Windows each read of a small file costs milliseconds, so re-hashing a few
+/// thousand unchanged files for every reset dominated worker set-up. The first
+/// call hashes the file; later calls re-read it only when its size or
+/// modification time differ from what was hashed.
+fn hash_frozen_file(path: &Path) -> Result<String> {
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("Failed to stat {}", path.display()))?;
+    let stamp = (metadata.len(), metadata.modified()?);
+    if let Some((seen, hash)) = verified().lock().unwrap().get(path)
+        && *seen == stamp
+    {
+        return Ok(hash.clone());
+    }
+    let hash = hash_file(path)?;
+    verified().lock().unwrap().insert(path.to_path_buf(), (stamp, hash.clone()));
+    Ok(hash)
+}
+
+/// Records a hash just computed from the file's own bytes, so a freshly
+/// verified copy is not read a second time when it is later checked.
+fn remember_frozen(path: &Path, hash: &str) -> Result<()> {
+    let metadata = std::fs::metadata(path)?;
+    verified()
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), ((metadata.len(), metadata.modified()?), hash.to_string()));
+    Ok(())
+}
+
 /// Hashes the project's actual inputs, including untracked files and populated
 /// submodules.
 pub fn snapshot_manifest(root: &Path) -> Result<Manifest> {
@@ -142,7 +208,7 @@ pub fn snapshot_manifest(root: &Path) -> Result<Manifest> {
     if !root.is_dir() {
         bail!("Snapshot root is not a directory: {}", root.display());
     }
-    let mut manifest = Manifest::new();
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
     let walker = WalkDir::new(&root)
         .follow_links(false)
         .sort_by_file_name()
@@ -167,9 +233,13 @@ pub fn snapshot_manifest(root: &Path) -> Result<Manifest> {
             .to_str()
             .with_context(|| format!("Path is not UTF-8: {}", relative.display()))?
             .replace('\\', "/");
-        manifest.insert(key, hash_file(entry.path())?);
+        files.push((key, entry.path().to_path_buf()));
     }
-    Ok(manifest)
+    // Opening thousands of small files is latency-bound; hash them concurrently.
+    files
+        .into_par_iter()
+        .map(|(key, path)| hash_file(&path).map(|hash| (key, hash)))
+        .collect::<Result<Manifest>>()
 }
 
 /// Compilers are external shared inputs: hash them once for run provenance,
@@ -268,18 +338,20 @@ pub fn copy_snapshot(source: &Path, destination: &Path, manifest: &Manifest) -> 
 
     std::fs::create_dir_all(&destination)?;
     reject_link(&destination)?;
-    for (relative, path) in sources {
+    sources.into_par_iter().try_for_each(|(relative, path)| -> Result<()> {
         let target = safe_path(&destination, &relative)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(&path, &target)
             .with_context(|| format!("Failed to copy {}", path.display()))?;
-        if hash_file(&target)? != manifest[&relative] {
+        let hash = hash_file(&target)?;
+        if hash != manifest[&relative] {
             bail!("Input changed while snapshotting: {relative}");
         }
-    }
-    Ok(())
+        remember_frozen(&target, &hash)?;
+        Ok(())
+    })
 }
 
 /// Returns an existing workspace to the baseline, keeping its build output.
@@ -325,13 +397,14 @@ pub fn reset_workspace_profiled(
     let current = snapshot_manifest(&workspace)?;
     profile.manifest_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
-    for (relative, expected) in manifest {
+    manifest.par_iter().try_for_each(|(relative, expected)| -> Result<()> {
         let source = safe_path(&baseline, relative)?;
-        if &hash_file(&source)? != expected {
+        if &hash_frozen_file(&source)? != expected {
             bail!("Baseline changed: {relative}");
         }
         safe_path(&workspace, relative)?;
-    }
+        Ok(())
+    })?;
     profile.baseline_verify_seconds = started.elapsed().as_secs_f64();
     let started = Instant::now();
     for relative in current.keys() {
@@ -340,27 +413,33 @@ pub fn reset_workspace_profiled(
             profile.removed_files += 1;
         }
     }
-    for (relative, expected) in manifest {
+    let restored_files = AtomicUsize::new(0);
+    let restored_bytes = AtomicU64::new(0);
+    manifest.par_iter().try_for_each(|(relative, expected)| -> Result<()> {
         if current.get(relative) == Some(expected) {
-            continue;
+            return Ok(());
         }
         let target = safe_path(&workspace, relative)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        profile.restored_bytes += std::fs::copy(safe_path(&baseline, relative)?, &target)?;
-        profile.restored_files += 1;
+        restored_bytes
+            .fetch_add(std::fs::copy(safe_path(&baseline, relative)?, &target)?, Ordering::Relaxed);
+        restored_files.fetch_add(1, Ordering::Relaxed);
         // A warm workspace may hold output from a different trial. Restoring
         // an old timestamp would let Ninja treat different input bytes as up
         // to date. A fresh workspace has no such output: preserving the
         // baseline input timestamps lets its validated build cache be seeded.
         if had_build_graph {
-            File::options().write(true).open(&target)?.set_modified(std::time::SystemTime::now())?;
+            File::options().write(true).open(&target)?.set_modified(SystemTime::now())?;
         }
         if &hash_file(&target)? != expected {
             bail!("Baseline changed during reset: {relative}");
         }
-    }
+        Ok(())
+    })?;
+    profile.restored_files = restored_files.into_inner();
+    profile.restored_bytes = restored_bytes.into_inner();
     profile.restore_seconds = started.elapsed().as_secs_f64();
     Ok(profile)
 }
@@ -400,14 +479,29 @@ pub fn seed_build_cache_profiled(
     if !baseline.join("build.ninja").is_file() || !source_build.is_dir() {
         return Ok(profile);
     }
+    copy_build_cache(baseline, workspace, target, &mut profile)?;
+    profile.seconds = started.elapsed().as_secs_f64();
+    Ok(profile)
+}
+
+/// Copies the graph, Ninja's logs and the generated outputs of one version,
+/// overwriting what is there. Files are copied concurrently: Windows spends
+/// milliseconds per small file, and an Echoes cache holds thousands.
+fn copy_build_cache(
+    baseline: &Path,
+    workspace: &Path,
+    target: &str,
+    profile: &mut SeedProfile,
+) -> Result<()> {
+    let source_build = baseline.join("build").join(target);
+    let mut jobs: Vec<(PathBuf, PathBuf)> = Vec::new();
     for name in ["build.ninja", ".ninja_log", ".ninja_deps"] {
         let from = baseline.join(name);
         if from.is_file() {
             reject_link(&from)?;
             let destination = workspace.join(name);
             check_ancestors(&destination)?;
-            profile.bytes += std::fs::copy(&from, destination)?;
-            profile.files += 1;
+            jobs.push((from, destination));
         }
     }
     for entry in WalkDir::new(&source_build).follow_links(false) {
@@ -419,15 +513,68 @@ pub fn seed_build_cache_profiled(
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(&destination)?;
         } else if entry.file_type().is_file() {
-            if let Some(parent) = destination.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            profile.bytes += std::fs::copy(entry.path(), &destination)?;
-            profile.files += 1;
+            jobs.push((entry.path().to_path_buf(), destination));
         } else {
             bail!("Build cache contains a non-file: {}", entry.path().display());
         }
     }
+    let bytes = AtomicU64::new(0);
+    jobs.par_iter().try_for_each(|(from, to)| -> Result<()> {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        bytes.fetch_add(std::fs::copy(from, to)?, Ordering::Relaxed);
+        Ok(())
+    })?;
+    profile.bytes += bytes.into_inner();
+    profile.files += jobs.len();
+    Ok(())
+}
+
+/// Whether an owner's existing build of `target` may warm the first baseline.
+///
+/// Ninja decides what is stale from commands and timestamps, so a leftover
+/// build can only save work, never change a result. The one thing it cannot see
+/// is the compilers themselves being replaced behind unchanged paths, so a
+/// build is imported only when it is newer than every file in the shared
+/// compilers (and exists at all).
+pub fn owner_build_is_current(root: &Path, compilers_root: &Path, target: &str) -> bool {
+    let log = root.join(".ninja_log");
+    let Ok(built) = std::fs::metadata(&log).and_then(|m| m.modified()) else { return false };
+    if !root.join("build.ninja").is_file() || !root.join("build").join(target).is_dir() {
+        return false;
+    }
+    let compilers = compilers_root.join("build/compilers");
+    WalkDir::new(&compilers)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .all(|entry| {
+            entry.metadata().is_ok_and(|m| m.modified().is_ok_and(|modified| modified <= built))
+        })
+}
+
+/// Replaces `workspace`'s generated outputs for `target` with those of a
+/// workspace that already built the same inputs.
+///
+/// Used where a build would otherwise start cold: the next stage's baseline,
+/// and the owner's checkout for final validation. Ninja stays the judge. It
+/// compares each output's command and timestamp with the inputs actually in
+/// `workspace`, so anything that differs is rebuilt and anything that does not
+/// is a no-op. A donor without a graph or outputs changes nothing.
+pub fn adopt_build_cache(donor: &Path, workspace: &Path, target: &str) -> Result<SeedProfile> {
+    let started = Instant::now();
+    let mut profile = SeedProfile::default();
+    if !matches!(Path::new(target).components().collect::<Vec<_>>().as_slice(), [
+        Component::Normal(_)
+    ]) {
+        bail!("Unsafe build cache version: {target}");
+    }
+    if !donor.join("build.ninja").is_file() || !donor.join("build").join(target).is_dir() {
+        return Ok(profile);
+    }
+    copy_build_cache(donor, workspace, target, &mut profile)?;
     profile.seconds = started.elapsed().as_secs_f64();
     Ok(profile)
 }
@@ -521,6 +668,39 @@ mod tests {
         assert_eq!(std::fs::read(worker.join("build/PAL/src/a.o")).unwrap(), b"changed");
         assert_eq!(std::fs::read(baseline.join("build/PAL/src/a.o")).unwrap(), b"original");
         assert!(seed_build_cache(&baseline, &worker, "../PAL").is_err());
+    }
+
+    #[test]
+    fn adopting_a_build_cache_replaces_outputs_and_ignores_a_donor_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let donor = dir.path().join("donor");
+        let owner = dir.path().join("owner");
+        std::fs::create_dir_all(donor.join("build/PAL/src")).unwrap();
+        std::fs::create_dir_all(owner.join("build/PAL/src")).unwrap();
+        std::fs::write(owner.join("build.ninja"), "old graph").unwrap();
+        std::fs::write(owner.join("build/PAL/src/a.o"), "stale").unwrap();
+        let untouched = adopt_build_cache(&donor, &owner, "PAL").unwrap();
+        assert_eq!(untouched.files, 0);
+        assert_eq!(std::fs::read(owner.join("build/PAL/src/a.o")).unwrap(), b"stale");
+        std::fs::write(donor.join("build.ninja"), "graph").unwrap();
+        std::fs::write(donor.join(".ninja_log"), "log").unwrap();
+        std::fs::write(donor.join("build/PAL/src/a.o"), "fresh").unwrap();
+        let adopted = adopt_build_cache(&donor, &owner, "PAL").unwrap();
+        assert_eq!(adopted.files, 3);
+        assert_eq!(std::fs::read(owner.join("build/PAL/src/a.o")).unwrap(), b"fresh");
+        assert_eq!(std::fs::read(owner.join("build.ninja")).unwrap(), b"graph");
+        assert!(adopt_build_cache(&donor, &owner, "../PAL").is_err());
+    }
+
+    #[test]
+    fn a_frozen_baseline_is_rehashed_only_when_its_stat_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "one").unwrap();
+        let first = hash_frozen_file(&file).unwrap();
+        assert_eq!(hash_frozen_file(&file).unwrap(), first);
+        std::fs::write(&file, "three").unwrap();
+        assert_ne!(hash_frozen_file(&file).unwrap(), first);
     }
 
     fn project() -> tempfile::TempDir {
