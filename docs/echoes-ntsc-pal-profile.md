@@ -319,3 +319,11 @@ which builds a two-way string searcher on every call (twice per call, 87 call
 sites). It is the leaf of 15.8 thread-seconds under the load and 9.0 under the
 matcher. `safe_path`'s remaining cost is mutex contention on the validated-directory
 set plus `Path` component parsing.
+
+After replacing the `trim_start_matches("0x")` calls with a byte-prefix strip
+(`parse_hex` and the coverage analysis) and making the validated-directory set a
+`RwLock` with one lookup per directory, the same run takes 190 s (was 243 s):
+coverage evidence generation 29.9 → 15.1 s, validation 12.3 → 5.3 s, the discover
+matcher 27.4 → 16.3 s, discover's evidence load 11.6 → 5.7 s. The stack samples of that
+run were not written (the sampler produced an empty file; not yet explained), so its
+wall-clock partition is not available.

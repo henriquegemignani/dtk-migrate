@@ -1435,10 +1435,16 @@ fn layout_boundary_support(
 
     let mut groups: BTreeMap<&str, Vec<&LayoutShiftAnchor>> = BTreeMap::new();
     for anchor in unit.layout_shift_anchors.iter().filter(|anchor| anchor.eligible) {
-        let anchor_start = u32::from_str_radix(anchor.target_address.trim_start_matches("0x"), 16)
-            .expect("coverage addresses are generated as hexadecimal");
-        let anchor_end = u32::from_str_radix(anchor.target_end.trim_start_matches("0x"), 16)
-            .expect("coverage addresses are generated as hexadecimal");
+        let anchor_start = u32::from_str_radix(
+            crate::analysis::helpers::without_hex_prefix(&anchor.target_address),
+            16,
+        )
+        .expect("coverage addresses are generated as hexadecimal");
+        let anchor_end = u32::from_str_radix(
+            crate::analysis::helpers::without_hex_prefix(&anchor.target_end),
+            16,
+        )
+        .expect("coverage addresses are generated as hexadecimal");
         if anchor.section == section && anchor_start >= start && anchor_end <= end {
             groups.entry(&anchor.support_group).or_default().push(anchor);
         }
@@ -1448,24 +1454,36 @@ fn layout_boundary_support(
         .into_iter()
         .filter_map(|(group, mut anchors)| {
             anchors.sort_by_key(|anchor| {
-                u32::from_str_radix(anchor.source_address.trim_start_matches("0x"), 16)
-                    .expect("coverage addresses are generated as hexadecimal")
+                u32::from_str_radix(
+                    crate::analysis::helpers::without_hex_prefix(&anchor.source_address),
+                    16,
+                )
+                .expect("coverage addresses are generated as hexadecimal")
             });
             let source_addresses: Vec<u32> = anchors
                 .iter()
                 .map(|anchor| {
-                    u32::from_str_radix(anchor.source_address.trim_start_matches("0x"), 16)
-                        .expect("coverage addresses are generated as hexadecimal")
+                    u32::from_str_radix(
+                        crate::analysis::helpers::without_hex_prefix(&anchor.source_address),
+                        16,
+                    )
+                    .expect("coverage addresses are generated as hexadecimal")
                 })
                 .collect();
             let target_ranges: Vec<(u32, u32)> = anchors
                 .iter()
                 .map(|anchor| {
                     (
-                        u32::from_str_radix(anchor.target_address.trim_start_matches("0x"), 16)
-                            .expect("coverage addresses are generated as hexadecimal"),
-                        u32::from_str_radix(anchor.target_end.trim_start_matches("0x"), 16)
-                            .expect("coverage addresses are generated as hexadecimal"),
+                        u32::from_str_radix(
+                            crate::analysis::helpers::without_hex_prefix(&anchor.target_address),
+                            16,
+                        )
+                        .expect("coverage addresses are generated as hexadecimal"),
+                        u32::from_str_radix(
+                            crate::analysis::helpers::without_hex_prefix(&anchor.target_end),
+                            16,
+                        )
+                        .expect("coverage addresses are generated as hexadecimal"),
                     )
                 })
                 .collect();
@@ -1817,11 +1835,16 @@ fn direct_anchor_count_for_owner_revision(
     unit.anchors
         .iter()
         .filter(|anchor| {
-            let anchor_start =
-                u32::from_str_radix(anchor.target_address.trim_start_matches("0x"), 16)
-                    .expect("coverage addresses are generated as hexadecimal");
-            let anchor_end = u32::from_str_radix(anchor.target_end.trim_start_matches("0x"), 16)
-                .expect("coverage addresses are generated as hexadecimal");
+            let anchor_start = u32::from_str_radix(
+                crate::analysis::helpers::without_hex_prefix(&anchor.target_address),
+                16,
+            )
+            .expect("coverage addresses are generated as hexadecimal");
+            let anchor_end = u32::from_str_radix(
+                crate::analysis::helpers::without_hex_prefix(&anchor.target_end),
+                16,
+            )
+            .expect("coverage addresses are generated as hexadecimal");
             anchor.section == section
                 && anchor_start >= start
                 && anchor_end <= end
@@ -2274,12 +2297,16 @@ fn add_boundary_sequence_evidence(
                 .into_iter()
                 .flat_map(|unit| unit.anchors.iter())
                 .filter(|anchor| {
-                    let anchor_start =
-                        u32::from_str_radix(anchor.target_address.trim_start_matches("0x"), 16)
-                            .expect("coverage addresses are generated as hexadecimal");
-                    let anchor_end =
-                        u32::from_str_radix(anchor.target_end.trim_start_matches("0x"), 16)
-                            .expect("coverage addresses are generated as hexadecimal");
+                    let anchor_start = u32::from_str_radix(
+                        crate::analysis::helpers::without_hex_prefix(&anchor.target_address),
+                        16,
+                    )
+                    .expect("coverage addresses are generated as hexadecimal");
+                    let anchor_end = u32::from_str_radix(
+                        crate::analysis::helpers::without_hex_prefix(&anchor.target_end),
+                        16,
+                    )
+                    .expect("coverage addresses are generated as hexadecimal");
                     anchor_start >= start
                         && anchor_end <= end
                         && anchor.size >= MIN_SEQUENCE_ANCHOR_BYTES
@@ -2342,12 +2369,16 @@ fn add_boundary_sequence_evidence(
                     |support| {
                         (
                             u32::from_str_radix(
-                                support.aligned_target_start.trim_start_matches("0x"),
+                                crate::analysis::helpers::without_hex_prefix(
+                                    &support.aligned_target_start,
+                                ),
                                 16,
                             )
                             .expect("coverage addresses are generated as hexadecimal"),
                             u32::from_str_radix(
-                                support.aligned_target_end.trim_start_matches("0x"),
+                                crate::analysis::helpers::without_hex_prefix(
+                                    &support.aligned_target_end,
+                                ),
                                 16,
                             )
                             .expect("coverage addresses are generated as hexadecimal"),

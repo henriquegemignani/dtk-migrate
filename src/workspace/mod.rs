@@ -15,7 +15,7 @@ use std::{
     fs::File,
     path::{Component, Path, PathBuf},
     sync::{
-        Mutex, OnceLock,
+        Mutex, OnceLock, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Instant, SystemTime},
@@ -97,10 +97,15 @@ fn reject_link_metadata(path: &Path, metadata: &std::fs::Metadata) -> Result<()>
     Ok(())
 }
 
-fn checked_dirs() -> &'static Mutex<HashSet<PathBuf>> {
-    static CHECKED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+/// Read by every thread for every file, written once per directory.
+fn checked_dirs() -> &'static RwLock<HashSet<PathBuf>> {
+    static CHECKED: OnceLock<RwLock<HashSet<PathBuf>>> = OnceLock::new();
     CHECKED.get_or_init(Default::default)
 }
+
+/// Whether `path` passed the link check earlier. A directory is only recorded
+/// after every ancestor of it passed in the same walk, so a hit covers them all.
+fn dir_checked(path: &Path) -> bool { checked_dirs().read().unwrap().contains(path) }
 
 /// Refuses a link at `path` if one exists there. A directory that passes is
 /// remembered for the life of the process: copying thousands of files under
@@ -108,18 +113,23 @@ fn checked_dirs() -> &'static Mutex<HashSet<PathBuf>> {
 /// file, which on Windows cost more than the copies themselves. Files are
 /// always checked.
 fn check_component(path: &Path) -> Result<()> {
-    if checked_dirs().lock().unwrap().contains(path) {
+    if dir_checked(path) {
         return Ok(());
     }
     let Ok(metadata) = std::fs::symlink_metadata(path) else { return Ok(()) };
     reject_link_metadata(path, &metadata)?;
     if metadata.is_dir() {
-        checked_dirs().lock().unwrap().insert(path.to_path_buf());
+        checked_dirs().write().unwrap().insert(path.to_path_buf());
     }
     Ok(())
 }
 
 fn check_ancestors(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && dir_checked(parent)
+    {
+        return check_component(path);
+    }
     let mut prefix = PathBuf::new();
     for component in path.components() {
         prefix.push(component);
@@ -143,6 +153,15 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
         || relative.split('/').any(|part| part.contains(':'));
     if bad {
         bail!("Unsafe manifest path: {relative}");
+    }
+    let (directory, name) = relative.rsplit_once('/').unwrap_or(("", relative));
+    // One lookup covers the whole directory chain once any file under it has
+    // been resolved; only the file itself is checked every time.
+    let parent = if directory.is_empty() { root.to_path_buf() } else { root.join(directory) };
+    if dir_checked(&parent) {
+        let file = parent.join(name);
+        check_component(&file)?;
+        return Ok(file);
     }
     let mut current = root.to_path_buf();
     check_ancestors(&current)?;

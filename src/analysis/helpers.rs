@@ -659,6 +659,16 @@ pub fn unresolved_clusters(
     clusters
 }
 
+/// `value` without any leading `0x`. Equivalent to `trim_start_matches("0x")`,
+/// which builds a substring searcher on every call and was the hottest line of
+/// the coverage analysis.
+pub fn without_hex_prefix(mut value: &str) -> &str {
+    while let Some(rest) = value.strip_prefix("0x") {
+        value = rest;
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

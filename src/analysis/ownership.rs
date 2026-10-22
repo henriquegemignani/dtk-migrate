@@ -3970,8 +3970,18 @@ fn vtable_reference_sites(
 
 fn hex(value: u32) -> String { format!("{value:#010X}") }
 
+/// Parses a hex number with any run of `0x` and then `0X` prefixes. Prefix
+/// stripping is by byte comparison: a string pattern builds a substring
+/// searcher on every call, which was the hottest line of the observation load.
 fn parse_hex(value: &str) -> u32 {
-    u32::from_str_radix(value.trim_start_matches("0x").trim_start_matches("0X"), 16).unwrap_or(0)
+    let mut digits = value;
+    while let Some(rest) = digits.strip_prefix("0x") {
+        digits = rest;
+    }
+    while let Some(rest) = digits.strip_prefix("0X") {
+        digits = rest;
+    }
+    u32::from_str_radix(digits, 16).unwrap_or(0)
 }
 
 #[cfg(test)]
