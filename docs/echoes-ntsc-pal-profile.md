@@ -288,3 +288,34 @@ split inside (`build_coverage_report` is ~11 s of one thread; so is
 fails in this worktree because `tests/fixtures/ownership/baseline.splits.txt` is
 LF in the index and CRLF on disk (autocrlf), so its SHA-256 differs; it is
 unrelated to these changes.
+
+## Traced run on latest main (243 s)
+
+Echoes at `origin/main` (7319a60ce), `configure.py --portable-build-ninja
+--no-compile-commands`, both baselines built first (NTSC 82 s, PAL 65 s). One full
+NTSC → PAL run under `DTK_MIGRATE_PROFILE` (stack sampler at ~9 Hz effective, every
+thread, plus a span per child process and per phase): 243 s wall, 239–243 s across
+three runs. Every sampled interval is counted once, in this priority: a child process
+running → named analysis category → deepest project frame → idle.
+
+| wall seconds | share | what |
+|---:|---:|---|
+| 57.8 | 23.8% | ninja in worker workspaces (62 invocations, 181 s summed over 6 lanes) |
+| 46.2 | 19.0% | `ObservationIndex` load/validate, single-threaded, 4 loads of 9–12 s each |
+| 30.7 | 12.7% | matcher outside its index load (coverage and discover each run it) |
+| 27.0 | 11.1% | workspace reset/copy (`safe_path`, snapshot, build cache seeding) |
+| 21.8 | 9.0% | derive scoring (`objdiff` diff of compiled units) |
+| 15.1 | 6.2% | no thread running project code (waiting on pipes/process start) |
+| 13.5 / 13.3 / 3.8 | 5.6 / 5.5 / 1.6% | ninja in integration / baseline / owner workspaces |
+| 1.9 | 0.8% | alternatives |
+
+Per trial (4 measured): `ninja` 5.4–5.9 s = `dtk split` 2.4 + `configure.py`
+regeneration by ninja ~0.5 + link ~2.3. The extra `configure.py` run before each trial
+is gone, and `compile_commands.json` is skipped inside dtk-migrate's own configure runs.
+
+Inline-aware sampling of the load shows the hot line: `parse_hex`
+(`src/analysis/ownership.rs`) calls `trim_start_matches("0x")` with a string pattern,
+which builds a two-way string searcher on every call (twice per call, 87 call
+sites). It is the leaf of 15.8 thread-seconds under the load and 9.0 under the
+matcher. `safe_path`'s remaining cost is mutex contention on the validated-directory
+set plus `Path` component parsing.

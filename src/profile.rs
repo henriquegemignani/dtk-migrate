@@ -114,6 +114,7 @@ mod sampler {
                     Thread32Next,
                 },
             },
+            LibraryLoader::GetModuleHandleW,
             Threading::{
                 GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenThread,
                 ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
@@ -244,12 +245,22 @@ mod sampler {
             SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
             SymInitializeW(process, std::ptr::null(), 1);
             const NAME: usize = 512;
+            // Addresses inside this executable are written as `exe+0xRVA` and
+            // resolved afterwards against its PDB; dbghelp does not find the
+            // Rust PDB reliably.
+            let base = GetModuleHandleW(std::ptr::null()) as u64;
+            let e_lfanew = *((base + 0x3c) as *const u32) as u64;
+            let size = *((base + e_lfanew + 0x50) as *const u32) as u64;
             let mut buffer = vec![0u8; std::mem::size_of::<SYMBOL_INFOW>() + NAME * 2];
             for (address, leaf) in addresses {
                 let info = buffer.as_mut_ptr() as *mut SYMBOL_INFOW;
                 (*info).SizeOfStruct = std::mem::size_of::<SYMBOL_INFOW>() as u32;
                 (*info).MaxNameLen = NAME as u32;
                 // Return addresses point past the call; look up the call itself.
+                if address >= base && address < base + size {
+                    names.insert(address, format!("exe+0x{:x}", address - base - u64::from(!leaf)));
+                    continue;
+                }
                 let lookup = if leaf { address } else { address - 1 };
                 let mut displacement = 0u64;
                 let name = if SymFromAddrW(process, lookup, &mut displacement, info) != 0 {

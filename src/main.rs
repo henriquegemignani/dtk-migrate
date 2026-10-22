@@ -76,7 +76,10 @@ fn main() {
         init!(format.without_time());
     }
 
-    dtk_migrate::profile::init();
+    // Ninja re-enters this binary as the configure hook; only the run itself is traced.
+    if !matches!(args.command, Command::ConfigureHook(_)) {
+        dtk_migrate::profile::init();
+    }
     let result = match args.command {
         Command::Run(c_args) => cli::run::run(c_args),
         Command::Match(c_args) => cli::match_cmd::run(c_args),
