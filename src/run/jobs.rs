@@ -276,7 +276,7 @@ pub fn execute_coverage(
                         let output = jobs_dir
                             .join(format!("{:05}", task.batch))
                             .join("trials")
-                            .join(&task.path);
+                            .join(trial_dir_name(&task.path));
                         let result = (|| {
                             write_json(&output.join("task.json"), &task)?;
                             std::fs::write(output.join("lane.txt"), lane.to_string())?;
@@ -798,6 +798,20 @@ fn run_one(
     accept_stored(&result, spec).context("The stage returned candidates it was not given")?;
     write_json(&result_path, &result)?;
     Ok(result)
+}
+
+/// Directory name for a trial path. The logical path grows with every bisection
+/// and fallback step, so long ones are cut and disambiguated by a hash to stay
+/// below the filesystem's component limit.
+fn trial_dir_name(path: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    const LIMIT: usize = 120;
+    if path.len() <= LIMIT {
+        return path.to_string();
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{}-{:016x}", &path[..LIMIT - 17], hasher.finish())
 }
 
 #[cfg(test)]
