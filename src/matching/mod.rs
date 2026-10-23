@@ -37,6 +37,7 @@ use crate::{
 mod cache;
 pub mod data_evidence;
 pub mod proposals;
+pub mod relocation_pairing;
 pub mod report;
 
 pub(crate) use cache::MatchingCache;

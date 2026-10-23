@@ -20,7 +20,7 @@ Names target symbols by comparing compiled source and target objects, and by
 validating binary-matcher candidates with objdiff against reference-binary and
 available compiled-source functions. The latter works before target splits
 exist. Decisive disagreements block automatic renames. See
-[symbol derivation](symbol_derivation.md) for the four methods and how they are
+[symbol derivation](symbol_derivation.md) for the five methods and how they are
 reconciled.
 
 A rename changes no bytes, so the retail hash cannot tell a right name from a
@@ -757,6 +757,32 @@ seam, or give the expected unit a range in that section without one starting
 at the seam. Fed-back lines go where dtk writes their section in the unit's
 body (`.init`, `extab`, `extabindex`, `.text`, `.ctors`, `.dtors`, `.rodata`,
 `.data`, `.bss`, `.sdata`, `.sbss`, `.sdata2`, `.sbss2`, then others).
+
+**Relocation-paired ranges.** A unit that is refused with a `retail-mismatch`
+(the link succeeded and the bytes differ) is also fed back, for the case where
+the source object has a data section the target's split does not: the source's
+copy is linked in beside the original data still sitting in the gap, and every
+address after it moves. Verify reads the compiled source object and the object
+extracted from the target as the failed link left them, and pairs their
+functions whose instructions are identical once relocated fields are cleared and
+whose relocations agree in number, offset and kind
+([relocation pairing](symbol_derivation.md#data-relocation)). A source section
+all of whose references share one delta from a source offset to a target
+address fills one contiguous target range, `start` to `start` plus the
+section's size rounded up to its alignment. The range is proposed only for a
+section among `.rodata`, `.data`, `.sdata`, `.sdata2`, `.bss`, `.sbss` and
+`.sbss2` that the unit's target split has no range of, that overlaps no other
+split of that section, that starts on a word, and that keeps every certified
+seam. It carries the attributes of the unit's source split of that section. With
+the target DOL available, the range is proposed only if the section's bytes,
+and the zero padding after them, equal the DOL's apart from the fields
+relocations fill in; a section whose references use different deltas (the
+target pooled its constants in a different order) gets no range. As for the
+gap duplicates above, the range is kept only if the unit then links from
+source and matches retail, up to the same three rounds, and the evidence
+(`pairing` in the stage's `applied` record) lists each paired section with its
+reference count and whether bytes were compared (`equal`, `unchecked` when no
+DOL was readable, `not-applicable` for uninitialized data).
 
 ## What a rejection is not
 

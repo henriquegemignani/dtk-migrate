@@ -1,4 +1,4 @@
-//! The four methods that propose a name for a target symbol.
+//! The methods that propose a name for a target symbol.
 //!
 //! Strongest first, by what each one actually observes:
 //!
@@ -7,6 +7,8 @@
 //! - **call-site** aligns the relocations inside a function whose name already
 //!   agrees, which names whatever it calls — including in units with no source
 //!   of their own, since a call site names its callee.
+//! - **data-relocation** pairs the data that two identical function bodies
+//!   reference, which names data symbols the other methods cannot reach.
 //! - **function-position** names a placeholder sitting between two agreeing
 //!   names.
 //! - **misplaced-name** asks the opposite question: whether a name the target
@@ -21,10 +23,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::derive::{
-    body::{self, Ranked},
-    objects::{Compiled, Function, is_derivable, is_usable_source_name},
-    ordering,
+use crate::{
+    derive::{
+        body::{self, Ranked},
+        objects::{Compiled, Function, is_derivable, is_usable_source_name},
+        ordering,
+    },
+    matching::relocation_pairing::{self, BytesCheck, DolImage, TargetIndex},
 };
 
 /// How sure a proposal is, and therefore what a run will do with it.
@@ -330,6 +335,49 @@ pub fn positional(source: &Compiled, target: &Compiled, unit: &str) -> Vec<Propo
             proposal.functions = Some(function_count);
             proposals.push(proposal);
         }
+    }
+    proposals
+}
+
+/// Renames implied by data the identical functions of a unit reference.
+///
+/// Where a source function and a target function have the same bytes apart
+/// from relocated fields, the n-th relocation of one and of the other name the
+/// same object (see [`relocation_pairing`]). A placeholder the target
+/// references there is the source's symbol, however many other symbols the
+/// unit has and wherever the unit's own data sits. This is stronger than
+/// `call-site`, which aligns relocation names and needs the function to be
+/// anchored by name first.
+pub fn by_data_relocations(
+    unit: &str,
+    target: &Compiled,
+    source: &Compiled,
+    index: &TargetIndex,
+    image: Option<&DolImage>,
+) -> Vec<Proposal> {
+    let pairing = relocation_pairing::pair(&source.object, &target.object, index, image);
+    let mut proposals = Vec::new();
+    for symbol in &pairing.symbols {
+        if !is_derivable(&symbol.target) || !is_usable_source_name(&symbol.source) {
+            continue;
+        }
+        // Every instruction that touches the object is one observation, and
+        // identical contents corroborate them; a single reference to an
+        // object with no contents to compare is the weakest of these.
+        let tier = if symbol.bytes == BytesCheck::Equal
+            || (symbol.references >= 2 && symbol.functions >= 2)
+        {
+            Tier::Confident
+        } else {
+            Tier::Probable
+        };
+        let mut proposal =
+            Proposal::new(&symbol.target, &symbol.source, unit, "data-relocation", tier);
+        proposal.signal = Some(format!(
+            "{} reference(s) from {} identical function(s) of {}, bytes {:?}",
+            symbol.references, symbol.functions, pairing.functions, symbol.bytes
+        ));
+        proposals.push(proposal);
     }
     proposals
 }

@@ -22,7 +22,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     build::context::{BuildContext, ValidationError, is_trial_failure},
-    matching::data_evidence::{LayoutIndex, LayoutSymbol, adjacent_span, layout_symbols},
+    derive::objects::Compiled,
+    matching::{
+        data_evidence::{LayoutIndex, LayoutSymbol, adjacent_span, layout_symbols},
+        relocation_pairing::{DolImage, PairedSection, Pairing, TargetIndex},
+    },
     project::{
         configure_py::Configure,
         link_order::cyclic_units,
@@ -33,7 +37,7 @@ use crate::{
     stages::{
         Applied, Candidate, DataSeam, Event, MutationScope, Outcome, Prepared, Selections, Stage,
         bisect_pretested_groups,
-        refusal::{LinkerDiagnosticKind, Refusal},
+        refusal::{Kind, LinkerDiagnosticKind, Refusal},
     },
 };
 
@@ -58,6 +62,10 @@ pub struct DataFeedback {
     /// The `splits.txt` lines added to that unit. Not `lines`: benchmark
     /// reads a record's `lines` as a coverage body.
     pub data_lines: Vec<String>,
+    /// The source sections whose ranges came from relocation pairing, with
+    /// what was compared. Empty for ranges the linker's own diagnostics named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pairing: Vec<PairedSection>,
 }
 
 impl Stage for Verify {
@@ -346,6 +354,11 @@ struct FeedbackInputs {
     split_units: BTreeMap<String, String>,
     /// Jump-table seams an earlier stage certified.
     seams: Vec<DataSeam>,
+    /// Verify's source name to the unit's compiled source object and the
+    /// object extracted from the target, DOL units only.
+    objects: BTreeMap<String, (std::path::PathBuf, std::path::PathBuf)>,
+    /// The target's initialized bytes, when its DOL can be read.
+    image: Option<DolImage>,
 }
 
 impl Loaded {
@@ -362,6 +375,19 @@ impl Loaded {
         let splits = Owned::take(&path)?;
         let accepted = Splits::parse(&String::from_utf8(splits.original().to_vec())?)?;
         let objdiff = ObjdiffConfig::read(&ctx.root.join("objdiff.json"))?;
+        let objects = objdiff
+            .units
+            .iter()
+            .filter_map(|unit| {
+                let name = strip_source_root(unit.metadata.source_path.as_deref()?);
+                let (base, target) = (unit.base_path.as_deref()?, unit.target_path.as_deref()?);
+                if module_of(target, &ctx.target).is_some() {
+                    return None;
+                }
+                Some((name.to_string(), (ctx.root.join(base), ctx.root.join(target))))
+            })
+            .collect();
+        let image = DolImage::of_version(&ctx.root, &ctx.target);
         let split_units = objdiff
             .units
             .iter()
@@ -403,6 +429,8 @@ impl Loaded {
             source_blocks: Splits::read(&config(&ctx.source).join("splits.txt"))?.blocks,
             split_units,
             seams: permitted.jump_table_seams.iter().cloned().collect(),
+            objects,
+            image,
         };
         Ok(Some(Self { baseline_cycles: cyclic_units(&accepted.blocks), splits, accepted, inputs }))
     }
@@ -509,7 +537,7 @@ impl LinkFeedback {
     ) -> Result<()> {
         let pending = self.pending.take();
         let any_accepted = !self.added.is_empty();
-        let split_unit = if Refusal::from_error(&error).gap_duplicates().next().is_none() {
+        let split_unit = if !feedable(&Refusal::from_error(&error)) {
             None
         } else if self.load(ctx)?.is_some() {
             let loaded = self.loaded.as_ref().and_then(Option::as_ref).unwrap();
@@ -523,17 +551,22 @@ impl LinkFeedback {
             }
             return Err(error);
         };
-        let (mut staged, mut lines) = match pending {
-            Some((staged, mut carried)) => (
-                staged,
-                carried.remove(name).map(|feedback| feedback.data_lines).unwrap_or_default(),
-            ),
-            None => (self.loaded().accepted.clone(), Vec::new()),
+        let (mut staged, mut lines, mut pairing) = match pending {
+            Some((staged, mut carried)) => {
+                let carried = carried.remove(name);
+                let (lines, pairing) =
+                    carried.map(|feedback| (feedback.data_lines, feedback.pairing)).unzip();
+                (staged, lines.unwrap_or_default(), pairing.unwrap_or_default())
+            }
+            None => (self.loaded().accepted.clone(), Vec::new(), Vec::new()),
         };
         for round in 1..=FEEDBACK_ROUNDS {
             let refusal = Refusal::from_error(&error);
-            let derived =
-                derive_ranges(&self.loaded().inputs, &split_unit, &staged.blocks, &refusal);
+            let inputs = &self.loaded().inputs;
+            let mut derived = derive_ranges(inputs, &split_unit, &staged.blocks, &refusal);
+            if derived.is_empty() {
+                derived = derive_paired_ranges(inputs, name, &split_unit, &staged.blocks, &refusal);
+            }
             if derived.is_empty() {
                 break;
             }
@@ -558,13 +591,17 @@ impl LinkFeedback {
                     .because(format!("round {round}: linking again with {reasons}")),
             );
             let loaded = self.loaded();
+            pairing.extend(derived.iter().filter_map(|range| range.paired.clone()));
             lines.extend(derived.into_iter().map(|range| range.line));
             loaded.splits.write(staged.render().as_bytes())?;
             match validate(ctx, checked, true, None) {
                 Ok(_) => {
                     loaded.accepted = staged;
-                    self.added
-                        .insert(name.to_string(), DataFeedback { split_unit, data_lines: lines });
+                    self.added.insert(name.to_string(), DataFeedback {
+                        split_unit,
+                        data_lines: lines,
+                        pairing,
+                    });
                     return Ok(());
                 }
                 Err(next) if is_trial_failure(&next) => error = next,
@@ -681,6 +718,8 @@ struct DerivedRange {
     reason: String,
     /// The range is one symbol's own extent rather than a mapped source split.
     own_extent: bool,
+    /// The relocation pairing the range came from.
+    paired: Option<PairedSection>,
 }
 
 /// `auto_09_8041BEB8_sdata.o` names a gap object: the section `.sdata` and
@@ -878,11 +917,117 @@ fn derive_ranges(
                 start,
                 end,
                 own_extent,
+                paired: None,
             });
             break;
         }
     }
     coalesce(derived)
+}
+
+/// Whether a refusal is one that data ranges might cure: a duplicate left in
+/// an unsplit gap, or a checksum that no longer matches because a section the
+/// source object has sits in the gap beside the original.
+fn feedable(refusal: &Refusal) -> bool {
+    refusal.gap_duplicates().next().is_some() || refusal.kind == Kind::RetailMismatch
+}
+
+/// The sections whose target range relocation pairing may propose.
+const PAIRED_SECTIONS: [&str; 7] =
+    [".rodata", ".data", ".sdata", ".sdata2", ".bss", ".sbss", ".sbss2"];
+
+/// The target ranges the unit's identical functions imply for sections it has
+/// no range of, when its link produced the wrong bytes.
+///
+/// The compiled source object and the object extracted from the target are
+/// read again here, as the failed link left them. Every function whose bytes
+/// agree pairs each of its relocations with its twin's, and a source section
+/// whose references all share one delta from its own offsets to target
+/// addresses fills a single range there (see [`Pairing`]). Where the target's
+/// bytes could be read they are equal to the source's.
+fn derive_paired_ranges(
+    inputs: &FeedbackInputs,
+    name: &str,
+    unit: &str,
+    target_blocks: &IndexMap<String, Vec<String>>,
+    refusal: &Refusal,
+) -> Vec<DerivedRange> {
+    if refusal.kind != Kind::RetailMismatch {
+        return Vec::new();
+    }
+    let Some((base, target)) = inputs.objects.get(name) else { return Vec::new() };
+    let (Ok(source), Ok(target)) = (
+        Compiled::read(base, objdiff_core::diff::DiffSide::Base),
+        Compiled::read(target, objdiff_core::diff::DiffSide::Target),
+    ) else {
+        return Vec::new();
+    };
+    let index = TargetIndex::new(&inputs.target_symbols);
+    let pairing = crate::matching::relocation_pairing::pair(
+        &source.object,
+        &target.object,
+        &index,
+        inputs.image.as_ref(),
+    );
+    ranges_from_pairing(inputs, unit, target_blocks, &pairing)
+}
+
+fn ranges_from_pairing(
+    inputs: &FeedbackInputs,
+    unit: &str,
+    target_blocks: &IndexMap<String, Vec<String>>,
+    pairing: &Pairing,
+) -> Vec<DerivedRange> {
+    let body = target_blocks.get(unit).map(Vec::as_slice).unwrap_or_default();
+    let occupied: Vec<_> = target_blocks
+        .values()
+        .flatten()
+        .filter_map(|line| parse_range(line))
+        .map(|range| (range.section, range.start, range.end))
+        .collect();
+    let mut derived: Vec<DerivedRange> = Vec::new();
+    for paired in &pairing.sections {
+        let section = paired.section.as_str();
+        if !PAIRED_SECTIONS.contains(&section)
+            || body.iter().filter_map(|line| parse_range(line)).any(|r| r.section == section)
+        {
+            continue;
+        }
+        let (start, end) = (paired.start, paired.end);
+        let free = start % 4 == 0
+            && start < end
+            && !occupied.iter().any(|(s, a, b)| s == section && start < *b && *a < end)
+            && keeps_seams(&inputs.seams, unit, section, start, |at| starts_at(body, section, at));
+        if !free {
+            continue;
+        }
+        let suffix = inputs
+            .source_blocks
+            .get(unit)
+            .into_iter()
+            .flatten()
+            .find(|line| parse_range(line).is_some_and(|range| range.section == section))
+            .map(|line| entry_suffix(line))
+            .unwrap_or_default();
+        let bytes = serde_json::to_value(paired.bytes)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_default();
+        derived.push(DerivedRange {
+            line: entry_line(section, start, end, &suffix),
+            reason: format!(
+                "{section} {start:#010X}..{end:#010X} paired through the relocations of {} \
+                 identical functions ({} references, bytes {bytes})",
+                pairing.functions, paired.references,
+            ),
+            section: section.to_string(),
+            start,
+            end,
+            own_extent: false,
+            paired: Some(paired.clone()),
+        });
+    }
+    derived
 }
 
 /// Joins own-extent ranges that touch and share their attributes, so a unit
@@ -1154,6 +1299,8 @@ mod tests {
             ]),
             split_units: BTreeMap::new(),
             seams: Vec::new(),
+            objects: BTreeMap::new(),
+            image: None,
         }
     }
 
@@ -1313,6 +1460,7 @@ mod tests {
             record: serde_json::to_value(DataFeedback {
                 split_unit: split_unit.into(),
                 data_lines: lines.to_vec(),
+                pairing: Vec::new(),
             })
             .unwrap(),
         }
@@ -1346,6 +1494,7 @@ mod tests {
         let fits = DataFeedback {
             split_unit: "seq.c".into(),
             data_lines: vec![entry_line(".sbss", 0x1100, 0x1108, "")],
+            pairing: Vec::new(),
         };
         let (staged, lines) = stage_lines(&accepted, &cyclic_units(&accepted.blocks), &[], vec![(
             "seq.c",
@@ -1359,6 +1508,7 @@ mod tests {
                 entry_line(".sbss", 0x1100, 0x1108, ""),
                 entry_line(".sbss", 0x1108, 0x1118, ""),
             ],
+            pairing: Vec::new(),
         };
         let (staged, lines) =
             stage_lines(&accepted, &cyclic_units(&accepted.blocks), &[], vec![("seq.c", crowded)]);
@@ -1424,6 +1574,7 @@ mod tests {
         let carried = DataFeedback {
             split_unit: "seq.c".into(),
             data_lines: vec![entry_line(".sbss", 0x1108, 0x1118, "")],
+            pairing: Vec::new(),
         };
         let baseline = cyclic_units(&accepted.blocks);
         let (_, lines) = stage_lines(&accepted, &baseline, &[seam(0x1108, "other.c")], vec![(
@@ -1434,5 +1585,109 @@ mod tests {
         let (_, lines) =
             stage_lines(&accepted, &baseline, &[seam(0x1108, "seq.c")], vec![("seq.c", carried)]);
         assert_eq!(lines.len(), 1);
+    }
+
+    fn paired(section: &str, start: u32, end: u32) -> PairedSection {
+        PairedSection {
+            section: section.into(),
+            start,
+            end,
+            source_size: end - start,
+            align: 8,
+            references: 3,
+            bytes: crate::matching::relocation_pairing::BytesCheck::Equal,
+        }
+    }
+
+    fn pairing(sections: Vec<PairedSection>) -> Pairing {
+        Pairing { functions: 4, sections, ..Pairing::default() }
+    }
+
+    #[test]
+    fn a_paired_section_the_unit_lacks_becomes_its_range() {
+        let target = blocks(&[("seq.c", &[]), ("next.c", &[(0x1200, 0x1208)])]);
+        let found = ranges_from_pairing(
+            &inputs(0x1100),
+            "seq.c",
+            &target,
+            &pairing(vec![paired(".sdata2", 0x8042_1000, 0x8042_1010)]),
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].line, entry_line(".sdata2", 0x8042_1000, 0x8042_1010, ""));
+        assert!(found[0].reason.contains("4 identical functions"), "{}", found[0].reason);
+        assert_eq!(found[0].paired.as_ref().map(|p| p.references), Some(3));
+    }
+
+    #[test]
+    fn a_section_the_unit_already_has_is_left_alone() {
+        let mut target = blocks(&[("seq.c", &[])]);
+        target.get_mut("seq.c").unwrap().push(entry_line(".sdata2", 0x8042_2000, 0x8042_2010, ""));
+        let found = ranges_from_pairing(
+            &inputs(0x1100),
+            "seq.c",
+            &target,
+            &pairing(vec![paired(".sdata2", 0x8042_1000, 0x8042_1010)]),
+        );
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_paired_range_overlapping_another_unit_is_not_proposed() {
+        let mut target = blocks(&[("seq.c", &[]), ("next.c", &[])]);
+        target.get_mut("next.c").unwrap().push(entry_line(".sdata2", 0x8042_1008, 0x8042_1020, ""));
+        let found = ranges_from_pairing(
+            &inputs(0x1100),
+            "seq.c",
+            &target,
+            &pairing(vec![paired(".sdata2", 0x8042_1000, 0x8042_1010)]),
+        );
+        assert!(found.is_empty());
+        // The same section in another section name is free.
+        let found = ranges_from_pairing(
+            &inputs(0x1100),
+            "seq.c",
+            &target,
+            &pairing(vec![paired(".rodata", 0x8042_1000, 0x8042_1010)]),
+        );
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn only_data_sections_are_paired_into_ranges() {
+        let target = blocks(&[("seq.c", &[])]);
+        let found = ranges_from_pairing(
+            &inputs(0x1100),
+            "seq.c",
+            &target,
+            &pairing(vec![paired(".ctors", 0x8042_1000, 0x8042_1010)]),
+        );
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_range_keeps_the_source_splits_attributes() {
+        let mut inputs = inputs(0x1100);
+        inputs
+            .source_blocks
+            .get_mut("seq.c")
+            .unwrap()
+            .push(entry_line(".sdata2", 0x2000, 0x2010, "align:8"));
+        let target = blocks(&[("seq.c", &[])]);
+        let found = ranges_from_pairing(
+            &inputs,
+            "seq.c",
+            &target,
+            &pairing(vec![paired(".sdata2", 0x8042_1000, 0x8042_1010)]),
+        );
+        assert_eq!(found[0].line, entry_line(".sdata2", 0x8042_1000, 0x8042_1010, "align:8"));
+    }
+
+    #[test]
+    fn a_retail_mismatch_is_fed_back_and_an_unrelated_failure_is_not() {
+        let refusal =
+            |kind| Refusal { kind, affected: Vec::new(), linker: Vec::new(), command: None };
+        assert!(feedable(&refusal(Kind::RetailMismatch)));
+        assert!(!feedable(&refusal(Kind::UndefinedSymbol)));
+        assert!(!feedable(&refusal(Kind::SourceCompileError)));
     }
 }

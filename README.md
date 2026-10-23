@@ -93,7 +93,8 @@ See [matching](docs/matching.md).
 dtk-migrate derive --project-root ../prime --target GM8P01_00 --reference GM8E01_00
 ```
 
-Compares compiled source objects with extracted target objects. With
+Compares compiled source objects with extracted target objects, including the
+data that identical functions reference. With
 `--reference`, it also evaluates names proposed by the binary matcher using
 objdiff, including functions without target splits. Compiled target-version
 source objects provide an additional comparison when available. Ambiguous

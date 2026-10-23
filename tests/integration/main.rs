@@ -17,6 +17,7 @@ mod joint_runs;
 mod object_evidence;
 mod pipeline;
 mod real_project;
+mod relocation_pairing;
 mod relocation_run;
 mod transactions;
 mod verify_feedback;

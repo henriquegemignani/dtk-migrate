@@ -39,6 +39,10 @@ use crate::{
         objects::{Compiled, is_usable_source_name},
         propose::{Limits, Proposal, Tier},
     },
+    matching::{
+        data_evidence::layout_symbols,
+        relocation_pairing::{DolImage, TargetIndex},
+    },
     project::{
         config::{self, DOL_NAME},
         splits::{Splits, parse_range},
@@ -328,6 +332,7 @@ fn one_unit(
     entry: &(String, PathBuf, PathBuf),
     limits: &Limits,
     reference: Option<&BTreeMap<String, u64>>,
+    data: Option<(&TargetIndex, Option<&DolImage>)>,
 ) -> UnitResult {
     let (unit, source_path, target_path) = entry;
     let read = || -> Result<(Compiled, Compiled)> {
@@ -362,6 +367,9 @@ fn one_unit(
     }
     if let Ok(more) = propose::misplaced(unit, &target, &source, limits, reference) {
         found.extend(more);
+    }
+    if let Some((index, image)) = data {
+        found.extend(propose::by_data_relocations(unit, &target, &source, index, image));
     }
 
     let defines: BTreeSet<String> = source
@@ -435,11 +443,31 @@ pub fn derive(request: &Request) -> Result<Report> {
         })
         .transpose()?;
 
+    // Data symbols are paired through the target's `symbols.txt` and, where
+    // the DOL can be read, its initialized bytes. A REL's addresses are section
+    // offsets that this does not resolve.
+    let selected = config::find(&request.root, &request.version, &request.module)?;
+    let layout = selected
+        .is_dol
+        .then(|| std::fs::read_to_string(&selected.symbols).ok())
+        .flatten()
+        .map(|text| layout_symbols(&text));
+    let index = layout.as_deref().map(TargetIndex::new);
+    let image =
+        selected.is_dol.then(|| DolImage::of_version(&request.root, &request.version)).flatten();
+
     // Each unit is independent, and the work is arithmetic over two small
     // objects, so this parallelises cleanly.
     let results: Vec<UnitResult> = units
         .par_iter()
-        .map(|entry| one_unit(entry, &request.limits, reference.as_ref()))
+        .map(|entry| {
+            one_unit(
+                entry,
+                &request.limits,
+                reference.as_ref(),
+                index.as_ref().map(|index| (index, image.as_ref())),
+            )
+        })
         .collect();
 
     let mut proposals = Vec::new();

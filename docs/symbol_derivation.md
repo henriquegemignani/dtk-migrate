@@ -47,7 +47,7 @@ whatever survived between them. Here the source object states what a unit is
 *supposed* to contain, which confines every comparison to one translation unit
 and lets names the build already agrees on act as anchors.
 
-## The four methods
+## The five methods
 
 ### `body-match`
 
@@ -135,6 +135,38 @@ since a call site names its callee: where the source object calls
 `GetTextureElement__20CParticleDataFactoryFR12CInputStreamP11CSimplePool` and
 the extracted object calls `fn_8030DA80`, that address has its name.
 
+### `data-relocation`
+
+Names data. Where a source function and a target function have the same bytes
+once the fields their relocations fill in are cleared, and the same relocations
+at the same instructions (a 16-bit field is two bytes into its instruction in
+mwcc's objects and at its start in dtk's, so the instruction identifies the
+site), the n-th relocation of one and of the other reference the same object.
+Nothing about the function is guessed: it is not scored, and it does not need
+its name to agree. Interchangeable bodies are told apart by name only where
+each name is unique on both sides.
+
+A target reference resolves to an address through `symbols.txt` (the extracted
+object spells a symbol it does not define by name, and spells a shared local
+`name_ADDRESS`). A source symbol is then paired with the target symbol at the
+address all its references agree on, and only if
+
+- no other source symbol maps to that address,
+- the section it is in is the section `symbols.txt` gives the target symbol,
+- the target's recorded size is the symbol's size, or its size rounded up to 8
+  (`symbols.txt` sizes are sometimes padded),
+- the target's alignment suits it, and
+- the initialized bytes equal the target DOL's apart from fields relocations
+  fill in, when the DOL can be read.
+
+A symbol the source only references (a global defined in another unit) has no
+bytes or section to compare and is held to the other conditions. The proposal
+names a placeholder (`lbl_...`) with a name the source defines; a compiler
+literal such as `@41` is never a name, since those numbers are per object. It is
+`confident` when the bytes were compared and equal or when at least two
+functions make at least two references, and `probable` otherwise. The same
+pairing bounds data sections in verify (see [coverage](coverage.md)).
+
 ### `function-position`
 
 A placeholder sitting between two agreeing names is the function the source
@@ -209,7 +241,7 @@ says so (`frees the name for fn_801C20A4, proposable next run`).
 
 ## Precedence
 
-`body-match`, `call-site` and `misplaced-name` all observe the function itself
+`body-match`, `call-site`, `data-relocation` and `misplaced-name` all observe the function itself
 and rank equally; `function-position` ranks below them. When a stronger method disagrees with a
 weaker one the weaker loses. When two equally strong methods disagree the symbol
 is dropped -- neither claim is more credible.
