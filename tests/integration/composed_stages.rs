@@ -1,8 +1,5 @@
 //! Code ownership, independently witnessed data, and source linkage on one TU.
 
-mod common;
-
-use common::{Blocks, DiscoverEvidence, Layout, describe, line};
 use dtk_migrate::{
     analysis::{
         coverage_fixture::{report, run, unit},
@@ -13,6 +10,11 @@ use dtk_migrate::{
         SCHEMA,
     },
     project::splits::Splits,
+};
+
+use crate::{
+    common,
+    common::{Blocks, DiscoverEvidence, Layout, describe, line},
 };
 
 const CODE: (u32, u32) = (0x8000_1000, 0x8000_1200);

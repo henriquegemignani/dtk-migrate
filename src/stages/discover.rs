@@ -1610,6 +1610,8 @@ mod tests {
             }
         }
         assert_eq!(proposal_of(&joint).unwrap().lines.len(), 2);
+        // CARGO_TARGET_DIR may point elsewhere, so ./target need not exist yet.
+        std::fs::create_dir_all("target").unwrap();
         let directory =
             tempfile::Builder::new().prefix("discover-fallback-").tempdir_in("target").unwrap();
         let splits_path = directory.path().join("splits.txt");

@@ -1,6 +1,7 @@
-mod common;
-
-use common::{Blocks, Layout, describe, line};
+use crate::{
+    common,
+    common::{Blocks, Layout, describe, line},
+};
 
 #[test]
 fn rejected_verify_subtrees_are_pretested_without_serial_leaf_builds() {

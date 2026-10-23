@@ -18,6 +18,8 @@ use std::{
     process::Command,
 };
 
+use crate::common;
+
 /// The fixture's build script. Its link step writes a DOL that only equals
 /// retail when `B.cpp` is *not* enabled, and appends a line to a log so a test
 /// can count builds.
@@ -147,20 +149,9 @@ struct Fixture {
     python: PathBuf,
 }
 
-fn which(program: &str) -> Option<PathBuf> {
-    let suffixes: &[&str] = if cfg!(windows) { &[".exe", ""] } else { &[""] };
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths).find_map(|directory| {
-        suffixes.iter().find_map(|suffix| {
-            let candidate = directory.join(format!("{program}{suffix}"));
-            candidate.is_file().then_some(candidate)
-        })
-    })
-}
-
 fn build_fixture() -> Option<Fixture> {
-    let ninja = which("ninja")?;
-    let python = which("python").or_else(|| which("python3"))?;
+    let ninja = common::which("ninja")?;
+    let python = common::which("python").or_else(|| common::which("python3"))?;
     let dir = tempfile::Builder::new().prefix("dtk-migrate-e2e").tempdir().ok()?;
     let root = dir.path().join("project");
     for sub in ["src", "orig/PAL/sys", "build/compilers", "build/tools"] {

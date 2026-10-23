@@ -3146,6 +3146,9 @@ mod tests {
         assert_eq!(report.ranges[0].members[0].reference_positions, 2);
         assert_eq!(report.ranges[0].members[0].target_common, None);
 
+        // A relative directory, so the reference has to make it absolute.
+        // CARGO_TARGET_DIR may point elsewhere, so ./target need not exist yet.
+        std::fs::create_dir_all("target").unwrap();
         let directory =
             tempfile::Builder::new().prefix("data-evidence-").tempdir_in("target").unwrap();
         let path = directory.path().join("witnesses.json");

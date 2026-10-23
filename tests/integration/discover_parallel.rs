@@ -1,9 +1,11 @@
-mod common;
-
-use common::{Blocks, DiscoverEvidence, Layout, describe, line};
 use dtk_migrate::{
     analysis::coverage_fixture::{anchor, report, unit},
     matching::data_evidence::{DataEvidenceReport, SCHEMA},
+};
+
+use crate::{
+    common,
+    common::{Blocks, DiscoverEvidence, Layout, describe, line},
 };
 
 #[test]

@@ -648,7 +648,7 @@ to `CTimeRemainderAndFraction.cpp`. The tool has therefore separated the gap fro
 FrameDelayedKiller but has **not** recovered that future TU's exact end or name.
 The family for target `fn_802AF844` contains a source definition of
 `GetWidgetTypeID` from `GuiSys/CGuiHeadWidget.cpp`; it remains weak evidence for emitted
-ownership. The opt-in `tests/helper_identification.rs` test reloads the complete historical
+ownership. The opt-in `tests/integration/helper_identification.rs` test reloads the complete historical
 report through the canonical validator and checks both observations.
 
 ### Validation of the first G output
@@ -1219,7 +1219,7 @@ directly.
   recall and ranking, and a neighbour-only unit inherits its writers' refusals.
 
 Validation: the transaction, stage, scheduling and summary tests, a new coordinator suite
-(`tests/transactions.rs`) in which a candidate takes the head of its neighbour's split through
+(`tests/integration/transactions.rs`) in which a candidate takes the head of its neighbour's split through
 workers, integration, a later `.init` refinement that supersedes the joint transaction,
 publication, interruption/resume and `--only`, plus the existing cascade/pipeline/historical
 suites. The five calibration scenarios were rerun on the Change C checkout with the binaries from
@@ -1400,7 +1400,7 @@ The useful distinction is between identifying a TU, proving its boundaries, appl
 
 ## 1. Add the historical regression benchmark before changing policy
 
-**Files:** new `src/analysis/ownership_score.rs`, new `src/cli/benchmark.rs`, `src/cli/mod.rs`, `src/main.rs`, `src/cli/calibrate.rs`, new `tests/historical_recall.rs`, fixtures under `tests/fixtures/ownership/`.
+**Files:** new `src/analysis/ownership_score.rs`, new `src/cli/benchmark.rs`, `src/cli/mod.rs`, `src/main.rs`, `src/cli/calibrate.rs`, new `tests/integration/historical_recall.rs`, fixtures under `tests/fixtures/ownership/`.
 
 Extract interval scoring from calibration into a shared library. Keep the existing calibration command and scenario semantics; have both calibration and historical evaluation use the same scorer. This is an extraction of scoring logic, not an opportunity to reinterpret how application works.
 
@@ -1791,7 +1791,7 @@ remained byte-identical to the baseline.
 
 ## 9. Compatibility, reporting and documentation (continuous)
 
-**Files:** `src/analysis/coverage.rs` and shared policy module, `src/stages/coverage/mod.rs`, `src/run/mod.rs`, `src/analysis/coverage_fixture.rs`, `tests/cascade.rs`, `README.md`, `docs/coverage.md`, `docs/runs.md`, `docs/prime.md`.
+**Files:** `src/analysis/coverage.rs` and shared policy module, `src/stages/coverage/mod.rs`, `src/run/mod.rs`, `src/analysis/coverage_fixture.rs`, `tests/integration/cascade.rs`, `README.md`, `docs/coverage.md`, `docs/runs.md`, `docs/prime.md`.
 
 Version the new evidence records and transaction/certificate storage explicitly. Reject incompatible resumptions with a clear explanation; do not deserialize missing attribution or precondition fields as if they passed the new safety checks. Keep a read-only legacy-result adapter for scoring run `20713-150344`, whose migration schema must remain immutable.
 

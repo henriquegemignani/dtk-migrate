@@ -109,10 +109,13 @@ results and disagreements stay in the report. See
 
 ## Building
 
-`cargo test` runs the suite. Two integration tests need more than the crate:
-`tests/pipeline.rs` drives the real binary against a fixture project and needs
-Python and Ninja, and `tests/real_project.rs` checks the project readers against
-a real checkout when `DTK_MIGRATE_TEST_PROJECT` points at one.
+`cargo test` runs the suite. The integration tests are modules of one test
+binary, `tests/integration/main.rs`, so the crate is linked once and the slow
+fixture suites run in parallel; `cargo test --test integration cascade::` runs
+one of them. The fixture suites drive the real binary against a miniature
+project and need Python and Ninja on `PATH`, and `real_project.rs` checks the
+project readers against a real checkout when `DTK_MIGRATE_TEST_PROJECT` points
+at one.
 
 This depends on a decomp-toolkit branch that exposes its analysis as a library.
 To build against a local checkout instead of fetching it, add a

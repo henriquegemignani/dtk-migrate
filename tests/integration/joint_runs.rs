@@ -1,9 +1,11 @@
 //! A three-unit run through preparation, workers, integration and publication.
 
-mod common;
-
-use common::{Blocks, Layout, describe, line, names};
 use dtk_migrate::analysis::coverage_fixture::{anchor, owned_by, report, unit};
+
+use crate::{
+    common,
+    common::{Blocks, Layout, describe, line, names},
+};
 
 const A: (u32, u32) = (0x8000_1000, 0x8000_1100);
 const B: (u32, u32) = (0x8000_1100, 0x8000_1200);

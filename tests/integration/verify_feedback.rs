@@ -1,6 +1,7 @@
-mod common;
-
-use common::{Blocks, Fixture, Layout, describe, line};
+use crate::{
+    common,
+    common::{Blocks, Fixture, Layout, describe, line},
+};
 
 /// `.sbss` of `P.cpp`, `A.cpp` and `N.cpp`, and the same three in `.sdata`
 /// 0x1000 higher.

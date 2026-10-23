@@ -2461,7 +2461,10 @@ mod tests {
 
     #[test]
     fn ninja_dry_run_distinguishes_clean_dirty_and_unavailable_objects() {
-        let root = tempfile::tempdir_in(std::env::current_dir().unwrap().join("target")).unwrap();
+        // CARGO_TARGET_DIR may point elsewhere, so ./target need not exist yet.
+        let target = std::env::current_dir().unwrap().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let root = tempfile::tempdir_in(target).unwrap();
         std::fs::write(
             root.path().join("build.ninja"),
             "rule write\n  command = python -c \"open('$out','w').write('ok')\"\nbuild clean.o: write clean.in\nbuild dirty.o: write dirty.in\nbuild alias.o: phony clean.o\nbuild all_source: phony orphan.o\nbuild build/PAL/main.elf: write clean.o dirty.o external.a\n",

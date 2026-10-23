@@ -22,12 +22,14 @@
 //! current batching may still divide an oversized component, after which the
 //! coordinator re-proves the proposals in candidate order.
 
-mod common;
-
-use common::{Blocks, Fixture, Layout, describe, line, names};
 use dtk_migrate::analysis::{
     coverage::CoverageReport,
     coverage_fixture::{anchor, next_prefix_transition, owned_by, report, run, unit, withheld},
+};
+
+use crate::{
+    common,
+    common::{Blocks, Fixture, Layout, describe, line, names},
 };
 
 const P: (u32, u32) = (0x8000_1000, 0x8000_1100);

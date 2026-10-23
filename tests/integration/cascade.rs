@@ -32,11 +32,8 @@
 //! `1.json`, `2.json` — the three worlds above, serialized from
 //! [`evidence_for`].
 
-mod common;
-
 use std::collections::BTreeMap;
 
-use common::{Blocks, Fixture, Layout, describe, line, names};
 use dtk_migrate::{
     analysis::{
         coverage::CoverageReport,
@@ -45,6 +42,11 @@ use dtk_migrate::{
     stages::coverage::alternatives,
 };
 use indexmap::IndexMap;
+
+use crate::{
+    common,
+    common::{Blocks, Fixture, Layout, describe, line, names},
+};
 
 /// Where each unit's code sits in the fixture's target, and what the evidence
 /// says about it at each stage of the cascade.
@@ -345,6 +347,8 @@ fn the_coordinator_sends_failed_union_halves_to_different_lanes() {
     let output = fixture.migrate_with_settings("2", "40", &[], &[
         "DTK_MIGRATE_FIXTURE_REJECT_WORKER_COMBINATION",
         "A.cpp,B.cpp",
+        "DTK_MIGRATE_FIXTURE_AWAIT_OTHER_JOBS",
+        "1",
     ]);
     assert!(output.status.success(), "{}", describe(&output));
     let id = fixture.run_id();

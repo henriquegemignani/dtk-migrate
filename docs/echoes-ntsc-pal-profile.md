@@ -284,7 +284,7 @@ report (7 s each). Further cuts need that analysis shared between stages, or
 split inside (`build_coverage_report` is ~11 s of one thread; so is
 `derive::derive`'s ~18 s), which is more than an easy change.
 
-`tests/historical_recall.rs::the_fixture_is_readable_project_data_rather_than_a_saved_verdict`
+`tests/integration/historical_recall.rs::the_fixture_is_readable_project_data_rather_than_a_saved_verdict`
 fails in this worktree because `tests/fixtures/ownership/baseline.splits.txt` is
 LF in the index and CRLF on disk (autocrlf), so its SHA-256 differs; it is
 unrelated to these changes.

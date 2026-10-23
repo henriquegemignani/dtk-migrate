@@ -75,6 +75,19 @@ worker_rejected = [name for name in os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_W
 if worker_rejected and workspace.name.startswith("worker-"):
     splits = Path("config/PAL/splits.txt").read_text()
     if all(("\n" + name + ":\n") in ("\n" + splits) for name in worker_rejected):
+        # Lanes share one queue, and a failed union's halves join its back.
+        # Holding this build until every other batch has a result leaves the
+        # other lanes idle when the halves are queued, whatever the timing.
+        if os.environ.get("DTK_MIGRATE_FIXTURE_AWAIT_OTHER_JOBS") == "1":
+            import time
+            jobs = workspace.parent.parent / "coverage" / "jobs"
+            if not jobs.is_dir():
+                sys.exit("fixture: no coverage jobs at " + str(jobs))
+            deadline = time.monotonic() + 60
+            while sum(not (job / "result.json").is_file() for job in jobs.iterdir()) > 1:
+                if time.monotonic() > deadline:
+                    sys.exit("fixture: other coverage jobs never finished")
+                time.sleep(0.05)
         sys.exit("fixture: rejected worker combination")
 
 units = json.loads(Path("fixture_units.json").read_text())
@@ -270,7 +283,7 @@ pub struct Fixture {
     python: PathBuf,
 }
 
-fn which(program: &str) -> Option<PathBuf> {
+pub fn which(program: &str) -> Option<PathBuf> {
     let suffixes: &[&str] = if cfg!(windows) { &[".exe", ""] } else { &[""] };
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths).find_map(|directory| {
