@@ -55,6 +55,20 @@ pub enum MutationScope {
     CodeDependency(String),
     DataDependency(String),
     Symbol(String),
+    /// A certified jump-table range ends here and the named unit's data
+    /// continues from it. Publication rechecks the seam, so a later stage
+    /// must not start another unit there or move the next unit's start.
+    JumpTableSeam(DataSeam),
+}
+
+/// The right edge of a certified jump-table range: the address in `section`
+/// where `next_unit`'s range must start.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DataSeam {
+    pub section: String,
+    pub address: u32,
+    pub next_unit: String,
 }
 
 impl MutationScope {
@@ -72,7 +86,8 @@ impl MutationScope {
                 Self::UnitLink(_)
                 | Self::CodeDependency(_)
                 | Self::DataDependency(_)
-                | Self::Symbol(_) => false,
+                | Self::Symbol(_)
+                | Self::JumpTableSeam(_) => false,
             }
     }
 }
@@ -172,6 +187,8 @@ pub struct Permitted {
     pub reserved_link: BTreeSet<String>,
     /// When a run was narrowed, the only names it may touch.
     pub only: BTreeSet<String>,
+    /// Jump-table seams an earlier stage certified.
+    pub jump_table_seams: BTreeSet<DataSeam>,
 }
 
 impl Permitted {
@@ -601,7 +618,7 @@ mod tests {
         assert!(serde_json::from_value::<Prepared>(value).is_err());
 
         let value = serde_json::to_value(Permitted::default()).unwrap();
-        for field in ["reserved", "reserved_data", "reserved_link", "only"] {
+        for field in ["reserved", "reserved_data", "reserved_link", "only", "jump_table_seams"] {
             let mut missing = value.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<Permitted>(missing).is_err(), "{field}");

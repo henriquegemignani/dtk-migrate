@@ -17,17 +17,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    build::context::{BuildContext, ValidationError},
+    build::context::{BuildContext, ValidationError, is_trial_failure},
+    matching::data_evidence::{LayoutIndex, LayoutSymbol, adjacent_span, layout_symbols},
     project::{
         configure_py::Configure,
+        link_order::cyclic_units,
         report::{ObjdiffConfig, ObjdiffUnit, Report, strip_source_root},
+        splits::{Splits, entry_line, entry_suffix, parse_attributes, parse_range},
         transaction::Owned,
     },
     stages::{
-        Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage,
+        Applied, Candidate, DataSeam, Event, MutationScope, Outcome, Prepared, Selections, Stage,
         bisect_pretested_groups,
+        refusal::{LinkerDiagnosticKind, Refusal},
     },
 };
 
@@ -35,6 +41,24 @@ pub struct Verify;
 
 /// What acceptance in this stage establishes.
 const VALIDATION: &str = "compiled-link-inputs-and-retail-bytes";
+
+/// Link feedback rounds for one unit. Each round adds the data ranges the
+/// previous link named and costs one more link.
+const FEEDBACK_ROUNDS: usize = 3;
+
+/// The `Applied` id of data ranges added from link feedback.
+const DATA_FEEDBACK: &str = "data-split-feedback";
+
+/// The target data ranges link feedback added for a unit that then linked
+/// from source and matched retail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataFeedback {
+    /// The unit's name in `splits.txt`, which can differ from its source name.
+    pub split_unit: String,
+    /// The `splits.txt` lines added to that unit. Not `lines`: benchmark
+    /// reads a record's `lines` as a coverage body.
+    pub data_lines: Vec<String>,
+}
 
 impl Stage for Verify {
     fn name(&self) -> &'static str { "verify" }
@@ -122,23 +146,23 @@ impl Stage for Verify {
     fn evaluate(
         &self,
         ctx: &BuildContext,
-        _prepared: &Prepared,
+        prepared: &Prepared,
         candidates: &[Candidate],
         _preferred: &Selections,
     ) -> Result<Outcome> {
-        self.evaluate_with_negative(ctx, candidates, &BTreeMap::new(), &BTreeMap::new())
+        self.evaluate_with_negative(ctx, prepared, candidates, &BTreeMap::new(), &BTreeMap::new())
     }
 
     fn integrate_pretested(
         &self,
         ctx: &BuildContext,
-        _prepared: &Prepared,
+        prepared: &Prepared,
         candidates: &[Candidate],
         _preferred: &Selections,
         negative: &BTreeMap<String, Event>,
         negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
     ) -> Result<Outcome> {
-        self.evaluate_with_negative(ctx, candidates, negative, negative_groups)
+        self.evaluate_with_negative(ctx, prepared, candidates, negative, negative_groups)
     }
 
     fn validate(
@@ -147,8 +171,16 @@ impl Stage for Verify {
         accepted: &[Candidate],
         _prepared: &Prepared,
         _selections: &Selections,
-        _applied: &[crate::stages::Applied],
+        applied: &[Applied],
     ) -> Result<Report> {
+        // Data ranges link feedback added are part of what was proved. The
+        // project being validated must still hold every one of them.
+        let feedback: Vec<&Applied> =
+            applied.iter().filter(|entry| entry.id == DATA_FEEDBACK).collect();
+        if !feedback.is_empty() {
+            let path = ctx.root.join("config").join(&ctx.target).join("splits.txt");
+            check_feedback(&feedback, accepted, &Splits::read(&path)?.blocks)?;
+        }
         let text = std::fs::read_to_string(ctx.root.join("configure.py"))?;
         let mut names = Configure::parse(&text)?.configured_names(&ctx.target);
         names.extend(accepted.iter().map(|c| c.name.clone()));
@@ -156,10 +188,30 @@ impl Stage for Verify {
     }
 }
 
+/// Requires every unit with link feedback to be accepted and its target
+/// split to still hold each line feedback added.
+fn check_feedback(
+    feedback: &[&Applied],
+    accepted: &[Candidate],
+    blocks: &IndexMap<String, Vec<String>>,
+) -> Result<()> {
+    for entry in feedback {
+        let feedback: DataFeedback = serde_json::from_value(entry.record.clone())?;
+        let body = blocks.get(&feedback.split_unit).map(Vec::as_slice).unwrap_or_default();
+        if !accepted.iter().any(|candidate| candidate.name == entry.unit)
+            || feedback.data_lines.iter().any(|line| !body.contains(line))
+        {
+            bail!("Link feedback data ranges for {} changed after verification", entry.unit);
+        }
+    }
+    Ok(())
+}
+
 impl Verify {
     fn evaluate_with_negative(
         &self,
         ctx: &BuildContext,
+        prepared: &Prepared,
         candidates: &[Candidate],
         negative: &BTreeMap<String, Event>,
         negative_groups: &BTreeMap<Vec<String>, Vec<Event>>,
@@ -179,7 +231,8 @@ impl Verify {
             owned.write(configure.render(&ctx.target, names)?.as_bytes())
         };
 
-        let (accepted, deferred, events) = bisect_pretested_groups(
+        let mut feedback = LinkFeedback::new(prepared);
+        let (accepted, deferred, mut events) = bisect_pretested_groups(
             candidates,
             "failed-source-link-or-hash",
             "retail-hash-verified-source",
@@ -191,26 +244,55 @@ impl Verify {
                 write(&mut owned, &proposed)?;
                 let mut checked = baseline_names.clone();
                 checked.extend(proposed.iter().cloned());
-                match validate(ctx, &checked, true, None) {
-                    Ok(_) => Ok(()),
+                feedback.stage(ctx, batch)?;
+                let outcome = match validate(ctx, &checked, true, None) {
+                    Ok(_) => {
+                        feedback.keep();
+                        Ok(())
+                    }
+                    // Only an isolated unit's failure says which unit the
+                    // linker's diagnostics are about.
+                    Err(error) if batch.len() == 1 && is_trial_failure(&error) => {
+                        feedback.retry(ctx, &batch[0].name, &checked, error)
+                    }
                     Err(error) => {
-                        // Put the file back to the accepted set before the next
-                        // trial, so a failure never leaks into the one after it.
-                        let kept: BTreeSet<String> =
-                            already.iter().map(|c| c.name.clone()).collect();
-                        write(&mut owned, &kept)?;
+                        feedback.discard()?;
                         Err(error)
                     }
+                };
+                if outcome.is_err() {
+                    // Put the file back to the accepted set before the next
+                    // trial, so a failure never leaks into the one after it.
+                    let kept: BTreeSet<String> = already.iter().map(|c| c.name.clone()).collect();
+                    write(&mut owned, &kept)?;
                 }
+                outcome
             },
         )?;
 
         let kept: BTreeSet<String> = accepted.iter().map(|c| c.name.clone()).collect();
         write(&mut owned, &kept)?;
+        let (applied, feedback_events, splits) = feedback.finish(&kept)?;
+        // A worker's accepted candidate carries the ranges it needed, so that
+        // integration can stage them with the candidate rather than refuse the
+        // union and rediscover them one unit at a time. A candidate accepted
+        // without feedback carries nothing, even if it arrived with ranges.
+        let mut accepted = accepted;
+        for candidate in &mut accepted {
+            candidate.evidence = applied
+                .iter()
+                .find(|entry| entry.unit == candidate.name)
+                .map_or(serde_json::Value::Null, |entry| entry.record.clone());
+        }
+        events.extend(feedback_events);
         let mut checked = baseline_names;
         checked.extend(kept);
         let report = validate(ctx, &checked, false, None)?;
         owned.check()?;
+        if let Some(splits) = splits {
+            splits.check()?;
+            splits.commit();
+        }
         owned.commit();
         Ok(Outcome {
             tried: Default::default(),
@@ -219,10 +301,655 @@ impl Verify {
             events,
             report,
             validation: VALIDATION.to_string(),
-            applied: Vec::new(),
+            applied,
             selections: Selections::new(),
         })
     }
+}
+
+/// Feeds a source-link refusal's duplicate data symbols back as data splits.
+///
+/// When a unit's data stays in an unsplit gap object, linking the unit from
+/// source defines that data twice: `multiply-defined: 'S' in unit.o,
+/// Previously defined in auto_NN_ADDR_sec.o`. If the unit's source split for
+/// that section holds S, the unit's target range is the source split mapped
+/// by its anchor-bracketed delta (see [`LayoutIndex`]), or else S's own
+/// extent. The unit is linked again with those ranges added, and kept only if
+/// that link passes the same input and retail checks as any other trial.
+struct LinkFeedback {
+    permitted: crate::stages::Permitted,
+    /// Loaded on the first refusal that might be fed back. `None` inside
+    /// when the target has no `splits.txt` to extend.
+    loaded: Option<Option<Loaded>>,
+    added: BTreeMap<String, DataFeedback>,
+    /// Lines staged for the batch under trial, from candidates a worker
+    /// already proved with feedback. Nothing here is kept until that batch
+    /// passes its trial.
+    pending: Option<(Splits, BTreeMap<String, DataFeedback>)>,
+    events: Vec<Event>,
+}
+
+struct Loaded {
+    splits: Owned,
+    /// The target splits as accepted so far, feedback included.
+    accepted: Splits,
+    baseline_cycles: BTreeSet<String>,
+    inputs: FeedbackInputs,
+}
+
+/// What feedback reads from both versions.
+struct FeedbackInputs {
+    source_symbols: Vec<LayoutSymbol>,
+    target_symbols: Vec<LayoutSymbol>,
+    source_blocks: IndexMap<String, Vec<String>>,
+    /// Verify's source name to the unit's `splits.txt` name, DOL units only.
+    split_units: BTreeMap<String, String>,
+    /// Jump-table seams an earlier stage certified.
+    seams: Vec<DataSeam>,
+}
+
+impl Loaded {
+    fn read(ctx: &BuildContext, permitted: &crate::stages::Permitted) -> Result<Option<Self>> {
+        let config = |version: &str| ctx.root.join("config").join(version);
+        let path = config(&ctx.target).join("splits.txt");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let read = |path: std::path::PathBuf| {
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))
+        };
+        let splits = Owned::take(&path)?;
+        let accepted = Splits::parse(&String::from_utf8(splits.original().to_vec())?)?;
+        let objdiff = ObjdiffConfig::read(&ctx.root.join("objdiff.json"))?;
+        let split_units = objdiff
+            .units
+            .iter()
+            .filter_map(|unit| {
+                let name = strip_source_root(unit.metadata.source_path.as_deref()?);
+                let target_path = unit.target_path.as_deref()?.replace('\\', "/");
+                if module_of(&target_path, &ctx.target).is_some() {
+                    return None;
+                }
+                let stem = target_path.split_once("/obj/")?.1.strip_suffix(".o")?;
+                let matching: Vec<&String> = accepted
+                    .blocks
+                    .keys()
+                    .filter(|key| {
+                        key.rsplit_once('.').map_or(key.as_str(), |(stem, _)| stem) == stem
+                    })
+                    .collect();
+                // `x.c` and `x.cpp` share an object stem; the source path's
+                // extension decides, and an unresolved tie maps to nothing.
+                let split = match matching.as_slice() {
+                    [only] => *only,
+                    several => {
+                        let extension = name.rsplit_once('.').map(|(_, extension)| extension);
+                        let mut exact = several.iter().filter(|key| {
+                            key.rsplit_once('.').map(|(_, extension)| extension) == extension
+                        });
+                        match (exact.next(), exact.next()) {
+                            (Some(key), None) => *key,
+                            _ => return None,
+                        }
+                    }
+                };
+                Some((name.to_string(), split.clone()))
+            })
+            .collect();
+        let inputs = FeedbackInputs {
+            source_symbols: layout_symbols(&read(config(&ctx.source).join("symbols.txt"))?),
+            target_symbols: layout_symbols(&read(config(&ctx.target).join("symbols.txt"))?),
+            source_blocks: Splits::read(&config(&ctx.source).join("splits.txt"))?.blocks,
+            split_units,
+            seams: permitted.jump_table_seams.iter().cloned().collect(),
+        };
+        Ok(Some(Self { baseline_cycles: cyclic_units(&accepted.blocks), splits, accepted, inputs }))
+    }
+
+    /// The splits name of a unit whose data this stage may still change.
+    fn writable(&self, permitted: &crate::stages::Permitted, name: &str) -> Option<String> {
+        // Coverage and discovery recheck the exact bodies they certified, so
+        // a unit an earlier stage changed keeps its body.
+        let split_unit = self.inputs.split_units.get(name)?;
+        (!permitted.reserved.contains(split_unit)
+            && !permitted.reserved_data.contains(split_unit)
+            && self.accepted.blocks.contains_key(split_unit))
+        .then(|| split_unit.clone())
+    }
+
+    /// Puts the splits file back to the accepted state.
+    fn restore(&mut self, any_accepted: bool) -> Result<()> {
+        if any_accepted {
+            self.splits.write(self.accepted.render().as_bytes())
+        } else {
+            self.splits.restore()
+        }
+    }
+}
+
+impl LinkFeedback {
+    fn new(prepared: &Prepared) -> Self {
+        Self {
+            permitted: prepared.permitted.clone(),
+            loaded: None,
+            added: BTreeMap::new(),
+            pending: None,
+            events: Vec::new(),
+        }
+    }
+
+    fn load(&mut self, ctx: &BuildContext) -> Result<Option<&mut Loaded>> {
+        if self.loaded.is_none() {
+            self.loaded = Some(Loaded::read(ctx, &self.permitted)?);
+        }
+        Ok(self.loaded.as_mut().and_then(Option::as_mut))
+    }
+
+    fn loaded(&mut self) -> &mut Loaded {
+        self.loaded.as_mut().and_then(Option::as_mut).expect("link feedback inputs are loaded")
+    }
+
+    /// Stages the ranges a worker's trial of these candidates needed. A line
+    /// that no longer fits beside the accepted splits is left out, and the
+    /// unit then goes through feedback again if its link is refused.
+    fn stage(&mut self, ctx: &BuildContext, batch: &[Candidate]) -> Result<()> {
+        let carried: Vec<(&str, DataFeedback)> = batch
+            .iter()
+            .filter_map(|candidate| {
+                let feedback = serde_json::from_value(candidate.evidence.clone()).ok()?;
+                Some((candidate.name.as_str(), feedback))
+            })
+            .collect();
+        if carried.is_empty() || self.load(ctx)?.is_none() {
+            return Ok(());
+        }
+        let loaded = self.loaded.as_ref().and_then(Option::as_ref).unwrap();
+        let carried = carried
+            .into_iter()
+            .filter(|(name, feedback)| {
+                loaded.writable(&self.permitted, name).as_ref() == Some(&feedback.split_unit)
+            })
+            .collect();
+        let (staged, lines) =
+            stage_lines(&loaded.accepted, &loaded.baseline_cycles, &loaded.inputs.seams, carried);
+        if !lines.is_empty() {
+            self.loaded().splits.write(staged.render().as_bytes())?;
+            self.pending = Some((staged, lines));
+        }
+        Ok(())
+    }
+
+    /// The batch passed: its staged lines are now accepted.
+    fn keep(&mut self) {
+        if let Some((staged, lines)) = self.pending.take() {
+            self.loaded().accepted = staged;
+            self.added.extend(lines);
+        }
+    }
+
+    /// The batch failed: its staged lines are withdrawn.
+    fn discard(&mut self) -> Result<()> {
+        if self.pending.take().is_some() {
+            let any_accepted = !self.added.is_empty();
+            self.loaded().restore(any_accepted)?;
+        }
+        Ok(())
+    }
+
+    /// Retries one refused unit with the data ranges its link named, at most
+    /// [`FEEDBACK_ROUNDS`] times, on top of any ranges staged for it. Returns
+    /// the last refusal if none passes.
+    fn retry(
+        &mut self,
+        ctx: &BuildContext,
+        name: &str,
+        checked: &BTreeSet<String>,
+        mut error: anyhow::Error,
+    ) -> Result<()> {
+        let pending = self.pending.take();
+        let any_accepted = !self.added.is_empty();
+        let split_unit = if Refusal::from_error(&error).gap_duplicates().next().is_none() {
+            None
+        } else if self.load(ctx)?.is_some() {
+            let loaded = self.loaded.as_ref().and_then(Option::as_ref).unwrap();
+            loaded.writable(&self.permitted, name)
+        } else {
+            None
+        };
+        let Some(split_unit) = split_unit else {
+            if pending.is_some() {
+                self.loaded().restore(any_accepted)?;
+            }
+            return Err(error);
+        };
+        let (mut staged, mut lines) = match pending {
+            Some((staged, mut carried)) => (
+                staged,
+                carried.remove(name).map(|feedback| feedback.data_lines).unwrap_or_default(),
+            ),
+            None => (self.loaded().accepted.clone(), Vec::new()),
+        };
+        for round in 1..=FEEDBACK_ROUNDS {
+            let refusal = Refusal::from_error(&error);
+            let derived =
+                derive_ranges(&self.loaded().inputs, &split_unit, &staged.blocks, &refusal);
+            if derived.is_empty() {
+                break;
+            }
+            let body = staged.blocks.get_mut(&split_unit).unwrap();
+            for range in &derived {
+                insert_line(body, range.line.clone());
+            }
+            let reasons =
+                derived.iter().map(|range| range.reason.as_str()).collect::<Vec<_>>().join("; ");
+            if cyclic_units(&staged.blocks)
+                .difference(&self.loaded().baseline_cycles)
+                .next()
+                .is_some()
+            {
+                self.events.push(Event::new(name, DATA_FEEDBACK).because(format!(
+                    "round {round}: not linked, the ranges would make the link order cyclic: {reasons}"
+                )));
+                break;
+            }
+            self.events.push(
+                Event::new(name, DATA_FEEDBACK)
+                    .because(format!("round {round}: linking again with {reasons}")),
+            );
+            let loaded = self.loaded();
+            lines.extend(derived.into_iter().map(|range| range.line));
+            loaded.splits.write(staged.render().as_bytes())?;
+            match validate(ctx, checked, true, None) {
+                Ok(_) => {
+                    loaded.accepted = staged;
+                    self.added
+                        .insert(name.to_string(), DataFeedback { split_unit, data_lines: lines });
+                    return Ok(());
+                }
+                Err(next) if is_trial_failure(&next) => error = next,
+                Err(next) => {
+                    loaded.restore(any_accepted)?;
+                    return Err(next);
+                }
+            }
+        }
+        self.loaded().restore(any_accepted)?;
+        Err(error)
+    }
+
+    /// The feedback of units that stayed accepted, and the splits file as
+    /// they left it, still uncommitted: the caller commits it only once the
+    /// final validation passes, and dropping it restores the original.
+    fn finish(self, kept: &BTreeSet<String>) -> Result<(Vec<Applied>, Vec<Event>, Option<Owned>)> {
+        if self.added.keys().any(|name| !kept.contains(name)) {
+            bail!("Link feedback was recorded for a unit verification did not keep");
+        }
+        let splits = self.loaded.flatten().map(|loaded| loaded.splits);
+        let applied = self
+            .added
+            .into_iter()
+            .map(|(unit, feedback)| {
+                Ok(Applied {
+                    unit,
+                    id: DATA_FEEDBACK.to_string(),
+                    units: vec![feedback.split_unit.clone()],
+                    record: serde_json::to_value(feedback)?,
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok((applied, self.events, splits))
+    }
+}
+
+/// Adds each unit's carried lines to `accepted` when all of them still fit
+/// beside the splits and add no link-order cycle; a unit whose lines do not
+/// is left out whole.
+fn stage_lines(
+    accepted: &Splits,
+    baseline_cycles: &BTreeSet<String>,
+    seams: &[DataSeam],
+    carried: Vec<(&str, DataFeedback)>,
+) -> (Splits, BTreeMap<String, DataFeedback>) {
+    let mut staged = accepted.clone();
+    let mut lines = BTreeMap::new();
+    for (name, feedback) in carried {
+        if !staged.blocks.contains_key(&feedback.split_unit) {
+            continue;
+        }
+        let mut trial = staged.clone();
+        let fits = feedback.data_lines.iter().all(|line| {
+            let Some(range) = parse_range(line) else { return false };
+            let body = &trial.blocks[&feedback.split_unit];
+            let free =
+                trial.blocks.values().flatten().filter_map(|l| parse_range(l)).all(|other| {
+                    other.section != range.section
+                        || other.end <= range.start
+                        || range.end <= other.start
+                }) && keeps_seams(seams, &feedback.split_unit, &range.section, range.start, |at| {
+                    starts_at(body, &range.section, at)
+                });
+            if free {
+                insert_line(trial.blocks.get_mut(&feedback.split_unit).unwrap(), line.clone());
+            }
+            free
+        });
+        if fits && cyclic_units(&trial.blocks).difference(baseline_cycles).next().is_none() {
+            staged = trial;
+            lines.insert(name.to_string(), feedback);
+        }
+    }
+    (staged, lines)
+}
+
+/// Whether `lines` hold a range of `section` starting at `address`.
+fn starts_at(lines: &[String], section: &str, address: u32) -> bool {
+    lines
+        .iter()
+        .filter_map(|line| parse_range(line))
+        .any(|range| range.section == section && range.start == address)
+}
+
+/// Whether a new range of `unit` starting at `start` keeps every certified
+/// jump-table seam of its section, as discovery rechecks them at publication:
+/// only the expected unit may start at a seam, and once that unit has a range
+/// in the section, one of its ranges must start there. `unit_starts_at` says
+/// whether the unit already has a range starting at an address.
+fn keeps_seams(
+    seams: &[DataSeam],
+    unit: &str,
+    section: &str,
+    start: u32,
+    unit_starts_at: impl Fn(u32) -> bool,
+) -> bool {
+    seams.iter().filter(|seam| seam.section == section).all(|seam| {
+        if start == seam.address {
+            unit == seam.next_unit
+        } else {
+            unit != seam.next_unit || unit_starts_at(seam.address)
+        }
+    })
+}
+
+/// A target data range derived from one link refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DerivedRange {
+    section: String,
+    start: u32,
+    end: u32,
+    line: String,
+    reason: String,
+    /// The range is one symbol's own extent rather than a mapped source split.
+    own_extent: bool,
+}
+
+/// `auto_09_8041BEB8_sdata.o` names a gap object: the section `.sdata` and
+/// the address the unsplit gap starts at.
+fn gap_object(name: &str) -> Option<(String, u32)> {
+    let stem = name.strip_prefix("auto_")?.strip_suffix(".o")?;
+    let (_, rest) = stem.split_once('_')?;
+    let (address, section) = rest.split_once('_')?;
+    Some((format!(".{section}"), u32::from_str_radix(address, 16).ok()?))
+}
+
+/// Whether a symbol the linker printed (demangled for C++) is this
+/// `symbols.txt` name.
+///
+/// Whitespace is ignored: mwld may wrap a long name inside a token, and a
+/// rejoined message cannot tell that break from a real space such as the one
+/// after a comma in a template argument list.
+fn linker_spelling(printed: &str, name: &str) -> bool {
+    let squeezed = |text: &str| text.split_whitespace().collect::<String>();
+    let printed = squeezed(printed);
+    printed == squeezed(name)
+        || objdiff_core::diff::Demangler::Codewarrior
+            .demangle(name)
+            .is_some_and(|demangled| squeezed(&demangled) == printed)
+}
+
+/// A path's file name without its extension: `Kyoto/CFoo.cpp` and `CFoo.o`
+/// are both `CFoo`.
+fn file_stem(path: &str) -> &str {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').map_or(name, |(stem, _)| stem)
+}
+
+/// The target ranges a refusal's gap duplicates imply for `unit`.
+///
+/// Only duplicates the linker reports in this unit's own object count. Each
+/// range lies inside the gap the linker named, overlaps no existing split,
+/// and is backed by one of the unit's own source splits of that section
+/// holding the symbol: that whole split mapped by its anchor-bracketed delta
+/// (see [`LayoutIndex`]) when the mapping fits the gap and keeps the split's
+/// alignment, or else the symbol's own extent. Every duplicate of the refusal
+/// is derived in one round, and adjacent own extents become one range.
+fn derive_ranges(
+    inputs: &FeedbackInputs,
+    unit: &str,
+    target_blocks: &IndexMap<String, Vec<String>>,
+    refusal: &Refusal,
+) -> Vec<DerivedRange> {
+    let index = LayoutIndex::new(&inputs.source_symbols, &inputs.target_symbols);
+    let mut derived: Vec<DerivedRange> = Vec::new();
+    for diagnostic in &refusal.linker {
+        let (Some(object), Some(gap)) =
+            (diagnostic.object.as_deref(), diagnostic.previously_defined_in.as_deref())
+        else {
+            continue;
+        };
+        let Some((section, gap_start)) = gap_object(gap) else { continue };
+        if diagnostic.kind != LinkerDiagnosticKind::MultiplyDefined
+            || file_stem(object) != file_stem(unit)
+        {
+            continue;
+        }
+        let occupied: Vec<(u32, u32)> = target_blocks
+            .values()
+            .flatten()
+            .filter_map(|line| parse_range(line))
+            .filter(|range| range.section == section)
+            .map(|range| (range.start, range.end))
+            .collect();
+        // The gap runs from where the linker says it starts to the next split.
+        let gap_end = occupied.iter().map(|&(start, _)| start).filter(|&s| s > gap_start).min();
+        let in_gap =
+            |address: u32| address >= gap_start && gap_end.is_none_or(|gap_end| address < gap_end);
+        let Some(symbol) = inputs
+            .target_symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.section == section
+                    && in_gap(symbol.address)
+                    && linker_spelling(&diagnostic.symbol, &symbol.name)
+            })
+            .min_by_key(|symbol| symbol.address)
+        else {
+            continue;
+        };
+        if derived.iter().any(|range| {
+            range.section == section && (range.start..range.end).contains(&symbol.address)
+        }) {
+            continue;
+        }
+        let body = target_blocks.get(unit).map(Vec::as_slice).unwrap_or_default();
+        let fits = |start: u32, end: u32| {
+            start % 4 == 0
+                && start < end
+                && in_gap(start)
+                && gap_end.is_none_or(|gap_end| end <= gap_end)
+                && !occupied.iter().any(|&(a, b)| start < b && a < end)
+                && !derived.iter().any(|r| r.section == section && start < r.end && r.start < end)
+                && keeps_seams(&inputs.seams, unit, &section, start, |at| {
+                    starts_at(body, &section, at)
+                        || derived.iter().any(|r| r.section == section && r.start == at)
+                })
+        };
+        let mut bounds: Vec<(u32, u32)> = inputs
+            .source_blocks
+            .values()
+            .flatten()
+            .filter_map(|line| parse_range(line))
+            .filter(|range| range.section == section)
+            .map(|range| (range.start, range.end))
+            .collect();
+        bounds.sort_unstable();
+        let source_lines = inputs
+            .source_blocks
+            .get(unit)
+            .into_iter()
+            .flatten()
+            .filter(|line| parse_range(line).is_some_and(|range| range.section == section));
+        for source_line in source_lines {
+            let source = parse_range(source_line).unwrap();
+            let Some(position) = bounds.iter().position(|&b| b == (source.start, source.end))
+            else {
+                continue;
+            };
+            // Initialized data needs its bytes compared before a layout
+            // mapping can stand for the whole split (see `LayoutInterior`),
+            // and `symbols.txt` has none: only BSS is mapped here.
+            let mapping = matches!(section.as_str(), ".bss" | ".sbss" | ".sbss2")
+                .then(|| {
+                    index.map(&section, source.start, source.end, adjacent_span(&bounds, position))
+                })
+                .flatten();
+            // The source split must hold the same object: by name, or as the
+            // source symbol the mapping pairs with it.
+            let by_name = inputs.source_symbols.iter().any(|candidate| {
+                candidate.section == section
+                    && (source.start..source.end).contains(&candidate.address)
+                    && candidate.name == symbol.name
+            });
+            let paired = mapping.as_ref().is_some_and(|mapping| {
+                mapping
+                    .members
+                    .iter()
+                    .any(|&(_, target)| inputs.target_symbols[target].address == symbol.address)
+            });
+            if !by_name && !paired {
+                continue;
+            }
+            let suffix = entry_suffix(source_line);
+            let stated = parse_attributes(source_line)
+                .iter()
+                .find_map(|attribute| attribute.strip_prefix("align:")?.parse::<u32>().ok())
+                .filter(|align| align.is_power_of_two());
+            // As for a source-layout certificate: a delta that keeps the
+            // split's alignment residue keeps its edges valid, and so do
+            // aligned edges. Without a stated alignment, dtk's section default
+            // stands in for the split's effective one; a member aligned beyond
+            // it is not visible in `symbols.txt` sizes, and the build decides.
+            let split_align = stated.unwrap_or(match section.as_str() {
+                ".ctors" | ".dtors" | "extab" | "extabindex" => 4,
+                _ => 8,
+            });
+            let mapped = mapping.filter(|mapping| {
+                (mapping.start..mapping.end).contains(&symbol.address)
+                    && (mapping.delta.rem_euclid(i64::from(split_align)) == 0
+                        || (mapping.start % split_align == 0 && mapping.end % split_align == 0))
+                    && fits(mapping.start, mapping.end)
+            });
+            let align = stated.unwrap_or(4).max(4);
+            let (start, end, how, own_extent) = if let Some(mapping) = mapped {
+                (
+                    mapping.start,
+                    mapping.end,
+                    format!(
+                        "the source split shifted by {:#x} between {} and {}",
+                        mapping.delta, mapping.before.name, mapping.after.name
+                    ),
+                    false,
+                )
+            } else {
+                let Some(size) = symbol.size else { break };
+                let end = symbol.address.saturating_add(size).next_multiple_of(align);
+                if !fits(symbol.address, end) {
+                    break;
+                }
+                (symbol.address, end, format!("{}'s own extent", symbol.name), true)
+            };
+            derived.push(DerivedRange {
+                line: entry_line(&section, start, end, &suffix),
+                reason: format!(
+                    "{section} {start:#010X}..{end:#010X} from {how}, for '{}' previously defined in {gap}",
+                    diagnostic.symbol
+                ),
+                section: section.clone(),
+                start,
+                end,
+                own_extent,
+            });
+            break;
+        }
+    }
+    coalesce(derived)
+}
+
+/// Joins own-extent ranges that touch and share their attributes, so a unit
+/// whose duplicates are adjacent objects gets one range per run of them.
+fn coalesce(mut derived: Vec<DerivedRange>) -> Vec<DerivedRange> {
+    derived.sort_by(|a, b| (&a.section, a.start).cmp(&(&b.section, b.start)));
+    let mut joined: Vec<DerivedRange> = Vec::new();
+    for range in derived {
+        if let Some(last) = joined.last_mut()
+            && last.own_extent
+            && range.own_extent
+            && last.section == range.section
+            && last.end == range.start
+            && entry_suffix(&last.line) == entry_suffix(&range.line)
+        {
+            last.end = range.end;
+            last.line = entry_line(&last.section, last.start, last.end, &entry_suffix(&range.line));
+            last.reason = format!("{}; {}", last.reason, range.reason);
+            continue;
+        }
+        joined.push(range);
+    }
+    joined
+}
+
+/// The order dtk writes a unit's sections in. Others follow, in name order.
+const SECTION_ORDER: [&str; 13] = [
+    ".init",
+    "extab",
+    "extabindex",
+    ".text",
+    ".ctors",
+    ".dtors",
+    ".rodata",
+    ".data",
+    ".bss",
+    ".sdata",
+    ".sbss",
+    ".sdata2",
+    ".sbss2",
+];
+
+/// Adds a line among the unit's ranges of the same section in address order,
+/// or else before the first range of a later section in dtk's order.
+fn insert_line(body: &mut Vec<String>, line: String) {
+    let rank = |section: &str| {
+        SECTION_ORDER
+            .iter()
+            .position(|known| *known == section)
+            .map_or((SECTION_ORDER.len(), section.to_string()), |index| (index, String::new()))
+    };
+    let Some(range) = parse_range(&line) else {
+        body.push(line);
+        return;
+    };
+    let same = |current: &String| parse_range(current).filter(|c| c.section == range.section);
+    let at = body
+        .iter()
+        .position(|current| same(current).is_some_and(|c| c.start > range.start))
+        .or_else(|| body.iter().rposition(|current| same(current).is_some()).map(|index| index + 1))
+        .or_else(|| {
+            body.iter().position(|current| {
+                parse_range(current).is_some_and(|c| rank(&c.section) > rank(&range.section))
+            })
+        })
+        .unwrap_or(body.len());
+    body.insert(at, line);
 }
 
 /// Builds, then requires every named unit to be a real input to a real link.
@@ -384,5 +1111,328 @@ mod tests {
     #[test]
     fn a_bare_version_directory_has_no_module() {
         assert_eq!(module_of("build/GM8P01_00/main.dol", "GM8P01_00"), None);
+    }
+
+    use crate::stages::refusal::{Kind, LinkerDiagnostic, LinkerDiagnosticKind};
+
+    fn symbol(name: &str, address: u32, size: u32) -> LayoutSymbol {
+        LayoutSymbol { name: name.into(), section: ".sbss".into(), address, size: Some(size) }
+    }
+
+    fn blocks(entries: &[(&str, &[(u32, u32)])]) -> IndexMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(unit, ranges)| {
+                let mut lines = vec![entry_line(".text", 0x100, 0x200, "")];
+                lines
+                    .extend(ranges.iter().map(|&(start, end)| entry_line(".sbss", start, end, "")));
+                ((*unit).to_string(), lines)
+            })
+            .collect()
+    }
+
+    /// `seq.c` holds two `.sbss` objects in the source; the target moved the
+    /// section by 0x100 and has not split them, so they sit in a gap object.
+    fn inputs(next_target: u32) -> FeedbackInputs {
+        FeedbackInputs {
+            source_symbols: vec![
+                symbol("sPrevious", 0x1000, 4),
+                symbol("seqFreeRoot", 0x1008, 4),
+                symbol("seqPausedRoot", 0x100c, 4),
+                symbol("sNext", 0x1018, 4),
+            ],
+            target_symbols: vec![
+                symbol("sPrevious", 0x1100, 4),
+                symbol("seqFreeRoot", 0x1108, 4),
+                symbol("seqPausedRoot", 0x110c, 4),
+                symbol("sNext", next_target, 4),
+            ],
+            source_blocks: blocks(&[
+                ("prev.c", &[(0x1000, 0x1008)]),
+                ("seq.c", &[(0x1008, 0x1018)]),
+                ("next.c", &[(0x1018, 0x1020)]),
+            ]),
+            split_units: BTreeMap::new(),
+            seams: Vec::new(),
+        }
+    }
+
+    fn duplicate(symbol: &str, gap: &str) -> Refusal {
+        Refusal {
+            kind: Kind::DuplicateSymbol,
+            affected: Vec::new(),
+            linker: vec![LinkerDiagnostic {
+                kind: LinkerDiagnosticKind::MultiplyDefined,
+                symbol: symbol.into(),
+                object: Some("seq.o".into()),
+                referenced_from: None,
+                previously_defined_in: Some(gap.into()),
+            }],
+            command: None,
+        }
+    }
+
+    #[test]
+    fn a_gap_object_names_its_section_and_start() {
+        assert_eq!(gap_object("auto_09_8041BEB8_sdata.o"), Some((".sdata".into(), 0x8041BEB8)));
+        assert_eq!(gap_object("auto_11_80421AB8_sdata2.o"), Some((".sdata2".into(), 0x80421AB8)));
+        assert_eq!(gap_object("THPDec.o"), None);
+    }
+
+    #[test]
+    fn the_linker_spells_a_member_demangled() {
+        assert!(linker_spelling(
+            "CDolphinController::skTypeUnknown",
+            "skTypeUnknown__18CDolphinController"
+        ));
+        assert!(linker_spelling("seqFreeRoot", "seqFreeRoot"));
+        // A wrap inside the name rejoins with a space.
+        assert!(linker_spelling(
+            "CDolphinController::skType Unknown",
+            "skTypeUnknown__18CDolphinController"
+        ));
+        assert!(!linker_spelling("seqFreeRoot", "seqPausedRoot"));
+    }
+
+    #[test]
+    fn a_gap_duplicate_becomes_the_bracketed_source_split() {
+        let target = blocks(&[
+            ("prev.c", &[(0x1100, 0x1108)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1118, 0x1120)]),
+        ]);
+        let refusal = duplicate("seqFreeRoot", "auto_10_00001108_sbss.o");
+        let derived = derive_ranges(&inputs(0x1118), "seq.c", &target, &refusal);
+        assert_eq!(derived.len(), 1, "{derived:?}");
+        assert_eq!(derived[0].line, entry_line(".sbss", 0x1108, 0x1118, ""));
+        assert!(
+            derived[0].reason.contains("between seqFreeRoot and sNext"),
+            "{}",
+            derived[0].reason
+        );
+
+        // Without a source split for the section there is nothing to feed back.
+        assert!(derive_ranges(&inputs(0x1118), "other.c", &target, &refusal).is_empty());
+        // A gap object of another section does not hold this symbol.
+        let elsewhere = duplicate("seqFreeRoot", "auto_10_00001108_sdata.o");
+        assert!(derive_ranges(&inputs(0x1118), "seq.c", &target, &elsewhere).is_empty());
+    }
+
+    #[test]
+    fn without_a_uniform_delta_feedback_claims_only_the_symbol() {
+        // The right anchor moved, so the whole source split cannot be mapped.
+        let target = blocks(&[
+            ("prev.c", &[(0x1100, 0x1108)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1120, 0x1128)]),
+        ]);
+        let refusal = duplicate("seqFreeRoot", "auto_10_00001108_sbss.o");
+        let derived = derive_ranges(&inputs(0x1120), "seq.c", &target, &refusal);
+        assert_eq!(derived.len(), 1, "{derived:?}");
+        assert_eq!(derived[0].line, entry_line(".sbss", 0x1108, 0x110c, ""));
+        // A range that would overlap an existing split is never proposed.
+        let crowded = blocks(&[
+            ("prev.c", &[(0x1100, 0x110a)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1120, 0x1128)]),
+        ]);
+        assert!(derive_ranges(&inputs(0x1120), "seq.c", &crowded, &refusal).is_empty());
+    }
+
+    #[test]
+    fn only_a_duplicate_in_the_units_own_object_is_fed_back() {
+        let target = blocks(&[
+            ("prev.c", &[(0x1100, 0x1108)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1118, 0x1120)]),
+        ]);
+        let mut refusal = duplicate("seqFreeRoot", "auto_10_00001108_sbss.o");
+        refusal.linker[0].object = Some("other.o".into());
+        assert!(derive_ranges(&inputs(0x1118), "seq.c", &target, &refusal).is_empty());
+        assert_eq!(file_stem("musyx/runtime/seq.c"), file_stem("seq.o"));
+    }
+
+    #[test]
+    fn every_duplicate_of_a_refusal_is_derived_at_once_and_adjacent_extents_join() {
+        // The right anchor moved, so each symbol is claimed by its own extent.
+        let target = blocks(&[
+            ("prev.c", &[(0x1100, 0x1108)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1120, 0x1128)]),
+        ]);
+        let mut refusal = duplicate("seqFreeRoot", "auto_10_00001108_sbss.o");
+        let mut second = refusal.linker[0].clone();
+        second.symbol = "seqPausedRoot".into();
+        refusal.linker.push(second);
+        let derived = derive_ranges(&inputs(0x1120), "seq.c", &target, &refusal);
+        assert_eq!(derived.len(), 1, "{derived:?}");
+        assert_eq!(derived[0].line, entry_line(".sbss", 0x1108, 0x1110, ""));
+        assert!(derived[0].reason.contains("seqPausedRoot"), "{}", derived[0].reason);
+    }
+
+    #[test]
+    fn a_mapping_that_starts_before_the_gap_falls_back_to_the_symbols_extent() {
+        // prev.c already ends inside the mapped range's start, so the mapped
+        // split does not fit; the symbol's own extent still does.
+        let inputs = inputs(0x1118);
+        let target = blocks(&[
+            ("prev.c", &[(0x1100, 0x1104)]),
+            ("mid.c", &[(0x1104, 0x1108)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1118, 0x1120)]),
+        ]);
+        // The gap the linker names starts after the symbol the mapping
+        // would begin with.
+        let refusal = duplicate("seqPausedRoot", "auto_10_0000110C_sbss.o");
+        let derived = derive_ranges(&inputs, "seq.c", &target, &refusal);
+        assert_eq!(derived.len(), 1, "{derived:?}");
+        assert_eq!(derived[0].line, entry_line(".sbss", 0x110c, 0x1110, ""));
+        assert!(derived[0].reason.contains("own extent"), "{}", derived[0].reason);
+    }
+
+    #[test]
+    fn the_gap_ends_at_the_next_target_split() {
+        // A target symbol of the same spelling past the gap is not the one.
+        let mut inputs = inputs(0x1120);
+        inputs.target_symbols.push(symbol("seqLater", 0x1130, 4));
+        inputs.source_symbols.push(symbol("seqLater", 0x1010, 4));
+        let target = blocks(&[
+            ("prev.c", &[(0x1100, 0x1108)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1120, 0x1128)]),
+        ]);
+        let refusal = duplicate("seqLater", "auto_10_00001108_sbss.o");
+        assert!(derive_ranges(&inputs, "seq.c", &target, &refusal).is_empty());
+    }
+
+    fn feedback_entry(unit: &str, split_unit: &str, lines: &[String]) -> Applied {
+        Applied {
+            unit: unit.into(),
+            id: DATA_FEEDBACK.into(),
+            units: vec![split_unit.into()],
+            record: serde_json::to_value(DataFeedback {
+                split_unit: split_unit.into(),
+                data_lines: lines.to_vec(),
+            })
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn validation_requires_every_fed_back_line() {
+        let added = entry_line(".sbss", 0x1108, 0x1118, "");
+        let entry = feedback_entry("seq.c", "seq.c", std::slice::from_ref(&added));
+        let accepted = [Candidate::new("seq.c")];
+        let mut present = blocks(&[("seq.c", &[])]);
+        present.get_mut("seq.c").unwrap().push(added.clone());
+        check_feedback(&[&entry], &accepted, &present).unwrap();
+        let missing = blocks(&[("seq.c", &[])]);
+        assert!(check_feedback(&[&entry], &accepted, &missing).is_err());
+        assert!(check_feedback(&[&entry], &[], &present).is_err(), "the unit was not accepted");
+    }
+
+    #[test]
+    fn a_carried_line_that_no_longer_fits_is_left_out_whole() {
+        let accepted = Splits {
+            header: String::new(),
+            blocks: IndexMap::from([
+                ("seq.c".to_string(), vec![entry_line(".text", 0x100, 0x200, "")]),
+                ("other.c".to_string(), vec![
+                    entry_line(".text", 0x200, 0x300, ""),
+                    entry_line(".sbss", 0x1110, 0x1120, ""),
+                ]),
+            ]),
+        };
+        let fits = DataFeedback {
+            split_unit: "seq.c".into(),
+            data_lines: vec![entry_line(".sbss", 0x1100, 0x1108, "")],
+        };
+        let (staged, lines) = stage_lines(&accepted, &cyclic_units(&accepted.blocks), &[], vec![(
+            "seq.c",
+            fits.clone(),
+        )]);
+        assert_eq!(lines.len(), 1);
+        assert!(staged.blocks["seq.c"].contains(&fits.data_lines[0]));
+        let crowded = DataFeedback {
+            split_unit: "seq.c".into(),
+            data_lines: vec![
+                entry_line(".sbss", 0x1100, 0x1108, ""),
+                entry_line(".sbss", 0x1108, 0x1118, ""),
+            ],
+        };
+        let (staged, lines) =
+            stage_lines(&accepted, &cyclic_units(&accepted.blocks), &[], vec![("seq.c", crowded)]);
+        assert!(lines.is_empty());
+        assert_eq!(staged.blocks, accepted.blocks, "nothing of the unit is staged");
+    }
+
+    #[test]
+    fn a_feedback_line_follows_the_units_ranges_of_its_section() {
+        let mut body =
+            vec![entry_line(".text", 0x100, 0x200, ""), entry_line(".data", 0x300, 0x310, "")];
+        insert_line(&mut body, entry_line(".text", 0x200, 0x210, ""));
+        insert_line(&mut body, entry_line(".sbss", 0x400, 0x408, ""));
+        // A new section goes where dtk writes it, not at the end.
+        insert_line(&mut body, entry_line(".rodata", 0x280, 0x290, ""));
+        insert_line(&mut body, entry_line(".sdata", 0x380, 0x388, ""));
+        insert_line(&mut body, entry_line(".unusual", 0x500, 0x508, ""));
+        insert_line(&mut body, entry_line(".text", 0x80, 0x100, ""));
+        assert_eq!(body, [
+            entry_line(".text", 0x80, 0x100, ""),
+            entry_line(".text", 0x100, 0x200, ""),
+            entry_line(".text", 0x200, 0x210, ""),
+            entry_line(".rodata", 0x280, 0x290, ""),
+            entry_line(".data", 0x300, 0x310, ""),
+            entry_line(".sdata", 0x380, 0x388, ""),
+            entry_line(".sbss", 0x400, 0x408, ""),
+            entry_line(".unusual", 0x500, 0x508, ""),
+        ]);
+    }
+
+    fn seam(address: u32, next_unit: &str) -> DataSeam {
+        DataSeam { section: ".sbss".into(), address, next_unit: next_unit.into() }
+    }
+
+    #[test]
+    fn feedback_never_starts_another_unit_at_a_certified_jump_table_seam() {
+        let target = blocks(&[
+            ("prev.c", &[(0x1100, 0x1108)]),
+            ("seq.c", &[]),
+            ("next.c", &[(0x1118, 0x1120)]),
+        ]);
+        let refusal = duplicate("seqFreeRoot", "auto_10_00001108_sbss.o");
+        let mut inputs = inputs(0x1118);
+        // prev.c's jump table ends at 0x1108 and another unit continues there.
+        inputs.seams = vec![seam(0x1108, "other.c")];
+        assert!(derive_ranges(&inputs, "seq.c", &target, &refusal).is_empty());
+        // The expected unit may.
+        inputs.seams = vec![seam(0x1108, "seq.c")];
+        assert_eq!(derive_ranges(&inputs, "seq.c", &target, &refusal).len(), 1);
+        // The expected unit must start at its seam before claiming elsewhere.
+        inputs.seams = vec![seam(0x1104, "seq.c")];
+        assert!(derive_ranges(&inputs, "seq.c", &target, &refusal).is_empty());
+    }
+
+    #[test]
+    fn a_carried_line_at_another_units_seam_is_not_staged() {
+        let accepted = Splits {
+            header: String::new(),
+            blocks: IndexMap::from([("seq.c".to_string(), vec![entry_line(
+                ".text", 0x100, 0x200, "",
+            )])]),
+        };
+        let carried = DataFeedback {
+            split_unit: "seq.c".into(),
+            data_lines: vec![entry_line(".sbss", 0x1108, 0x1118, "")],
+        };
+        let baseline = cyclic_units(&accepted.blocks);
+        let (_, lines) = stage_lines(&accepted, &baseline, &[seam(0x1108, "other.c")], vec![(
+            "seq.c",
+            carried.clone(),
+        )]);
+        assert!(lines.is_empty());
+        let (_, lines) =
+            stage_lines(&accepted, &baseline, &[seam(0x1108, "seq.c")], vec![("seq.c", carried)]);
+        assert_eq!(lines.len(), 1);
     }
 }

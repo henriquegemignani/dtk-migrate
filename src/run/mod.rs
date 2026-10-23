@@ -45,7 +45,7 @@ pub const SCHEMA: u32 = 9;
 /// Stored preparations and worker results that may be interpreted by the same
 /// coordinator compatibility level. Bump this when a same-schema executable
 /// would prepare, evaluate or integrate an existing artifact differently.
-pub const RESUME_COMPATIBILITY: u32 = 8;
+pub const RESUME_COMPATIBILITY: u32 = 9;
 
 /// Fresh runs keep more work available than there are worker lanes, so a slow
 /// batch cannot leave the rest of the machine idle. Runs created before this
@@ -550,6 +550,13 @@ pub fn run_stage(
                 })
                 .collect(),
             only: run.only.iter().cloned().collect(),
+            jump_table_seams: reserved
+                .iter()
+                .filter_map(|scope| match scope {
+                    MutationScope::JumpTableSeam(seam) => Some(seam.clone()),
+                    _ => None,
+                })
+                .collect(),
         };
 
         let snapshot = Snapshot::of(&baseline_dir)?;
@@ -980,7 +987,9 @@ fn focus(
             MutationScope::Unit(name)
             | MutationScope::UnitData(name)
             | MutationScope::UnitLink(name) => requested.contains(name.as_str()),
-            MutationScope::CodeDependency(_) | MutationScope::DataDependency(_) => false,
+            MutationScope::CodeDependency(_)
+            | MutationScope::DataDependency(_)
+            | MutationScope::JumpTableSeam(_) => false,
             MutationScope::Symbol(_) => {
                 stage.writes(candidate)?.iter().any(|unit| requested.contains(unit.as_str()))
             }
@@ -997,7 +1006,8 @@ fn focus(
             | MutationScope::UnitLink(name) => Some(name.clone()),
             MutationScope::CodeDependency(_)
             | MutationScope::DataDependency(_)
-            | MutationScope::Symbol(_) => None,
+            | MutationScope::Symbol(_)
+            | MutationScope::JumpTableSeam(_) => None,
         })
         .collect();
     for root in &roots {

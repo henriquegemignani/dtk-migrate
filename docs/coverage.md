@@ -619,6 +619,72 @@ Two things happen before a build is spent:
   and publication recheck any subsequently represented neighbour at that edge.
   The certificate supports the complete allocation, not the inferred size of
   either retail symbol in isolation.
+  Data evidence schema 7 adds a **source-layout** route
+  (`DataSizeBasis::SourceLayoutBracketed`) for a source data split the target
+  lacks. Anchors are named symbols that occur exactly once in each version,
+  in the same section; dtk placeholders, `@` labels and numbered function
+  statics (`init$2667`) never anchor. The last anchor at or before the source
+  split's start and the first at or after its end must share one address
+  delta with every anchor between them. Both anchors must lie within the
+  neighbouring source splits, from the start of the split before this one to
+  the end of the split after it (the first and last split of a section are
+  open towards the section's edge), counting the ranges `splits.txt` states.
+  Every target symbol between the anchors, not only inside the range, must
+  correspond to the source at the shifted address: a real target name must be
+  the source's name there or replace a dtk placeholder (`lbl_`, `fn_`, ...); a
+  target placeholder, `@` label or numbered static must start where some
+  source symbol starts, or lie strictly inside a sized source object, and a
+  reference into source padding rejects the range.
+
+  Equal anchor deltas only show that the total size between the anchors is
+  unchanged, and the rules above still let uniformly sized unnamed objects
+  shift between neighbours: a float pool in `.sdata2` or a run of 4-byte
+  `lbl_` words can grow in one unit and shrink in the next with every label
+  still starting on a source label. Discovery's trial cannot refute such a
+  boundary: units without source are linked from extracted objects, so a
+  wrong data split still reproduces retail, and the hash does not see it. So
+  the interior is checked against content (`LayoutInterior`):
+  - initialized data (every section but `.bss`/`.sbss`/`.sbss2`): the whole
+    source split and the shifted target range must hold the same bytes
+    outside relocations, relocations must agree in offset and kind, and
+    where both relocation targets have a real name, the names and addends
+    must agree (relocations against dtk placeholders or section symbols
+    compare offset and kind only, since their addends are relative to a
+    symbol whose extent may differ between versions). Something beyond
+    masked words and one repeated byte must be compared. A match at the
+    claimed delta is not enough on its own: a pool of equal constants or a
+    table of pointers into one object matches itself shifted by a word. So
+    the same comparison must fail at every other word-aligned position
+    within the anchors' target span, widened by two words either side of the
+    range; data that repeats there is not mapped;
+  - BSS, which has no bytes: at least one member inside must be the same
+    named object in both versions, every member paired by address alone
+    must have the same recorded size on both sides, and a target reference
+    inside a source object counts only if that object is itself present in
+    the target at its shifted address, with the same size. A split holding
+    only placeholders is not mapped.
+
+  The shifted range must overlap no target split, and neither edge may fall
+  inside a sized target symbol. The range covers the whole split, padding
+  included, so its end is a valid split end rather than the last member's
+  sized end. Its alignment is the source split's: a delta that is a multiple
+  of it keeps the source edges' residue, and otherwise both edges must be
+  aligned. The line carries the source split's `align:`/`common` attributes,
+  and the certificate stands in for the compiled-allocation proof that a new
+  unannotated BSS range otherwise needs. Weak members are admitted here,
+  unlike the member-by-member routes: the source split placed this unit's
+  copy at that offset, and leaving it in a gap object duplicates it at link.
+  A matcher range with the same bounds keeps its own record when that
+  already proves the range and, for BSS, its linker mode; otherwise the
+  layout certificate replaces it. A matcher range for the same unit and
+  section that the layout range does not contain, or that is contained but
+  would carry other attributes, is dropped with its proposal, so discovery
+  never widens or conflicts two differently proven lines; if such a range is
+  eligible on its own record, the layout range is not added instead. Another
+  layout range of the same unit and section is a separate source split and
+  never conflicts. On the Echoes G2ME01 → G2MJ01 checkout this raised
+  eligible data ranges from 58 of 1906 to 715 of 1976, 672 of them by source
+  layout.
 
 ## verify — whole source files
 
@@ -640,6 +706,57 @@ A unit declared for the target that the target has no split for is reported
 rather than failed: nothing is compiled and nothing is linked, which is vacuous
 rather than wrong, and it is a standing property of the configuration rather than
 anything a candidate did.
+
+A refusal records `mwld`'s symbol errors in `refusal.linker`, at most 64 of
+each kind, rejoining its wrapped lines (with a space, or without one where
+only that parses, for a token cut mid-line): the symbol as printed (demangled for C++), the defining or
+referencing object, and for `multiply-defined` the object that already defined
+it. A failed `dtk shasum` (`computed checksum(s) did NOT match`) is a
+`retail-mismatch`.
+
+**Link feedback.** When an isolated unit is refused because a symbol is
+`multiply-defined` in the unit's own object and was `Previously defined in`
+an unsplit gap object (`auto_NN_ADDR_<section>.o`), the unit's data probably
+stayed in that gap. The gap runs from that address to the next target split
+of the section, and the symbol is looked up inside it, matching the linker's
+spelling with whitespace ignored (a wrapped name rejoins with a space). If
+one of the unit's source splits of that section holds the symbol, by name or
+(for BSS) as the source symbol the layout mapping pairs with it, verify
+derives the target range. For BSS this is that whole source split mapped by
+the source-layout bracket above, with its named-member and size rules, when
+the mapping holds the symbol, keeps the split's alignment and fits inside
+the gap beside every split. Verify reads only `symbols.txt`, which has no
+bytes, so initialized data is never mapped here. Otherwise the range is the
+symbol's own extent rounded up to the source split's stated alignment (at
+least 4). Every
+duplicate the refusal lists is derived in the same round, and own extents
+that touch become one range. The unit is linked again with the added lines
+and kept only if that link passes the same input and retail checks; at most
+three rounds are tried. Each round linked is recorded as a
+`data-split-feedback` event; a round whose lines would make the link order
+cyclic is recorded as not linked and ends feedback for the unit. Kept lines
+are recorded in the stage's `applied` history (`data_lines`) and must still
+be present when publication validates verify. The target `splits.txt` is
+committed only after the stage's final validation passes; otherwise it is
+restored. A worker's accepted candidate carries its lines, so integration
+stages them with that candidate's trial (if they still fit) instead of
+refusing the union and feeding each unit back again; they are kept only if
+that trial passes, and a unit whose carried lines no longer fit goes through
+feedback again if its link is refused. A candidate accepted without feedback
+carries no evidence. A unit whose code or data an earlier stage changed
+keeps its body, because those stages recheck the exact bodies they
+certified. REL units are not fed back.
+
+Discovery's certified jump-table ranges end at a seam where a named next
+unit's data must continue, and publication checks that again: a failure
+there rolls back the whole publication, not one unit. Discovery hands each
+seam on with its accepted candidates (`Permitted::jump_table_seams`), and
+link feedback, both when deriving a range and when integration stages a
+worker's carried lines, refuses a range that would start another unit at a
+seam, or give the expected unit a range in that section without one starting
+at the seam. Fed-back lines go where dtk writes their section in the unit's
+body (`.init`, `extab`, `extabindex`, `.text`, `.ctors`, `.dtors`, `.rodata`,
+`.data`, `.bss`, `.sdata`, `.sbss`, `.sdata2`, `.sbss2`, then others).
 
 ## What a rejection is not
 

@@ -268,7 +268,7 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
         write_candidates(&path, &report)?;
     }
     if outputs.splits.is_some() || outputs.data_evidence.is_some() {
-        let proposals = propose_units(source, target, result, data_matches);
+        let mut proposals = propose_units(source, target, result, data_matches);
         let version = |config: &Utf8NativePath| -> String {
             Path::new(config.as_str())
                 .parent()
@@ -290,6 +290,13 @@ pub(crate) fn run_with_cache(request: &Request, cache: &mut MatchingCache) -> Re
             data_matches,
             identifications.object_evidence.as_ref(),
             object_root.as_ref().map(|(root, _)| root.as_path()),
+        );
+        evidence.add_source_layouts(source, target, data_matches, &mut proposals);
+        info!(
+            "Data range evidence: {} of {} ranges eligible ({} by source layout)",
+            evidence.ranges.iter().filter(|range| range.eligible()).count(),
+            evidence.ranges.len(),
+            evidence.ranges.iter().filter(|range| range.source_layout_proven()).count()
         );
         if let Some(path) = native(outputs.splits.as_ref()) {
             write_unit_proposals(&path, target, &proposals, &evidence)?;

@@ -29,7 +29,7 @@ use crate::{
         ownership::{ObservationIndex, ObservationReference, OwnershipAssessment, load_reference},
     },
     build::context::{BuildContext, is_trial_failure},
-    matching::data_evidence::{DataEvidenceReference, DataEvidenceReport},
+    matching::data_evidence::{DataEvidenceReference, DataEvidenceReport, DataRangeEvidence},
     project::{
         link_order::cyclic_units,
         report::Report,
@@ -300,45 +300,49 @@ pub fn data_proposals(
     existing: &IndexMap<String, Vec<String>>,
     source: &IndexMap<String, Vec<String>>,
 ) -> Vec<(String, Vec<String>)> {
-    data_proposals_with_certificates(
-        proposals,
-        existing,
-        source,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-    )
+    data_proposals_with_certificates(proposals, existing, source, &DataProofs::default())
 }
 
 type DataProofKey = (String, String, u32, u32);
-type OrdinaryBssProofs = BTreeMap<DataProofKey, String>;
-type JumpTableProofs = BTreeMap<DataProofKey, String>;
 
-fn ordinary_bss_proofs(report: &DataEvidenceReport) -> OrdinaryBssProofs {
-    report
-        .ranges
-        .iter()
-        .filter(|range| range.eligible() && range.ordinary_bss_proven())
-        .map(|range| {
-            (
-                (range.unit.clone(), range.section.clone(), range.start, range.end),
-                range.compiled_ordinary_bss.as_ref().unwrap().next_owner.clone(),
-            )
-        })
-        .collect()
+/// Whole-range certificates from the data evidence, by exact range.
+#[derive(Debug, Clone, Default)]
+struct DataProofs {
+    /// A complete ordinary BSS allocation, with the unit that must hold the
+    /// range after it.
+    ordinary_bss: BTreeMap<DataProofKey, String>,
+    /// A held member and its jump table, with the unit named at the right edge.
+    jump_tables: BTreeMap<DataProofKey, String>,
+    /// A whole source split mapped by a uniform anchor delta. The anchors
+    /// bracket both edges and the source split states the linker mode.
+    source_layouts: BTreeSet<DataProofKey>,
 }
 
-fn jump_table_proofs(report: &DataEvidenceReport) -> JumpTableProofs {
-    report
-        .ranges
-        .iter()
-        .filter(|range| range.eligible() && range.jump_table_proven())
-        .map(|range| {
-            (
-                (range.unit.clone(), range.section.clone(), range.start, range.end),
-                range.compiled_jump_table.as_ref().unwrap().next_unit.clone(),
-            )
-        })
-        .collect()
+impl DataProofs {
+    fn of(report: &DataEvidenceReport) -> Self {
+        let key = |range: &DataRangeEvidence| {
+            (range.unit.clone(), range.section.clone(), range.start, range.end)
+        };
+        let eligible = || report.ranges.iter().filter(|range| range.eligible());
+        Self {
+            ordinary_bss: eligible()
+                .filter(|range| range.ordinary_bss_proven())
+                .map(|range| {
+                    (key(range), range.compiled_ordinary_bss.as_ref().unwrap().next_owner.clone())
+                })
+                .collect(),
+            jump_tables: eligible()
+                .filter(|range| range.jump_table_proven())
+                .map(|range| {
+                    (key(range), range.compiled_jump_table.as_ref().unwrap().next_unit.clone())
+                })
+                .collect(),
+            source_layouts: eligible()
+                .filter(|range| range.source_layout_proven())
+                .map(key)
+                .collect(),
+        }
+    }
 }
 
 fn holds_next_range(
@@ -382,8 +386,7 @@ fn data_proposals_with_certificates(
     proposals: &IndexMap<String, Vec<String>>,
     existing: &IndexMap<String, Vec<String>>,
     source: &IndexMap<String, Vec<String>>,
-    ordinary_bss: &OrdinaryBssProofs,
-    jump_tables: &JumpTableProofs,
+    proofs: &DataProofs,
 ) -> Vec<(String, Vec<String>)> {
     let mut names: Vec<String> = existing.keys().cloned().collect();
     names.extend(
@@ -415,7 +418,9 @@ fn data_proposals_with_certificates(
             let proposed_attributes = parse_attributes(line);
             // An unannotated new BSS interval may be ordinary or common.
             // An existing ordinary range can establish its own mode; a new
-            // allocation needs the exact whole-range compiled certificate.
+            // allocation needs the exact whole-range compiled certificate,
+            // or a source-layout certificate carrying the source split's mode.
+            let key = (name.clone(), range.section.clone(), range.start, range.end);
             let existing_overlap = new_body.iter().any(|current_line| {
                 parse_range(current_line).is_some_and(|current| {
                     current.section == range.section
@@ -426,16 +431,14 @@ fn data_proposals_with_certificates(
             if is_bss_section(&range.section)
                 && !existing_overlap
                 && !proposed_attributes.contains("common")
-                && !ordinary_bss
-                    .get(&(name.clone(), range.section.clone(), range.start, range.end))
-                    .is_some_and(|owner| {
-                        holds_next_range(existing, owner, &range.section, range.end)
-                    })
+                && !proofs.source_layouts.contains(&key)
+                && !proofs.ordinary_bss.get(&key).is_some_and(|owner| {
+                    holds_next_range(existing, owner, &range.section, range.end)
+                })
             {
                 continue;
             }
-            if let Some(owner) =
-                jump_tables.get(&(name.clone(), range.section.clone(), range.start, range.end))
+            if let Some(owner) = proofs.jump_tables.get(&key)
                 && !preserves_named_next_boundary(existing, owner, &range.section, range.end)
             {
                 continue;
@@ -531,14 +534,13 @@ fn data_completion(
     witnessed_data: &IndexMap<String, Vec<String>>,
     existing: &IndexMap<String, Vec<String>>,
     source: &IndexMap<String, Vec<String>>,
-    ordinary_bss: &OrdinaryBssProofs,
-    jump_tables: &JumpTableProofs,
+    proofs: &DataProofs,
 ) -> Option<Vec<String>> {
     let ranges = witnessed_data.get(unit)?;
     let mut projected = existing.clone();
     projected.insert(unit.to_string(), code_lines.to_vec());
     let proposed = IndexMap::from([(unit.to_string(), ranges.clone())]);
-    data_proposals_with_certificates(&proposed, &projected, source, ordinary_bss, jump_tables)
+    data_proposals_with_certificates(&proposed, &projected, source, proofs)
         .into_iter()
         .find(|(name, _)| name == unit)
         .map(|(_, lines)| lines)
@@ -569,6 +571,23 @@ impl Stage for Discover {
             }
             Kind::Code => BTreeSet::from([MutationScope::Unit(name)]),
         })
+    }
+
+    /// Accepted ranges' scopes, and the jump-table seams their certificates
+    /// rest on, which later stages must keep.
+    fn accepted_scopes(&self, candidates: &[Candidate]) -> Result<BTreeSet<MutationScope>> {
+        let mut scopes = BTreeSet::new();
+        // Candidates of one run share a data evidence report; read it once.
+        let mut reports = BTreeMap::new();
+        for candidate in candidates {
+            scopes.extend(self.scopes(candidate)?);
+            scopes.extend(
+                jump_table_seams(candidate, &mut reports)?
+                    .into_iter()
+                    .map(MutationScope::JumpTableSeam),
+            );
+        }
+        Ok(scopes)
     }
 
     fn choose_variants(&self, candidates: Vec<Candidate>) -> Result<Vec<Candidate>> {
@@ -644,6 +663,7 @@ impl Stage for Discover {
                 Ok(Some(reason)) => Some((reason, Refusal {
                     kind: RefusalKind::MeasuredRegression,
                     affected: Vec::new(),
+                    linker: Vec::new(),
                     command: None,
                 })),
                 Err(error) if is_trial_failure(&error) => {
@@ -681,8 +701,7 @@ impl Stage for Discover {
             DataEvidenceReference::of(&data_evidence_path, &ctx.source, &ctx.target)?;
         let data_report = data_evidence.load(&ctx.source, &ctx.target)?;
         let witnessed_data = evidenced_data_lines(&proposals, &data_report);
-        let ordinary_bss = ordinary_bss_proofs(&data_report);
-        let jump_tables = jump_table_proofs(&data_report);
+        let proofs = DataProofs::of(&data_report);
         let source_blocks =
             Splits::read(&ctx.root.join("config").join(&ctx.source).join("splits.txt"))?.blocks;
         let evidence: CoverageReport = match captured {
@@ -731,8 +750,7 @@ impl Stage for Discover {
                         &witnessed_data,
                         &blocks,
                         &source_blocks,
-                        &ordinary_bss,
-                        &jump_tables,
+                        &proofs,
                     );
                     candidate(name, Proposal {
                         lines: completion.clone().unwrap_or_else(|| code_lines.clone()),
@@ -758,28 +776,23 @@ impl Stage for Discover {
         // Keep the data-only form behind a combined code/data candidate. The
         // coordinator selects one form after applying reservations: if an
         // earlier stage owns the code, supported data can still be completed.
-        let mut data: Vec<Candidate> = data_proposals_with_certificates(
-            &witnessed_data,
-            &blocks,
-            &source_blocks,
-            &ordinary_bss,
-            &jump_tables,
-        )
-        .into_iter()
-        .map(|(name, lines)| {
-            let before_lines = blocks.get(&name).cloned().unwrap_or_default();
-            candidate(name, Proposal {
-                lines,
-                kind: Kind::Data,
-                before_lines,
-                code_lines: None,
-                observation: None,
-                ownership: None,
-                data_evidence: Some(data_evidence.clone()),
-                fallback_data: None,
-            })
-        })
-        .collect::<Result<_>>()?;
+        let mut data: Vec<Candidate> =
+            data_proposals_with_certificates(&witnessed_data, &blocks, &source_blocks, &proofs)
+                .into_iter()
+                .map(|(name, lines)| {
+                    let before_lines = blocks.get(&name).cloned().unwrap_or_default();
+                    candidate(name, Proposal {
+                        lines,
+                        kind: Kind::Data,
+                        before_lines,
+                        code_lines: None,
+                        observation: None,
+                        ownership: None,
+                        data_evidence: Some(data_evidence.clone()),
+                        fallback_data: None,
+                    })
+                })
+                .collect::<Result<_>>()?;
         if let Some(limit) = limit {
             // A data fallback for one of the chosen code units must not use
             // up the budget for an independent data-only unit.
@@ -930,6 +943,55 @@ fn candidate(name: String, proposal: Proposal) -> Result<Candidate> {
     Ok(Candidate { evidence: serde_json::to_value(proposal)?, name })
 }
 
+/// The seams at the right edge of the certified jump-table ranges an
+/// accepted proposal applied: [`preserves_named_next_boundary`] is checked
+/// against them again at publication. `reports` caches parsed reports by
+/// digest across candidates.
+fn jump_table_seams(
+    candidate: &Candidate,
+    reports: &mut BTreeMap<String, DataEvidenceReport>,
+) -> Result<Vec<crate::stages::DataSeam>> {
+    let proposal = proposal_of(candidate)?;
+    let Some(reference) = &proposal.data_evidence else { return Ok(Vec::new()) };
+    if !reports.contains_key(&reference.sha256) {
+        reports.insert(reference.sha256.clone(), reference.load_recorded()?);
+    }
+    let report = &reports[&reference.sha256];
+    let certified = report
+        .ranges
+        .iter()
+        .filter(|range| {
+            range.unit == candidate.name && range.eligible() && range.jump_table_proven()
+        })
+        .map(|range| {
+            let next = &range.compiled_jump_table.as_ref().unwrap().next_unit;
+            (range.section.as_str(), range.start, range.end, next.as_str())
+        });
+    Ok(seams_within(certified, &proposal.lines))
+}
+
+/// Seams of certified ranges `(section, start, end, next unit)` that the
+/// applied body holds: a range may have been widened into an overlapping
+/// line of the same unit, and its seam is still rechecked at publication.
+fn seams_within<'a>(
+    certified: impl Iterator<Item = (&'a str, u32, u32, &'a str)>,
+    lines: &[String],
+) -> Vec<crate::stages::DataSeam> {
+    let ranges: Vec<_> = lines.iter().filter_map(|line| parse_range(line)).collect();
+    certified
+        .filter(|&(section, start, end, _)| {
+            ranges
+                .iter()
+                .any(|range| range.section == section && range.start <= start && end <= range.end)
+        })
+        .map(|(section, _, end, next)| crate::stages::DataSeam {
+            section: section.to_string(),
+            address: end,
+            next_unit: next.to_string(),
+        })
+        .collect()
+}
+
 fn proposal_of(candidate: &Candidate) -> Result<Proposal> {
     serde_json::from_value(candidate.evidence.clone())
         .with_context(|| format!("Missing split proposal for {}", candidate.name))
@@ -1060,6 +1122,7 @@ impl Trials {
                 Some(Refusal {
                     kind: RefusalKind::LinkOrderCycle,
                     affected: introduced.into_iter().collect(),
+                    linker: Vec::new(),
                     command: None,
                 }),
             );
@@ -1113,6 +1176,7 @@ impl Trials {
                 Some(Refusal {
                     kind: RefusalKind::MeasuredRegression,
                     affected: batch.iter().map(|c| c.name.clone()).collect(),
+                    linker: Vec::new(),
                     command: None,
                 }),
             );
@@ -1272,20 +1336,32 @@ fn reproduced_data_body(
             blocks.entry(name).or_default().push(line);
             blocks
         });
-    data_proposals_with_certificates(
-        &witnessed,
-        before,
-        source,
-        &ordinary_bss_proofs(report),
-        &jump_table_proofs(report),
-    )
-    .into_iter()
-    .find(|(name, _)| name == unit)
-    .map(|(_, lines)| lines)
+    data_proposals_with_certificates(&witnessed, before, source, &DataProofs::of(report))
+        .into_iter()
+        .find(|(name, _)| name == unit)
+        .map(|(_, lines)| lines)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_seam_is_kept_when_its_range_was_widened_into_another_line() {
+        let lines = vec![
+            format_range(".text", 0x100, 0x200),
+            format_range(".data", 0x300, 0x340) + " align:8",
+        ];
+        let certified = [
+            (".data", 0x310, 0x320, "next.cpp"),
+            (".data", 0x300, 0x340, "exact.cpp"),
+            (".data", 0x330, 0x350, "outside.cpp"),
+            (".rodata", 0x310, 0x320, "other_section.cpp"),
+        ];
+        let seams = super::seams_within(certified.into_iter(), &lines);
+        let found: Vec<(u32, &str)> =
+            seams.iter().map(|seam| (seam.address, seam.next_unit.as_str())).collect();
+        assert_eq!(found, [(0x320, "next.cpp"), (0x340, "exact.cpp")]);
+    }
+
     use super::*;
     use crate::{
         analysis::{ownership::IdentificationReport, unit_matching::UnitTier},
@@ -1332,17 +1408,14 @@ mod tests {
         let source = blocks(&[("audio.cpp", &[&text(0x100, 0x200), &bss(0x400, 0x500)])]);
         let proposals = blocks(&[("audio.cpp", &[&bss(0x2000, 0x20f0), &bss(0x2100, 0x2180)])]);
         assert!(data_proposals(&proposals, &before, &source).is_empty());
-        let ordinary = BTreeMap::from([(
-            ("audio.cpp".into(), ".bss".into(), 0x2000, 0x20f0),
-            "next.cpp".into(),
-        )]);
-        let result = data_proposals_with_certificates(
-            &proposals,
-            &before,
-            &source,
-            &ordinary,
-            &BTreeMap::new(),
-        );
+        let ordinary = DataProofs {
+            ordinary_bss: BTreeMap::from([(
+                ("audio.cpp".into(), ".bss".into(), 0x2000, 0x20f0),
+                "next.cpp".into(),
+            )]),
+            ..Default::default()
+        };
+        let result = data_proposals_with_certificates(&proposals, &before, &source, &ordinary);
         assert_eq!(result, vec![("audio.cpp".into(), vec![
             text(0x100, 0x200),
             bss(0x2000, 0x20f0),
@@ -1350,28 +1423,35 @@ mod tests {
         let moved =
             blocks(&[("audio.cpp", &[&text(0x100, 0x200)]), ("next.cpp", &[&bss(0x2100, 0x2180)])]);
         assert!(
-            data_proposals_with_certificates(
-                &proposals,
-                &moved,
-                &source,
-                &ordinary,
-                &BTreeMap::new(),
-            )
-            .is_empty()
+            data_proposals_with_certificates(&proposals, &moved, &source, &ordinary,).is_empty()
         );
         let changed_mode = blocks(&[
             ("audio.cpp", &[&text(0x100, 0x200)]),
             ("next.cpp", &[&format!("{} common", bss(0x20f0, 0x2180))]),
         ]);
         assert!(
-            data_proposals_with_certificates(
-                &proposals,
-                &changed_mode,
-                &source,
-                &ordinary,
-                &BTreeMap::new(),
-            )
-            .is_empty()
+            data_proposals_with_certificates(&proposals, &changed_mode, &source, &ordinary,)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_source_layout_certificate_admits_a_new_ordinary_bss_range() {
+        let before = blocks(&[("seq.c", &[&text(0x100, 0x200)])]);
+        let source = blocks(&[("seq.c", &[&text(0x100, 0x200), &sbss(0x400, 0x420)])]);
+        let proposals = blocks(&[("seq.c", &[&sbss(0x2000, 0x2020)])]);
+        assert!(data_proposals(&proposals, &before, &source).is_empty());
+        let proofs = DataProofs {
+            source_layouts: BTreeSet::from([("seq.c".into(), ".sbss".into(), 0x2000, 0x2020)]),
+            ..Default::default()
+        };
+        assert_eq!(data_proposals_with_certificates(&proposals, &before, &source, &proofs), vec![
+            ("seq.c".into(), vec![text(0x100, 0x200), sbss(0x2000, 0x2020)])
+        ]);
+        let other = blocks(&[("seq.c", &[&sbss(0x2000, 0x2028)])]);
+        assert!(
+            data_proposals_with_certificates(&other, &before, &source, &proofs).is_empty(),
+            "the certificate covers its exact range only"
         );
     }
 
@@ -1383,28 +1463,19 @@ mod tests {
             ("sound.cpp", &[&data(0x1000, 0x1070)]),
             ("next.cpp", &[&data(0x1100, 0x1200)]),
         ]);
-        let jump_tables = BTreeMap::from([(
-            ("sound.cpp".into(), ".data".into(), 0x1000, 0x1100),
-            "next.cpp".into(),
-        )]);
-        let accepted = data_proposals_with_certificates(
-            &proposals,
-            &before,
-            &source,
-            &BTreeMap::new(),
-            &jump_tables,
-        );
+        let jump_tables = DataProofs {
+            jump_tables: BTreeMap::from([(
+                ("sound.cpp".into(), ".data".into(), 0x1000, 0x1100),
+                "next.cpp".into(),
+            )]),
+            ..Default::default()
+        };
+        let accepted = data_proposals_with_certificates(&proposals, &before, &source, &jump_tables);
         assert_eq!(accepted, vec![("sound.cpp".into(), vec![data(0x1000, 0x1100)])]);
 
         let unrepresented = blocks(&[("sound.cpp", &[&data(0x1000, 0x1070)])]);
         assert_eq!(
-            data_proposals_with_certificates(
-                &proposals,
-                &unrepresented,
-                &source,
-                &BTreeMap::new(),
-                &jump_tables,
-            ),
+            data_proposals_with_certificates(&proposals, &unrepresented, &source, &jump_tables,),
             accepted,
         );
 
@@ -1413,14 +1484,7 @@ mod tests {
             ("next.cpp", &[&data(0x1110, 0x1200)]),
         ]);
         assert!(
-            data_proposals_with_certificates(
-                &proposals,
-                &moved,
-                &source,
-                &BTreeMap::new(),
-                &jump_tables,
-            )
-            .is_empty()
+            data_proposals_with_certificates(&proposals, &moved, &source, &jump_tables,).is_empty()
         );
     }
 
@@ -1462,6 +1526,7 @@ mod tests {
                 }],
                 compiled_ordinary_bss: None,
                 compiled_jump_table: None,
+                source_layout: None,
             }],
         };
         let text_proposals = blocks(&[("a.cpp", &[&data(0x900, 0xA00), &data(0xA00, 0xB00)])]);
@@ -1481,8 +1546,7 @@ mod tests {
             &witnessed,
             &before,
             &source,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
+            &DataProofs::default(),
         )
         .unwrap();
         assert_eq!(completed, vec![text(0x100, 0x300), data(0x900, 0xA00)]);
@@ -1578,8 +1642,7 @@ mod tests {
                 &witnessed,
                 &foreign,
                 &source,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
+                &DataProofs::default(),
             )
             .is_none()
         );

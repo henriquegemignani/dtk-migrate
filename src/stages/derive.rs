@@ -198,6 +198,7 @@ impl Stage for Derive {
                             Some(Refusal {
                                 kind: RefusalKind::MeasuredRegression,
                                 affected: batch.iter().map(|c| c.name.clone()).collect(),
+                                linker: Vec::new(),
                                 command: None,
                             }),
                         ))

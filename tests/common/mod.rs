@@ -83,6 +83,31 @@ rejected_source = set(filter(None, os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_SO
 if source_linked & rejected_source:
     sys.exit("fixture: rejected source " + ",".join(sorted(source_linked & rejected_source)))
 splits = Path("config/PAL/splits.txt").read_text()
+# `unit,symbol,gap object,section`: linking `unit` from source defines `symbol`
+# a second time, as mwld reports it, until the unit's target split has that
+# section, which stops the gap object from holding it too. Entries separated
+# by `;` are reported one at a time, the first unsatisfied one first.
+def split_body(unit):
+    return ("\n" + splits).split("\n" + unit + ":\n", 1)[1].split("\n\n", 1)[0] if ("\n" + unit + ":\n") in ("\n" + splits) else ""
+for duplicate in filter(None, os.environ.get("DTK_MIGRATE_FIXTURE_GAP_DUPLICATE", "").split(";")):
+    unit, symbol, gap, section = duplicate.split(",")
+    if unit in source_linked and ("\t" + section + " ") not in split_body(unit):
+        header, prefix = chr(35) * 3 + " mwldeppc.exe Linker ", chr(35) + "   "
+        print(header + "Error:\n" + prefix + "multiply-defined: '" + symbol + "' in \n" + prefix
+              + Path(unit).stem + ".o\n" + prefix + "Previously defined in " + gap + "\n"
+              + header + "Alert:\n" + prefix + "Link failed.")
+        sys.exit(1)
+# `unit,section`: a source-linked unit whose split has that section fails,
+# standing in for a fed-back range that is still wrong.
+rejected_section = os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_SECTION", "")
+if rejected_section:
+    unit, section = rejected_section.split(",")
+    if unit in source_linked and ("\t" + section + " ") in split_body(unit):
+        sys.exit("fixture: rejected " + section + " of " + unit)
+# Units that link from source alone but fail together, only in integration.
+linked_together = set(filter(None, os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_LINKED_COMBINATION", "").split(",")))
+if linked_together and workspace.name == "integration" and linked_together <= source_linked:
+    sys.exit("fixture: rejected linked combination")
 named = {name for name in json.loads(Path("fixture_units.json").read_text()) if ("\n" + name + ":\n") in ("\n" + splits)}
 rejected_split = set(filter(None, os.environ.get("DTK_MIGRATE_FIXTURE_REJECT_SPLIT", "").split(",")))
 if named & rejected_split:
