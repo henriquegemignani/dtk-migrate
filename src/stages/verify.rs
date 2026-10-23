@@ -1017,8 +1017,10 @@ fn ranges_from_pairing(
             line: entry_line(section, start, end, &suffix),
             reason: format!(
                 "{section} {start:#010X}..{end:#010X} paired through the relocations of {} \
-                 identical functions ({} references, bytes {bytes})",
-                pairing.functions, paired.references,
+                 identical functions ({} references, bytes {bytes}{})",
+                pairing.functions,
+                paired.references,
+                if paired.reordered { ", constants paired one by one" } else { "" },
             ),
             section: section.to_string(),
             start,
@@ -1596,6 +1598,7 @@ mod tests {
             align: 8,
             references: 3,
             bytes: crate::matching::relocation_pairing::BytesCheck::Equal,
+            reordered: false,
         }
     }
 

@@ -176,6 +176,10 @@ pub struct PairedSection {
     pub align: u32,
     pub references: usize,
     pub bytes: BytesCheck,
+    /// The range is the extent of the individually paired symbols, because the
+    /// section's references do not share one offset (a reordered pool).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reordered: bool,
 }
 
 /// A symbol or section the pairing declined, and why.
@@ -264,6 +268,9 @@ fn bodies(object: &Object) -> Vec<Body> {
             .relocations
             .iter()
             .filter(|relocation| relocation.address >= start && relocation.address < end)
+            // A NONE relocation fills nothing and says nothing about what the
+            // function is: mwcc and dtk each emit them where the other does not.
+            .filter(|relocation| elf_kind(relocation.flags) != Some(0))
             .map(|relocation| {
                 Some(Site {
                     // mwcc places a 16-bit field two bytes into its instruction and
@@ -369,6 +376,7 @@ pub fn pair(
     for (from, to) in pairs {
         for (source_site, target_site) in from.relocations.iter().zip(&to.relocations) {
             let Some(base) = target_address(target, target_site.symbol, targets) else { continue };
+
             let Some(landed) =
                 u32::try_from(i64::from(base) + target_site.addend).ok().and_then(|address| {
                     // A reference lands inside a symbol, or on its first byte.
@@ -558,13 +566,6 @@ fn pair_sections(
         let reject = |reason: String, result: &mut Pairing| {
             result.rejected.push(Rejection { subject: section.name.clone(), reason });
         };
-        if deltas.len() != 1 {
-            reject(
-                format!("its references use {} different offsets into the target", deltas.len()),
-                result,
-            );
-            continue;
-        }
         if landed.iter().any(|name| *name != section.name) {
             reject(
                 format!(
@@ -575,22 +576,41 @@ fn pair_sections(
             );
             continue;
         }
+        if deltas.len() != 1 {
+            match reordered(section, &result.symbols, image) {
+                Ok(found) => result.sections.push(found),
+                Err(why) => reject(
+                    format!(
+                        "its references use {} different offsets into the target and {why}",
+                        deltas.len()
+                    ),
+                    result,
+                ),
+            }
+            continue;
+        }
         let (&delta, &references) = deltas.iter().next().unwrap();
         let (Ok(start), Ok(size)) = (u32::try_from(delta), u32::try_from(section.size)) else {
             continue;
         };
         let align = section.align.map_or(4, |align| align.get() as u32).max(4);
-        if !align.is_power_of_two() || start % align != 0 {
-            reject(format!("{start:#010X} is not aligned to {align}"), result);
+        if !align.is_power_of_two() || start % 4 != 0 {
+            reject(format!("{start:#010X} is not aligned to 4"), result);
             continue;
         }
-        let end = start.saturating_add(size).next_multiple_of(align);
+        let end = match end_of(&section.name, start, size, align, image) {
+            Ok(end) => end,
+            Err(why) => {
+                reject(why, result);
+                continue;
+            }
+        };
         let bytes = if !initialized(&section.name) {
             BytesCheck::NotApplicable
         } else if let Some(image) = image {
-            let Some(target) = image.bytes(start, end - start) else {
+            let Some(target) = image.bytes(start, size) else {
                 reject(
-                    format!("{start:#010X}..{end:#010X} is not initialized data of the target"),
+                    format!("{start:#010X}..+{size:#x} is not initialized data of the target"),
                     result,
                 );
                 continue;
@@ -601,9 +621,7 @@ fn pair_sections(
                 .map(|relocation| (relocation.address as usize, 4))
                 .collect();
             let Some(ours) = section.data.get(..size as usize) else { continue };
-            if !equal_outside(ours, &target[..size as usize], &relocated)
-                || target[size as usize..].iter().any(|&byte| byte != 0)
-            {
+            if !equal_outside(ours, target, &relocated) {
                 reject(format!("its bytes differ from the target's at {start:#010X}"), result);
                 continue;
             }
@@ -619,8 +637,100 @@ fn pair_sections(
             align,
             references,
             bytes,
+            reordered: false,
         });
     }
+}
+
+/// Where a section of `size` bytes at `start` ends in the target.
+///
+/// A section ends at its alignment (the next split's data starts there) when
+/// the bytes it would pad are zero, and otherwise at the next word, because
+/// retail does not pad a section the following one begins right after. A start
+/// that is not on the alignment keeps the word as its alignment.
+fn end_of(
+    name: &str,
+    start: u32,
+    size: u32,
+    align: u32,
+    image: Option<&DolImage>,
+) -> std::result::Result<u32, String> {
+    let align = if start % align == 0 { align } else { 4 };
+    let last = start.saturating_add(size);
+    let (padded, word) = (last.next_multiple_of(align), last.next_multiple_of(4));
+    let Some(image) = image.filter(|_| initialized(name)) else { return Ok(padded) };
+    let zero = |end: u32| {
+        image.bytes(last, end - last).is_some_and(|bytes| bytes.iter().all(|&byte| byte == 0))
+    };
+    if zero(padded) {
+        Ok(padded)
+    } else if zero(word) {
+        Ok(word)
+    } else {
+        Err(format!("the bytes after {last:#010X} are not padding"))
+    }
+}
+
+/// The range a section fills when its constants moved independently of one
+/// another, as a reordered literal pool does.
+///
+/// Each source symbol of the section that was paired individually (one to
+/// one, same section kind, equal bytes where they can be read) gives one
+/// target extent. The range starts at the lowest and must hold the section
+/// from there: the paired extents may not span more than the section's own
+/// size, and it ends where that size does. A constant nothing references can
+/// sit before the first one paired, which only the link can show.
+fn reordered(
+    section: &objdiff_core::obj::Section,
+    symbols: &[PairedSymbol],
+    image: Option<&DolImage>,
+) -> std::result::Result<PairedSection, String> {
+    let ours: Vec<&PairedSymbol> = symbols
+        .iter()
+        .filter(|paired| {
+            paired.source_section.as_deref() == Some(section.name.as_str()) && paired.size.is_some()
+        })
+        .collect();
+    if ours.is_empty() {
+        return Err("no symbol of it was paired individually".into());
+    }
+    let align = section.align.map_or(4, |align| align.get() as u32).max(4);
+    if !align.is_power_of_two() {
+        return Err(format!("its alignment {align} is not a power of two"));
+    }
+    let start = ours.iter().map(|paired| paired.target_address).min().unwrap();
+    let used = ours
+        .iter()
+        .map(|paired| paired.target_address.saturating_add(paired.size.unwrap_or(0)))
+        .max()
+        .unwrap();
+    let size = u32::try_from(section.size).map_err(|_| "it is too large".to_string())?;
+    if start % 4 != 0 {
+        return Err(format!("{start:#010X} is not aligned to 4"));
+    }
+    let end = end_of(&section.name, start, size, align, image)?;
+    if used > end {
+        return Err(format!(
+            "its paired symbols span {start:#010X}..{used:#010X}, more than its {size:#x} bytes"
+        ));
+    }
+    let bytes = if ours.iter().any(|paired| paired.bytes == BytesCheck::Unchecked) {
+        BytesCheck::Unchecked
+    } else if ours.iter().any(|paired| paired.bytes == BytesCheck::Equal) {
+        BytesCheck::Equal
+    } else {
+        BytesCheck::NotApplicable
+    };
+    Ok(PairedSection {
+        section: section.name.clone(),
+        start,
+        end,
+        source_size: size,
+        align,
+        references: ours.iter().map(|paired| paired.references).sum(),
+        bytes,
+        reordered: true,
+    })
 }
 
 #[cfg(test)]
@@ -984,5 +1094,128 @@ mod tests {
         assert_eq!(index.address_of("@39"), None);
         assert_eq!(index.address_of("lbl_80421800"), Some(0x8042_1800));
         assert_eq!(index.address_of("@40_80421688"), None);
+    }
+
+    /// Two functions each loading one float of a two-float pool, which the
+    /// target stores in the opposite order: `first` and `second` are the
+    /// target addresses of the source's `@41` and `@42`.
+    fn reordered_pool(first: u32, second: u32) -> (Object, Object) {
+        let function = |name: &'static str, at: u64| Sym {
+            name,
+            section: Some(0),
+            address: at,
+            size: 12,
+            kind: ObjSymbolKind::Function,
+        };
+        let code = |load: u32| {
+            let words = [0x3C60_0000u32, load, 0x4E80_0020];
+            words.into_iter().flat_map(u32::to_be_bytes).collect::<Vec<u8>>()
+        };
+        let both = || {
+            let mut bytes = code(0xC022_0000);
+            bytes.extend(code(0xC042_0000));
+            bytes
+        };
+        let source = object(
+            vec![
+                section(".text", ObjSectionKind::Code, both(), 24),
+                section(".sdata2", ObjSectionKind::Data, POOL.to_vec(), 8),
+            ],
+            &[
+                function("First", 0),
+                function("Second", 12),
+                Sym {
+                    name: "@41",
+                    section: Some(1),
+                    address: 0,
+                    size: 4,
+                    kind: ObjSymbolKind::Object,
+                },
+                Sym {
+                    name: "@42",
+                    section: Some(1),
+                    address: 4,
+                    size: 4,
+                    kind: ObjSymbolKind::Object,
+                },
+            ],
+            vec![
+                (0, 0, reloc(ObjRelocKind::PpcAddr16Ha, 2, 0)),
+                (0, 4, reloc(ObjRelocKind::PpcAddr16Lo, 2, 0)),
+                (0, 12, reloc(ObjRelocKind::PpcAddr16Ha, 3, 0)),
+                (0, 16, reloc(ObjRelocKind::PpcAddr16Lo, 3, 0)),
+            ],
+        );
+        let name =
+            |address: u32| -> &'static str { Box::leak(format!("lbl_{address:08X}").into()) };
+        let placeholder = |address: u32| Sym {
+            name: name(address),
+            section: None,
+            address: 0,
+            size: 0,
+            kind: ObjSymbolKind::Unknown,
+        };
+        let target = object(
+            vec![section(".text", ObjSectionKind::Code, both(), 24)],
+            &[
+                function("First", 0),
+                function("Second", 12),
+                placeholder(first),
+                placeholder(second),
+            ],
+            vec![
+                (0, 0, reloc(ObjRelocKind::PpcAddr16Ha, 2, 0)),
+                (0, 4, reloc(ObjRelocKind::PpcAddr16Lo, 2, 0)),
+                (0, 12, reloc(ObjRelocKind::PpcAddr16Ha, 3, 0)),
+                (0, 16, reloc(ObjRelocKind::PpcAddr16Lo, 3, 0)),
+            ],
+        );
+        (source, target)
+    }
+
+    #[test]
+    fn a_reordered_pool_is_bounded_by_the_constants_paired_one_by_one() {
+        let (source, target) = reordered_pool(0x8042_1004, 0x8042_1000);
+        let symbols = [
+            layout("lbl_80421004", ".sdata2", 0x8042_1004, Some(4)),
+            layout("lbl_80421000", ".sdata2", 0x8042_1000, Some(4)),
+        ];
+        // The target holds the same two floats in the opposite order.
+        let swapped = [POOL[4], POOL[5], POOL[6], POOL[7], POOL[0], POOL[1], POOL[2], POOL[3]];
+        let pairing = pair(&source, &target, &TargetIndex::new(&symbols), Some(&image(swapped)));
+        assert_eq!(pairing.functions, 2, "{pairing:#?}");
+        assert_eq!(pairing.symbols.len(), 2, "{pairing:#?}");
+        assert_eq!(pairing.sections.len(), 1, "{pairing:#?}");
+        let section = &pairing.sections[0];
+        assert_eq!((section.start, section.end), (0x8042_1000, 0x8042_1008));
+        assert!(section.reordered);
+        assert_eq!(section.bytes, BytesCheck::Equal);
+    }
+
+    #[test]
+    fn a_reordered_pool_whose_constants_differ_gets_no_range() {
+        let (source, target) = reordered_pool(0x8042_1004, 0x8042_1000);
+        let symbols = [
+            layout("lbl_80421004", ".sdata2", 0x8042_1004, Some(4)),
+            layout("lbl_80421000", ".sdata2", 0x8042_1000, Some(4)),
+        ];
+        // The bytes are in source order, so neither constant is where it was
+        // paired.
+        let pairing = pair(&source, &target, &TargetIndex::new(&symbols), Some(&image(POOL)));
+        assert!(pairing.symbols.is_empty(), "{pairing:#?}");
+        assert!(pairing.sections.is_empty(), "{pairing:#?}");
+    }
+
+    #[test]
+    fn a_reordered_pool_spread_wider_than_the_section_gets_no_range() {
+        let (source, target) = reordered_pool(0x8042_1010, 0x8042_1000);
+        let symbols = [
+            layout("lbl_80421010", ".sdata2", 0x8042_1010, Some(4)),
+            layout("lbl_80421000", ".sdata2", 0x8042_1000, Some(4)),
+        ];
+        let pairing = pair(&source, &target, &TargetIndex::new(&symbols), None);
+        assert_eq!(pairing.symbols.len(), 2, "{pairing:#?}");
+        assert!(pairing.sections.is_empty(), "{pairing:#?}");
+        assert!(pairing.rejected.iter().any(|r| r.reason.contains("span")), "{pairing:#?}");
     }
 }

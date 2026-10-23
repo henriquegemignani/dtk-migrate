@@ -262,3 +262,97 @@ fn a_section_whose_references_share_one_delta_gets_a_range() {
     assert_eq!((section.start, section.end), (0x8042_1000, 0x8042_1008));
     assert_eq!(section.bytes, BytesCheck::Equal);
 }
+
+/// Two functions, each loading one float of an `.sdata2` pool, as an object:
+/// `references` are the symbols (by index) the two `lis`/`lfs` pairs name.
+fn pool_object(
+    side: DiffSide,
+    data: Vec<ObjSection>,
+    symbols: &[Sym],
+    references: [u32; 2],
+) -> Compiled {
+    let words = [0x3C60_0000u32, 0xC022_0000, 0x4E80_0020, 0x3C60_0000, 0xC042_0000, 0x4E80_0020];
+    let mut text = section(
+        ".text",
+        ObjSectionKind::Code,
+        words.into_iter().flat_map(u32::to_be_bytes).collect(),
+    );
+    let mut relocations = Vec::new();
+    for (function, reference) in references.into_iter().enumerate() {
+        for (offset, kind) in [(0, ObjRelocKind::PpcAddr16Ha), (4, ObjRelocKind::PpcAddr16Lo)] {
+            relocations.push((function as u32 * 12 + offset, ObjReloc {
+                kind,
+                target_symbol: reference,
+                addend: 0,
+                module: None,
+            }));
+        }
+    }
+    text.relocations = ObjRelocations::new(relocations).unwrap();
+    let mut sections = vec![text];
+    sections.extend(data);
+    for (index, section) in sections.iter_mut().enumerate() {
+        section.elf_index = index as u32 + 1;
+    }
+    let functions = [
+        Sym("First", Some(0), 0, 12, ObjSymbolKind::Function),
+        Sym("Second", Some(0), 12, 12, ObjSymbolKind::Function),
+    ];
+    let symbols = functions
+        .iter()
+        .chain(symbols)
+        .map(|Sym(name, section, address, size, kind)| ObjSymbol {
+            name: (*name).into(),
+            address: *address,
+            section: *section,
+            size: *size,
+            size_known: *size > 0,
+            kind: *kind,
+            flags: ObjSymbolFlagSet(ObjSymbolFlags::Global.into()),
+            ..Default::default()
+        })
+        .collect();
+    let info = ObjInfo::new(
+        ObjKind::Relocatable,
+        ObjArchitecture::PowerPc,
+        "test".into(),
+        symbols,
+        sections,
+    );
+    Compiled::parse(&write_elf(&info, true).unwrap(), side).unwrap()
+}
+
+#[test]
+fn a_pool_the_target_ordered_differently_is_bounded_by_its_paired_constants() {
+    // The source pool is `1.0, 2.0`; the target has `2.0, 1.0`.
+    let source = pool_object(
+        DiffSide::Base,
+        vec![section(".sdata2", ObjSectionKind::Data, POOL.to_vec())],
+        &[
+            Sym("@41", Some(1), 0, 4, ObjSymbolKind::Object),
+            Sym("@42", Some(1), 4, 4, ObjSymbolKind::Object),
+        ],
+        [2, 3],
+    );
+    let target = pool_object(
+        DiffSide::Target,
+        vec![],
+        &[
+            Sym("lbl_80421004", None, 0, 0, ObjSymbolKind::Unknown),
+            Sym("lbl_80421000", None, 0, 0, ObjSymbolKind::Unknown),
+        ],
+        [2, 3],
+    );
+    let symbols = [
+        layout("lbl_80421004", ".sdata2", 0x8042_1004, 4),
+        layout("lbl_80421000", ".sdata2", 0x8042_1000, 4),
+    ];
+    let swapped = [POOL[4], POOL[5], POOL[6], POOL[7], POOL[0], POOL[1], POOL[2], POOL[3]];
+    let pairing =
+        pair(&source.object, &target.object, &TargetIndex::new(&symbols), Some(&image(&swapped)));
+    assert_eq!(pairing.sections.len(), 1, "{pairing:#?}");
+    let section = &pairing.sections[0];
+    assert_eq!((section.start, section.end), (0x8042_1000, 0x8042_1008));
+    assert!(section.reordered);
+    assert_eq!(section.bytes, BytesCheck::Equal);
+}

@@ -776,8 +776,16 @@ split of that section, that starts on a word, and that keeps every certified
 seam. It carries the attributes of the unit's source split of that section. With
 the target DOL available, the range is proposed only if the section's bytes,
 and the zero padding after them, equal the DOL's apart from the fields
-relocations fill in; a section whose references use different deltas (the
-target pooled its constants in a different order) gets no range. As for the
+relocations fill in. A section whose references use different deltas (the
+target pooled its constants in a different order) is bounded instead by the
+constants that were paired one by one: each source symbol of the section whose
+references agree on one target address, that no other symbol maps to, that sits
+in the same section of the target and whose bytes equal the DOL's. The range
+starts at the lowest such address and runs for the section's size; it is
+refused if those constants span more than that, since the section's other
+constants would then have to be outside it (`reordered` in the evidence). A
+constant nothing references can sit before the first paired one, which only the
+link can show. As for the
 gap duplicates above, the range is kept only if the unit then links from
 source and matches retail, up to the same three rounds, and the evidence
 (`pairing` in the stage's `applied` record) lists each paired section with its

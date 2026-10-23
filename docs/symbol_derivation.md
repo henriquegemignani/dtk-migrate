@@ -167,6 +167,10 @@ literal such as `@41` is never a name, since those numbers are per object. It is
 functions make at least two references, and `probable` otherwise. The same
 pairing bounds data sections in verify (see [coverage](coverage.md)).
 
+Relocations of kind `NONE` are left out of both sides: they fill no bits and
+reference nothing to pair, and mwcc and dtk each emit them where the other does
+not (a retail function can carry dozens that the compiled one lacks).
+
 ### `function-position`
 
 A placeholder sitting between two agreeing names is the function the source
