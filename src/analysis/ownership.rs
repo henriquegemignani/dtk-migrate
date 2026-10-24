@@ -3321,6 +3321,9 @@ pub fn identify_units_with_data(
         .graph
         .iter()
         .filter(|(node, _)| !matched_source.contains(node))
+        // Validation requires these to be in the source function inventory,
+        // which only holds functions that belong to a source unit.
+        .filter(|(node, _)| source.unit_of(*node).is_some())
         .filter_map(|(_, function)| {
             let references: Vec<_> = function
                 .refs

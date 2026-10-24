@@ -391,6 +391,7 @@ pub fn context(
         build_jobs: run.build_jobs,
         build_timeout: run.build_timeout_seconds.map(Duration::from_secs_f64),
         cancel,
+        compile_unsplit: run.unmatched_splits,
     }
 }
 

@@ -71,6 +71,9 @@ pub struct BuildContext {
     /// A cold baseline build is deliberately unbounded.
     pub build_timeout: Option<Duration>,
     pub cancel: Option<Cancel>,
+    /// Also compile configured sources that have no split in the target, so
+    /// name-supported splits have a compiled object to compare against.
+    pub compile_unsplit: bool,
 }
 
 impl BuildContext {
@@ -177,6 +180,9 @@ impl BuildContext {
                 args.push(path.display().to_string());
             }
         }
+        if self.compile_unsplit && self.supports_compile_unsplit() {
+            args.push("--compile-unsplit".into());
+        }
         configure::skip_compile_commands(&self.root, &mut args);
         self.run(&self.tools.python.clone(), &args, false, None)
             .map_err(|e| anyhow::anyhow!(e))
@@ -203,6 +209,12 @@ impl BuildContext {
             .map_err(|e| anyhow::anyhow!(e))
             .context("Failed to restore the project's ordinary build graph")?;
         Ok(())
+    }
+
+    /// Whether this project's `configure.py` can compile sources without a split.
+    fn supports_compile_unsplit(&self) -> bool {
+        std::fs::read_to_string(self.root.join("configure.py"))
+            .is_ok_and(|text| text.contains("--compile-unsplit"))
     }
 
     /// Whether this project's `configure.py` can emit a relocatable graph.
