@@ -330,3 +330,23 @@ figures are a floor on the evidence available, not a proof of the rest.
 
 `--exact-percent` and `--order-percent` expose both thresholds; setting either
 above 100 disables that rule.
+
+## Body shape (`body-shape`)
+
+Units whose compiled source object has no extracted target object (no split
+yet) cannot use the per-unit methods above. `derive/shape.rs` compares every
+function of those objects with every placeholder function in the target
+binary instead.
+
+A body is reduced to its opcode sequence (primary opcode, extended opcode for
+groups 4/19/31/59/63, link bit for branches), cut into overlapping runs of
+four, and compared by Jaccard overlap. A pairing is proposed when the lengths
+are within 0.6-1.6, the overlap is at least 0.6 and it leads the next distinct
+name by at least 0.1. A name defined several times with differing shapes is
+dropped, and so is a name wanted by two targets. Proposals are `probable`
+tier, carry the overlap in `percent` and the lead in `margin`, and do not
+claim ownership: weak copies make the defining object meaningless as an owner,
+so the build and hash check decide.
+
+On R3ME01 (from G2ME01 source) this reproduced an earlier prototype's
+pairings (739 of 740 shared agreed).

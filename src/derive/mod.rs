@@ -20,6 +20,7 @@ pub mod explore;
 pub mod objects;
 pub mod ordering;
 pub mod propose;
+pub mod shape;
 pub mod validate;
 
 use std::{
@@ -323,6 +324,31 @@ pub fn unit_objects(
     Ok(units)
 }
 
+/// Compiled source objects that the target has no extracted object for.
+///
+/// These are units the target has no split for yet, so nothing else compares
+/// them with the binary.
+pub fn unsplit_objects(root: &Path, version: &str, module: &str) -> Result<Vec<(String, PathBuf)>> {
+    let selected = config::find(root, version, module)?;
+    let (source_root, target_root) = (selected.sources(), selected.extracted());
+    let mut objects = Vec::new();
+    if !source_root.is_dir() {
+        return Ok(objects);
+    }
+    for entry in walkdir::WalkDir::new(&source_root).sort_by_file_name() {
+        let entry = entry?;
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|e| e != "o") {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(&source_root)?;
+        if !target_root.join(relative).is_file() {
+            let unit = relative.to_string_lossy().replace('\\', "/");
+            objects.push((unit, entry.path().to_path_buf()));
+        }
+    }
+    Ok(objects)
+}
+
 /// What one unit contributed: its proposals, whatever stopped it, its identity,
 /// and the names its source defines.
 type UnitResult = (Vec<Proposal>, Option<Failure>, String, BTreeSet<String>);
@@ -480,6 +506,23 @@ pub fn derive(request: &Request) -> Result<Report> {
         }
         for name in defines {
             defined_by.entry(name).or_default().insert(key.clone());
+        }
+    }
+
+    // Units without a split reach the binary only through their shape.
+    if let (true, Some(image)) = (selected.is_dol, image.as_ref()) {
+        match (
+            unsplit_objects(&request.root, &request.version, &request.module),
+            std::fs::read_to_string(&selected.symbols),
+        ) {
+            (Ok(objects), Ok(symbols)) => {
+                proposals.extend(shape::propose(&objects, &symbols, image)?);
+            }
+            (Err(error), _) => failures.push(Failure {
+                unit: "<unsplit-object-inventory>".into(),
+                error: format!("{error:#}"),
+            }),
+            _ => {}
         }
     }
 
