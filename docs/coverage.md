@@ -802,3 +802,15 @@ regenerated successor has a different identity and is asked afresh.
 
 A failed trial also does not rule out a mutually dependent group: two files that
 only link together will both fail alone.
+
+## Name-supported splits (opt-in)
+
+`run --unmatched-splits` lets discover also propose a code range whose
+ownership rests on names alone (`stages/name_support.rs`): at least two, and at
+least half, of the strong (non-weak) functions the unit's compiled object
+defines are named inside the proposed `.text` range, and the range holds no more
+than twice that many functions. These candidates carry `name_support` instead
+of an ownership certificate, are exempt from the matched-code-gain test, and
+must still build, link and pass the retail hash check and the regression check.
+They are meant to publish NonMatching splits; the evidence is recorded per
+candidate in `discover/result.json`.

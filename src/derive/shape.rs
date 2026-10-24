@@ -158,6 +158,20 @@ pub fn read_shapes(path: &Path, unit: &str) -> Result<Vec<Shape>> {
     Ok(shapes)
 }
 
+/// The names an object defines strongly: not weak, so no other object repeats
+/// them. These are the only definitions that say which unit owns an address.
+pub fn strong_functions(path: &Path) -> Result<BTreeSet<String>> {
+    let object = objdiff_core::obj::read::read(path, &DiffObjConfig::default(), DiffSide::Base)?;
+    Ok(object
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Function && symbol.size > 0)
+        .filter(|symbol| !symbol.flags.contains(SymbolFlag::Weak))
+        .filter(|symbol| is_usable_source_name(&symbol.name))
+        .map(|symbol| symbol.name.clone())
+        .collect())
+}
+
 /// A placeholder function in the target binary, as a shape.
 #[derive(Debug, Clone)]
 pub struct Target {

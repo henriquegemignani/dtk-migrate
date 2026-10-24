@@ -99,9 +99,18 @@ pub fn stage_for_tier(
     name: &str,
     derive_tier: crate::derive::propose::Tier,
 ) -> Result<Box<dyn Stage + Send + Sync>> {
+    stage_with(name, derive_tier, false)
+}
+
+/// [`stage_for_tier`] with discover's opt-in name-supported splits.
+pub fn stage_with(
+    name: &str,
+    derive_tier: crate::derive::propose::Tier,
+    unmatched_splits: bool,
+) -> Result<Box<dyn Stage + Send + Sync>> {
     Ok(match name {
         "coverage" => Box::new(Coverage::default()),
-        "discover" => Box::new(Discover::default()),
+        "discover" => Box::new(Discover::new(unmatched_splits)),
         "verify" => Box::new(Verify),
         "derive" => Box::new(Derive { max_tier: derive_tier }),
         other => bail!("Unknown stage: {other}"),
@@ -144,6 +153,9 @@ pub struct RunRecord {
     /// The weakest tier of derived name this run builds.
     #[serde(default = "default_derive_tier")]
     pub derive_tier: crate::derive::propose::Tier,
+    /// Discover also proposes splits whose ownership rests on names alone.
+    #[serde(default)]
+    pub unmatched_splits: bool,
     pub tools: FrozenTools,
     pub environment: Environment,
     /// The environment used to fingerprint worker jobs before the first
@@ -423,7 +435,7 @@ pub fn run_stage(
     cancel: Option<Cancel>,
 ) -> Result<(PathBuf, StageResult)> {
     let started = Instant::now();
-    let stage = stage_for_tier(stage_name, run.derive_tier)?;
+    let stage = stage_with(stage_name, run.derive_tier, run.unmatched_splits)?;
     let stage_dir = dir.stage(stage_name);
     let baseline_dir = dir.baseline(stage_name);
     let prepared_path = stage_dir.join("prepared.json");

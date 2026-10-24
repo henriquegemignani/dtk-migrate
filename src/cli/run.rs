@@ -87,6 +87,12 @@ pub struct Args {
     /// checks still decide, and each such rename is recorded with its tier.
     #[arg(long, value_enum, default_value_t = crate::cli::derive::TierArg::Probable)]
     pub derive_tier: crate::cli::derive::TierArg,
+    /// Let discover propose splits whose ownership rests on names alone: most
+    /// of a unit's strong functions are named inside the range. They are built
+    /// and hash checked but need not gain matched code, and are recorded as
+    /// name-supported.
+    #[arg(long)]
+    pub unmatched_splits: bool,
     /// Continue the run with this id instead of starting a new one.
     #[arg(long, value_name = "RUN_ID")]
     pub resume: Option<String>,
@@ -291,6 +297,7 @@ fn start(root: &Path, args: &Args) -> Result<(RunDir, RunRecord)> {
         only: args.only.clone(),
         build_timeout_seconds: Some(args.build_timeout),
         derive_tier: args.derive_tier.into(),
+        unmatched_splits: args.unmatched_splits,
         environment: Environment::of(&tools)?,
         artifact_environment: None,
         coordinator_upgrades: Vec::new(),
@@ -576,6 +583,7 @@ mod tests {
             only: Vec::new(),
             build_timeout_seconds: Some(120.0),
             derive_tier: crate::derive::propose::Tier::Probable,
+            unmatched_splits: false,
             environment: Environment::of(&tools).unwrap(),
             artifact_environment: None,
             coordinator_upgrades: Vec::new(),

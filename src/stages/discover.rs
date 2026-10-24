@@ -38,18 +38,24 @@ use crate::{
     },
     stages::{
         Candidate, Event, MutationScope, Outcome, Prepared, Selections, Stage,
+        name_support::{self, NameSupport},
         refusal::{Kind as RefusalKind, Refusal},
     },
 };
 
 #[derive(Default)]
 pub struct Discover {
+    /// Also propose splits whose ownership rests on names alone.
+    pub unmatched_splits: bool,
     observations: Mutex<BTreeMap<ObservationKey, Arc<ObservationIndex>>>,
 }
 
 type ObservationKey = (u32, String, String, String, String);
 
 impl Discover {
+    /// Discovery that also proposes name-supported splits when asked.
+    pub fn new(unmatched_splits: bool) -> Self { Self { unmatched_splits, ..Default::default() } }
+
     fn observations(
         &self,
         reference: &ObservationReference,
@@ -106,6 +112,11 @@ pub struct Proposal {
     /// the code-only body survives its trial.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_data: Option<Box<Proposal>>,
+    /// Set when ownership rests on names alone rather than on independent
+    /// attribution: the split is built and hash checked, but cannot be
+    /// expected to gain matched code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_support: Option<NameSupport>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -761,11 +772,50 @@ impl Stage for Discover {
                         ownership: Some(ownership),
                         data_evidence: completion.map(|_| data_evidence.clone()),
                         fallback_data: None,
+                        name_support: None,
                     })
                 })
             })
             .collect::<Result<_>>()?;
         candidates.sort_by(compare_code_candidates);
+        if self.unmatched_splits {
+            let symbols_text = std::fs::read_to_string(&symbols_path).unwrap_or_default();
+            let owned_names: BTreeSet<String> = candidates.iter().map(|c| c.name.clone()).collect();
+            let mut supported: Vec<(u32, Candidate)> = Vec::new();
+            for (name, code_lines) in code_proposals(&proposals, &blocks) {
+                if owned_names.contains(&name) {
+                    continue;
+                }
+                let before = blocks.get(&name).cloned().unwrap_or_default();
+                let Some(support) = name_support_of(ctx, &name, &code_lines, &symbols_text) else {
+                    continue;
+                };
+                if !support.permits() {
+                    continue;
+                }
+                let bytes = claimed_code_bytes(&code_lines);
+                supported.push((
+                    bytes,
+                    candidate(name, Proposal {
+                        lines: code_lines,
+                        kind: Kind::Code,
+                        before_lines: before,
+                        code_lines: None,
+                        observation: None,
+                        ownership: None,
+                        data_evidence: None,
+                        fallback_data: None,
+                        name_support: Some(support),
+                    })?,
+                ));
+            }
+            supported.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+            events.push(
+                Event::new("", "name-supported-splits")
+                    .because(format!("{} candidates", supported.len())),
+            );
+            candidates.extend(supported.into_iter().map(|(_, c)| c));
+        }
         if let Some(limit) = limit {
             candidates.truncate(limit);
         }
@@ -790,6 +840,7 @@ impl Stage for Discover {
                         ownership: None,
                         data_evidence: Some(data_evidence.clone()),
                         fallback_data: None,
+                        name_support: None,
                     })
                 })
                 .collect::<Result<_>>()?;
@@ -937,6 +988,25 @@ impl Discover {
 pub fn config_path(ctx: &BuildContext, version: &str) -> typed_path::Utf8NativePathBuf {
     let path = ctx.root.join("config").join(version).join("config.yml");
     typed_path::Utf8NativePathBuf::from(path.to_string_lossy().into_owned())
+}
+
+/// The compiled object a unit's source produced for the target version.
+fn compiled_object(ctx: &BuildContext, unit: &str) -> std::path::PathBuf {
+    let stem = unit.rsplit_once('.').map_or(unit, |(stem, _)| stem);
+    ctx.root.join("build").join(&ctx.target).join("src").join(format!("{stem}.o"))
+}
+
+/// What the target symbols say about `lines`' code range, given the strong
+/// definitions of the unit's compiled object.
+fn name_support_of(
+    ctx: &BuildContext,
+    unit: &str,
+    lines: &[String],
+    symbols: &str,
+) -> Option<NameSupport> {
+    let strong = crate::derive::shape::strong_functions(&compiled_object(ctx, unit)).ok()?;
+    let text = code_ranges(lines).get(".text")?.clone();
+    Some(name_support::assess(symbols, &strong, &text))
 }
 
 fn candidate(name: String, proposal: Proposal) -> Result<Candidate> {
@@ -1151,6 +1221,7 @@ impl Trials {
         let (keep, dropped): (Vec<&Candidate>, Vec<&Candidate>) =
             batch.iter().partition(|candidate| {
                 proposal_of(candidate).map(|p| p.kind).unwrap_or(Kind::Code) == Kind::Data
+                    || proposal_of(candidate).is_ok_and(|p| p.name_support.is_some())
                     || matched(&tested, &candidate.name) > matched(&self.report, &candidate.name)
             });
         if !dropped.is_empty() {
@@ -1236,6 +1307,21 @@ fn validate_proposal(
 ) -> Result<()> {
     if proposal.kind == Kind::Data {
         return validate_data_proposal(ctx, unit, proposal, applied);
+    }
+    if let Some(recorded) = &proposal.name_support {
+        let blocks =
+            Splits::read(&ctx.root.join("config").join(&ctx.target).join("splits.txt"))?.blocks;
+        let expected = if applied { &proposal.lines } else { &proposal.before_lines };
+        if blocks.get(unit).map(Vec::as_slice).unwrap_or_default() != expected {
+            bail!("Name-supported baseline changed for {unit}");
+        }
+        let symbols =
+            std::fs::read_to_string(ctx.root.join("config").join(&ctx.target).join("symbols.txt"))?;
+        let actual = name_support_of(ctx, unit, &proposal.lines, &symbols);
+        if actual.as_ref() != Some(recorded) || !recorded.permits() {
+            bail!("Name support is stale for {unit}");
+        }
+        return Ok(());
     }
     if proposal.code_lines.is_some() != proposal.data_evidence.is_some() {
         bail!("Discovery code/data evidence is incomplete for {unit}");
@@ -1565,6 +1651,7 @@ mod tests {
                 file: "data-evidence.json".into(),
             }),
             fallback_data: None,
+            name_support: None,
         })
         .unwrap();
         let data_only = candidate("a.cpp".into(), Proposal {
@@ -1576,6 +1663,7 @@ mod tests {
             ownership: None,
             data_evidence: proposal_of(&joint).unwrap().data_evidence,
             fallback_data: None,
+            name_support: None,
         })
         .unwrap();
         let mut joint_proposal = proposal_of(&joint).unwrap();
@@ -1729,6 +1817,7 @@ mod tests {
                 }),
                 data_evidence: None,
                 fallback_data: None,
+                name_support: None,
             })
             .unwrap()
         };
