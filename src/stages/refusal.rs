@@ -242,7 +242,7 @@ fn rejoinings<'a>(pieces: &'a [&'a str]) -> impl Iterator<Item = String> + 'a {
     masks.into_iter().map(move |closed| {
         let mut message = String::new();
         for (index, piece) in pieces.iter().enumerate() {
-            if index > 0 && closed & (1 << (index - 1)) == 0 {
+            if index > 0 && closed.checked_shr(index as u32 - 1).is_none_or(|bits| bits & 1 == 0) {
                 message.push(' ');
             }
             message.push_str(piece);

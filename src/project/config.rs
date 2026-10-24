@@ -66,6 +66,21 @@ pub fn config_path(root: &Path, version: &str) -> PathBuf {
     root.join("config").join(version).join("config.yml")
 }
 
+/// The linked ELF of a version's DOL, relative to `build/<version>/`.
+///
+/// Named after the original executable's file stem: `main.elf` for GameCube
+/// projects, `rs5mp2_p.elf` for Echoes' Wii build.
+pub fn dol_elf_name(root: &Path, version: &str) -> String {
+    read_config(root, version)
+        .ok()
+        .and_then(|c| {
+            Path::new(c.base.object.as_str())
+                .file_stem()
+                .map(|s| format!("{}.elf", s.to_string_lossy()))
+        })
+        .unwrap_or_else(|| "main.elf".to_string())
+}
+
 /// Every module of one version, the DOL first.
 ///
 /// A module entry without both a splits and a symbols file is skipped: there is

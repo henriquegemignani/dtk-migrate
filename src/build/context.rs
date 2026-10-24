@@ -294,7 +294,7 @@ impl BuildContext {
         // Reading the bytes as well costs nothing and catches a stale or
         // misconfigured checksum target, which would otherwise pass a candidate
         // whose output is not retail at all.
-        let retail = self.root.join("orig").join(&self.target).join("sys/main.dol");
+        let retail = self.retail_dol();
         let built = self.built_dol();
         if std::fs::read(&retail).ok() != std::fs::read(&built).ok() {
             bail!(ValidationError(
@@ -316,8 +316,31 @@ impl BuildContext {
     /// Builds a candidate under the run's bounded trial timeout.
     pub fn trial_build(&self) -> Result<Report> { self.build(self.build_timeout) }
 
+    /// The DOL path recorded in the target's `config.yml`, relative to the
+    /// version's object base. Falls back to `sys/main.dol` when the
+    /// configuration cannot be read.
+    fn configured_object(&self) -> String {
+        crate::project::config::read_config(&self.root, &self.target)
+            .map(|c| c.base.object.to_string())
+            .unwrap_or_else(|_| "sys/main.dol".to_string())
+    }
+
+    /// The original executable the build must reproduce.
+    pub fn retail_dol(&self) -> PathBuf {
+        let base = crate::project::config::read_config(&self.root, &self.target)
+            .ok()
+            .and_then(|c| c.object_base.map(|b| PathBuf::from(b.as_str())))
+            .unwrap_or_else(|| PathBuf::from("orig").join(&self.target));
+        self.root.join(base).join(self.configured_object())
+    }
+
+    /// The linked executable, named after the original's file name (`main.dol`
+    /// for GameCube projects, but e.g. `rs5mp2_p.dol` for Wii ones).
     pub fn built_dol(&self) -> PathBuf {
-        self.root.join("build").join(&self.target).join("main.dol")
+        let object = self.configured_object();
+        let name =
+            Path::new(&object).file_name().map_or_else(|| "main.dol".into(), |n| n.to_os_string());
+        self.root.join("build").join(&self.target).join(name)
     }
 
     pub fn dol_sha1(&self) -> Result<String> {

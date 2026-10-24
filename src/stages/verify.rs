@@ -1175,7 +1175,11 @@ pub fn validate(
 /// The objects a module's link actually consumes, as Ninja reports them.
 fn link_inputs(ctx: &BuildContext, module: Option<&str>) -> Result<BTreeSet<String>> {
     let artifact = match module {
-        None => format!("build/{}/main.elf", ctx.target),
+        None => format!(
+            "build/{}/{}",
+            ctx.target,
+            crate::project::config::dol_elf_name(&ctx.root, &ctx.target)
+        ),
         Some(module) => format!("build/{}/{module}/{module}.plf", ctx.target),
     };
     let args = vec!["-t".to_string(), "inputs".to_string(), artifact.clone()];

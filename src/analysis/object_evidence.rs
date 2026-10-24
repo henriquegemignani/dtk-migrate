@@ -823,7 +823,11 @@ fn main_executable_unit(entry: &ObjdiffUnit) -> bool {
 
 fn linked_object_inputs(root: &Path, version: &str) -> Option<Vec<String>> {
     let output = Command::new("ninja")
-        .args(["-t", "inputs", &format!("build/{version}/main.elf")])
+        .args([
+            "-t",
+            "inputs",
+            &format!("build/{version}/{}", crate::project::config::dol_elf_name(root, version)),
+        ])
         .current_dir(root)
         .output()
         .ok()?;

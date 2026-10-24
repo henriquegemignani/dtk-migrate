@@ -1662,8 +1662,15 @@ fn validate_extracted_inputs(
     names: &BTreeSet<&str>,
     report: &Report,
 ) -> Result<()> {
-    let args =
-        vec!["-t".to_string(), "inputs".to_string(), format!("build/{}/main.elf", ctx.target)];
+    let args = vec![
+        "-t".to_string(),
+        "inputs".to_string(),
+        format!(
+            "build/{}/{}",
+            ctx.target,
+            crate::project::config::dol_elf_name(&ctx.root, &ctx.target)
+        ),
+    ];
     let output = ctx
         .run(&ctx.tools.ninja.clone(), &args, true, None)
         .map_err(anyhow::Error::new)
